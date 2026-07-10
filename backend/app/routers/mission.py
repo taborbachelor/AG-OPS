@@ -1,7 +1,5 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from dronekit import LocationGlobalRelative, Command
-from pymavlink import mavutil
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
@@ -19,43 +17,26 @@ class MissionUpload(BaseModel):
 
 @router.get("/download")
 async def download_mission():
-    v = vehicle_manager.vehicle
-    if not v:
+    if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    cmds = v.commands
-    cmds.download()
-    cmds.wait_ready()
-    waypoints = []
-    for cmd in cmds:
-        if cmd.command == mavutil.mavlink.MAV_CMD_NAV_WAYPOINT:
-            waypoints.append({"lat": cmd.x, "lon": cmd.y, "alt": cmd.z})
+    waypoints = vehicle_manager.download_mission()
     return {"waypoints": waypoints}
 
 
 @router.post("/upload")
 async def upload_mission(mission: MissionUpload):
-    v = vehicle_manager.vehicle
-    if not v:
+    if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    cmds = v.commands
-    cmds.clear()
-    for wp in mission.waypoints:
-        cmd = Command(
-            0, 0, 0,
-            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
-            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-            0, 0, 0, 0, 0, 0,
-            wp.lat, wp.lon, wp.alt,
-        )
-        cmds.add(cmd)
-    cmds.upload()
-    return {"status": "uploaded", "count": len(mission.waypoints)}
+    wps = [{"lat": wp.lat, "lon": wp.lon, "alt": wp.alt} for wp in mission.waypoints]
+    success = vehicle_manager.upload_mission(wps)
+    if not success:
+        raise HTTPException(500, "Mission upload failed")
+    return {"status": "uploaded", "count": len(wps)}
 
 
 @router.post("/start")
 async def start_mission():
-    v = vehicle_manager.vehicle
-    if not v:
+    if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    v.mode = "AUTO"
+    vehicle_manager.set_mode("AUTO")
     return {"status": "mission started"}

@@ -38,14 +38,6 @@ async def disarm():
     return {"status": "disarmed"}
 
 
-@router.get("/params")
-async def get_params():
-    v = vehicle_manager.vehicle
-    if not v:
-        raise HTTPException(400, "Not connected")
-    return {"params": dict(v.parameters)}
-
-
 class ParamUpdate(BaseModel):
     name: str
     value: float
@@ -53,8 +45,7 @@ class ParamUpdate(BaseModel):
 
 @router.post("/params")
 async def set_param(req: ParamUpdate):
-    v = vehicle_manager.vehicle
-    if not v:
+    if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    v.parameters[req.name] = req.value
+    vehicle_manager.set_param(req.name, req.value)
     return {"status": "ok", "param": req.name, "value": req.value}
