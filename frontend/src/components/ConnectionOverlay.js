@@ -31,7 +31,9 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ connection_string: selectedPort, baud }),
       });
-      if (res.ok) {
+      // 400 = "already connected" -> the backend is linked (e.g. to SITL), so
+      // treat it as success and let the dashboard start streaming.
+      if (res.ok || res.status === 400) {
         setConnected(true);
         onClose();
       }

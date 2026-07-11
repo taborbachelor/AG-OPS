@@ -22,6 +22,15 @@ function App() {
   const [showConnect, setShowConnect] = useState(false);
   const wsRef = useRef(null);
 
+  // On load, adopt an existing backend connection (e.g. SITL already linked,
+  // or the page was refreshed mid-flight) so the dashboard wakes up on its own.
+  useEffect(() => {
+    fetch('http://localhost:8000/api/connection/status')
+      .then((r) => r.json())
+      .then((s) => { if (s.connected) setConnected(true); })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!connected) return;
 
