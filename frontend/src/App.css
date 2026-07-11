@@ -139,9 +139,14 @@ body {
   width: 100%;
 }
 
-/* Dark map tiles */
-.leaflet-tile-pane {
+/* Street map: heavily darkened to match the HUD. Satellite/hybrid get only a
+   mild cinematic dim so the imagery stays readable. */
+.layer-map .leaflet-tile-pane {
   filter: saturate(0.3) brightness(0.55) contrast(1.1);
+}
+.layer-sat .leaflet-tile-pane,
+.layer-hybrid .leaflet-tile-pane {
+  filter: brightness(0.82) contrast(1.05) saturate(1.05);
 }
 
 .leaflet-control-zoom {
@@ -852,3 +857,69 @@ body {
   background: rgba(0, 229, 255, 0.1);
   color: var(--accent);
 }
+
+/* ===== MAP CONTROLS ===== */
+.map-controls {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  z-index: 800;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.layer-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+}
+
+.map-ctrl-btn {
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.map-ctrl-btn:hover {
+  color: var(--text-primary);
+}
+
+.map-ctrl-btn.active {
+  background: rgba(0, 229, 255, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.map-ctrl-btn.wide {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  width: 100%;
+  text-align: center;
+}
+
+.map-ctrl-btn.wide.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Keep the OSM attribution subtle and on-theme */
+.leaflet-control-attribution {
+  background: rgba(10, 15, 28, 0.6) !important;
+  color: var(--text-dim) !important;
+  font-size: 9px !important;
+}
+.leaflet-control-attribution a { color: var(--text-secondary) !important; }
