@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 * {
   margin: 0;
@@ -17,8 +17,10 @@
   --text-primary: #e0e8f0;
   --text-secondary: rgba(160, 180, 200, 0.7);
   --text-dim: rgba(120, 140, 160, 0.5);
-  --font-display: 'Orbitron', monospace;
-  --font-body: 'Rajdhani', 'Segoe UI', sans-serif;
+  /* One typeface everywhere — hierarchy via weight, not novelty fonts.
+     Numeric readouts stay steady thanks to tabular-nums (set on body). */
+  --font-display: 'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
 }
 
 body {
@@ -1634,4 +1636,114 @@ body {
   text-align: center;
   background: rgba(255, 23, 68, 0.12);
   color: var(--accent-red);
+}
+
+/* ===== MODERN TYPE TUNING =====
+   Single-typeface system: Inter everywhere, tabular numerals for steady
+   readouts, hierarchy via weight, letter-spacing kept subtle (em-based). */
+
+body {
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+.brand-title {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+.status-chip {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.status-value {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mode-badge {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.armed-pill {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.gauge-value {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.gauge-unit,
+.gauge-label {
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+.telemetry-item-value {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.telemetry-item-label {
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+.nav-btn span {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.compass-heading,
+.battery-bar-label,
+.rc-val,
+.rc-ch,
+.io-in,
+.io-out,
+.thr-val,
+.playback-time,
+.log-when,
+.launch-alt {
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.connection-title,
+.qc-title,
+.qc-sub,
+.rc-manual-head,
+.safety-card-head,
+.video-pip-label,
+.rc-status-line,
+.airborne-status,
+.launch-label,
+.launch-btn,
+.map-ctrl-btn {
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.wp-seq,
+.compass-label {
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.log-name {
+  letter-spacing: 0.02em;
+  font-weight: 600;
 }

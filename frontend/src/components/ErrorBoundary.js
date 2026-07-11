@@ -23,7 +23,7 @@ class ErrorBoundary extends React.Component {
         <div style={{
           position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center', gap: 16,
-          background: '#0a0e17', color: '#e0e8f0', fontFamily: 'Rajdhani, sans-serif',
+          background: '#0a0e17', color: '#e0e8f0', fontFamily: 'Inter, system-ui, sans-serif',
           textAlign: 'center', padding: 24,
         }}>
           <div style={{ fontSize: 40 }}>⚠</div>
@@ -40,7 +40,7 @@ class ErrorBoundary extends React.Component {
             style={{
               padding: '8px 20px', borderRadius: 6, border: '1px solid #00e5ff',
               background: 'rgba(0,229,255,0.15)', color: '#00e5ff', cursor: 'pointer',
-              fontFamily: 'Orbitron, monospace', fontSize: 12, letterSpacing: 1,
+              fontFamily: 'Inter, system-ui, sans-serif', fontWeight: 700, fontSize: 12, letterSpacing: '0.08em',
             }}>
             RELOAD
           </button>

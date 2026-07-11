@@ -44,8 +44,8 @@ const homeIcon = L.divIcon({
     width: 22px; height: 22px; background: rgba(0,230,118,0.9);
     border: 2px solid #fff; border-radius: 4px;
     display:flex; align-items:center; justify-content:center;
-    color:#04121f; font-weight:700; font-size:12px;
-    font-family:'Orbitron',monospace; box-shadow:0 0 8px rgba(0,230,118,0.6);">H</div>`,
+    color:#04121f; font-weight:800; font-size:12px;
+    font-family:'Inter',system-ui,sans-serif; box-shadow:0 0 8px rgba(0,230,118,0.6);">H</div>`,
   iconSize: [22, 22],
   iconAnchor: [11, 11],
   className: '',
@@ -65,8 +65,8 @@ function waypointIcon(seq, command, draggable) {
       box-shadow: 0 0 10px ${color}99;
       display: flex; align-items: center; justify-content: center;
       cursor: ${draggable ? 'grab' : 'default'};">
-      <span style="transform: rotate(45deg); color: #04121f; font-weight: 700;
-        font-size: 12px; font-family: 'Orbitron', monospace;">${seq}</span>
+      <span style="transform: rotate(45deg); color: #04121f; font-weight: 800;
+        font-size: 12px; font-family: 'Inter', system-ui, sans-serif;">${seq}</span>
     </div>`,
     iconSize: [26, 26],
     iconAnchor: [13, 26],
