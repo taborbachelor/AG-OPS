@@ -17,3 +17,4 @@ sitl/*.BIN
 sitl/logs/
 sitl/mav.parm
 sitl/*.tlog
+sitl/terrain/
