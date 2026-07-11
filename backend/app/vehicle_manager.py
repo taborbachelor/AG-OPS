@@ -77,6 +77,10 @@ class VehicleManager:
         try:
             self.connection = mavutil.mavlink_connection(connection_string, baud=baud)
             self.connection.wait_heartbeat(timeout=30)
+            # Fresh vehicle: clear any telemetry/home left over from a previous
+            # connection so we never show a different vehicle's stale data.
+            self.telemetry = TelemetryData()
+            self.home_lat = self.home_lon = self.home_alt = 0.0
             self.connected = True
             self.connection_string = connection_string
             self._last_heartbeat = time.time()
