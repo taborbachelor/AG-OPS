@@ -7,3 +7,13 @@ dist/
 build/
 .vscode/
 *.egg-info/
+
+# SITL binaries (large; re-fetch with sitl/download_sitl.sh)
+sitl/*.exe
+sitl/*.elf
+sitl/*.dll
+sitl/eeprom.bin
+sitl/*.BIN
+sitl/logs/
+sitl/mav.parm
+sitl/*.tlog

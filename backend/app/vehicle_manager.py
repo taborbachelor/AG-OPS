@@ -42,11 +42,23 @@ class VehicleManager:
             self.connected = True
             self.connection_string = connection_string
             self._mode_mapping = self.connection.mode_mapping()
+            self._request_data_streams()
             self._start_telemetry_loop()
             return True
         except Exception as e:
             self.connected = False
             raise ConnectionError(f"Failed to connect: {e}")
+
+    def _request_data_streams(self, rate_hz: int = 10):
+        """Ask the autopilot to stream telemetry. Without this, ArduPilot only
+        sends heartbeats and we get no attitude/position/battery data."""
+        self.connection.mav.request_data_stream_send(
+            self.connection.target_system,
+            self.connection.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_ALL,
+            rate_hz,
+            1,  # start streaming
+        )
 
     def disconnect(self):
         self._running = False
@@ -81,6 +93,8 @@ class VehicleManager:
                 elif msg_type == "GLOBAL_POSITION_INT":
                     self.telemetry.lat = msg.lat / 1e7
                     self.telemetry.lon = msg.lon / 1e7
+                    # relative_alt is height above home/launch -- what a pilot wants.
+                    # (VFR_HUD.alt is AMSL, so we deliberately don't use it for altitude.)
                     self.telemetry.altitude = msg.relative_alt / 1000.0
                     self.telemetry.heading = msg.hdg // 100
 
@@ -88,7 +102,6 @@ class VehicleManager:
                     self.telemetry.airspeed = msg.airspeed
                     self.telemetry.groundspeed = msg.groundspeed
                     self.telemetry.heading = msg.heading
-                    self.telemetry.altitude = msg.alt
 
                 elif msg_type == "ATTITUDE":
                     self.telemetry.pitch = msg.pitch
