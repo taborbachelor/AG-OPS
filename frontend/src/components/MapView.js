@@ -3,21 +3,17 @@ import { MapContainer, TileLayer, Marker, Polyline, useMap } from 'react-leaflet
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-// Fix default marker icon issue with webpack
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-});
-
+// Plane icon - glowing cyan dot
 const planeIcon = L.divIcon({
   html: `<div style="
-    width: 20px; height: 20px; background: #3b82f6; border: 2px solid white;
-    border-radius: 50%; box-shadow: 0 0 8px rgba(59,130,246,0.6);
+    width: 16px; height: 16px;
+    background: #00e5ff;
+    border: 2px solid rgba(0,229,255,0.4);
+    border-radius: 50%;
+    box-shadow: 0 0 12px rgba(0,229,255,0.6), 0 0 24px rgba(0,229,255,0.3);
   "></div>`,
-  iconSize: [20, 20],
-  iconAnchor: [10, 10],
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
   className: '',
 });
 
@@ -50,10 +46,15 @@ function MapView({ telemetry }) {
   const center = telemetry.lat !== 0 ? [telemetry.lat, telemetry.lon] : [39.8283, -98.5795];
 
   return (
-    <MapContainer center={center} zoom={4} style={{ height: '100%', width: '100%' }}>
+    <MapContainer
+      center={center}
+      zoom={4}
+      style={{ height: '100%', width: '100%', background: '#0a0e17' }}
+      zoomControl={false}
+    >
       <TileLayer
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        attribution='&copy; OpenStreetMap contributors'
+        attribution='&copy; OpenStreetMap'
       />
       <MapUpdater lat={telemetry.lat} lon={telemetry.lon} />
 
@@ -62,7 +63,12 @@ function MapView({ telemetry }) {
       )}
 
       {trailRef.current.length > 1 && (
-        <Polyline positions={trailRef.current} color="#3b82f6" weight={2} opacity={0.7} />
+        <Polyline
+          positions={trailRef.current}
+          color="#00e5ff"
+          weight={2}
+          opacity={0.5}
+        />
       )}
     </MapContainer>
   );

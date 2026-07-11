@@ -3,48 +3,60 @@ import React, { useState } from 'react';
 function VideoFeed() {
   const [streamUrl, setStreamUrl] = useState('');
   const [active, setActive] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 12px', background: '#111827', borderBottom: '1px solid #1e293b',
-      }}>
-        <span style={{ fontSize: 11, fontWeight: 600, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1 }}>
-          FPV Feed
-        </span>
-        <input
-          type="text"
-          placeholder="Stream URL (rtsp:// or http://)"
-          value={streamUrl}
-          onChange={(e) => setStreamUrl(e.target.value)}
-          style={{ flex: 1, fontSize: 11, padding: '4px 8px' }}
-        />
-        <button
-          className="btn btn-primary"
-          onClick={() => setActive(!active)}
-          style={{ fontSize: 11, padding: '4px 10px' }}
-        >
-          {active ? 'Stop' : 'Start'}
-        </button>
+    <div className="video-pip">
+      <div className="video-pip-header">
+        <span className="video-pip-label">FPV</span>
+        {active && (
+          <span className="video-pip-rec">
+            <span className="rec-dot" />
+            LIVE
+          </span>
+        )}
       </div>
 
-      <div style={{
-        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: '#000', color: '#4b5563',
-      }}>
+      <div className="video-pip-content" onClick={() => setEditing(!editing)}>
         {active && streamUrl ? (
           <img
             src={streamUrl}
-            alt="FPV Feed"
-            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+            alt="FPV"
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             onError={() => setActive(false)}
           />
         ) : (
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>📡</div>
-            <div style={{ fontSize: 13 }}>No video feed</div>
-            <div style={{ fontSize: 11, marginTop: 4 }}>Enter a stream URL to start</div>
+            {editing ? (
+              <div style={{ padding: 12 }} onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="text"
+                  placeholder="rtsp:// or http:// stream URL"
+                  value={streamUrl}
+                  onChange={(e) => setStreamUrl(e.target.value)}
+                  style={{
+                    width: '90%', padding: '6px 10px', fontSize: 11,
+                    background: 'rgba(0,10,30,0.8)',
+                    border: '1px solid var(--glass-border)',
+                    color: 'var(--text-primary)',
+                    borderRadius: 4, outline: 'none',
+                    fontFamily: 'var(--font-body)',
+                  }}
+                  autoFocus
+                />
+                <button
+                  className="control-btn"
+                  onClick={() => { setActive(true); setEditing(false); }}
+                  style={{ marginTop: 8, fontSize: 11, padding: '4px 12px' }}
+                >
+                  START
+                </button>
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>TAP TO CONFIGURE</div>
+              </>
+            )}
           </div>
         )}
       </div>
