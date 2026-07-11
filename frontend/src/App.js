@@ -9,6 +9,7 @@ import ConnectionOverlay from './components/ConnectionOverlay';
 import MissionPanel from './components/MissionPanel';
 import LaunchControl from './components/LaunchControl';
 import SafetyPanel from './components/SafetyPanel';
+import LogsPanel from './components/LogsPanel';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -34,6 +35,13 @@ function App() {
   // Safety state
   const [safety, setSafety] = useState(false);
   const [fence, setFence] = useState({ enable: false, radius: 300, alt_max: 120, action: 1 });
+
+  // Flight-log playback state. When playbackTelem is set, the map/HUD show the
+  // recorded flight instead of live telemetry.
+  const [logsMode, setLogsMode] = useState(false);
+  const [playbackTelem, setPlaybackTelem] = useState(null);
+  const [playbackPath, setPlaybackPath] = useState(null);
+  const viewTelem = playbackTelem || telemetry;
 
   // Poll the backend for the true link state every 3s. This is the single
   // source of truth for `connected`, so the UI self-heals: it reflects link
@@ -119,24 +127,28 @@ function App() {
       {/* Full-screen map background */}
       <div className="fullscreen-map">
         <MapView
-          telemetry={telemetry}
+          telemetry={viewTelem}
           planning={planning}
           waypoints={waypoints}
           onAddWaypoint={addWaypoint}
           onMoveWaypoint={moveWaypoint}
           fence={fence}
+          playbackPath={playbackPath}
         />
       </div>
 
       {/* HUD Overlays */}
       <TopBar
-        telemetry={telemetry}
+        telemetry={viewTelem}
         connected={connected}
         backendUp={backendUp}
         planning={planning}
         safety={safety}
-        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); }}
-        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); }}
+        logsMode={logsMode}
+        playback={!!playbackTelem}
+        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); setLogsMode(false); }}
+        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); setLogsMode(false); }}
+        onLogsClick={() => { setLogsMode((l) => !l); setPlanning(false); setSafety(false); }}
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
@@ -156,15 +168,17 @@ function App() {
         />
       ) : safety ? (
         <SafetyPanel connected={connected} fence={fence} setFence={setFence} />
+      ) : logsMode ? (
+        <LogsPanel setPlaybackTelem={setPlaybackTelem} setPlaybackPath={setPlaybackPath} />
       ) : (
-        <HudLeft telemetry={telemetry} />
+        <HudLeft telemetry={viewTelem} />
       )}
 
       <HudRight telemetry={telemetry} connected={connected} />
-      <HudBottom telemetry={telemetry} />
+      <HudBottom telemetry={viewTelem} />
 
-      {/* Arm + takeoff flow (hidden while planning to keep the map clear) */}
-      {!planning && <LaunchControl telemetry={telemetry} connected={connected} />}
+      {/* Arm + takeoff flow (hidden while planning or reviewing logs) */}
+      {!planning && !logsMode && <LaunchControl telemetry={telemetry} connected={connected} />}
 
       {/* Video Picture-in-Picture */}
       <VideoFeed />

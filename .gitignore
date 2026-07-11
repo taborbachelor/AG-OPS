@@ -8,6 +8,9 @@ build/
 .vscode/
 *.egg-info/
 
+# Recorded flight logs
+backend/logs/
+
 # SITL binaries (large; re-fetch with sitl/download_sitl.sh)
 sitl/*.exe
 sitl/*.elf

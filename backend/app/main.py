@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import telemetry, mission, connection, vehicle, safety
+from app.routers import telemetry, mission, connection, vehicle, safety, logs
 
 app = FastAPI(title="RC Plane GCS", version="0.1.0")
 
@@ -17,6 +17,7 @@ app.include_router(telemetry.router, prefix="/api/telemetry", tags=["telemetry"]
 app.include_router(mission.router, prefix="/api/mission", tags=["mission"])
 app.include_router(vehicle.router, prefix="/api/vehicle", tags=["vehicle"])
 app.include_router(safety.router, prefix="/api/safety", tags=["safety"])
+app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 
 
 @app.get("/api/health")

@@ -128,7 +128,7 @@ function MapControls({ layer, setLayer, follow, setFollow, onCenter }) {
   );
 }
 
-function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence }) {
+function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence, playbackPath }) {
   const [layer, setLayer] = useState('sat');
   const [follow, setFollow] = useState(true);
   const trailRef = useRef([]);
@@ -142,8 +142,9 @@ function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWay
     homeRef.current = [telemetry.lat, telemetry.lon];
   }
 
-  // Append to the travelled trail.
-  if (hasFix) {
+  // Append to the travelled trail (live only — during playback we draw the
+  // full recorded path instead).
+  if (hasFix && !playbackPath) {
     const trail = trailRef.current;
     const last = trail[trail.length - 1];
     if (!last || last[0] !== telemetry.lat || last[1] !== telemetry.lon) {
@@ -207,8 +208,13 @@ function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWay
         {/* Home / launch point */}
         {homeRef.current && <Marker position={homeRef.current} icon={homeIcon} />}
 
+        {/* Recorded flight path during playback */}
+        {playbackPath && playbackPath.length > 1 && (
+          <Polyline positions={playbackPath} color="#b388ff" weight={3} opacity={0.8} />
+        )}
+
         {/* Travelled trail + live aircraft */}
-        {trailRef.current.length > 1 && (
+        {!playbackPath && trailRef.current.length > 1 && (
           <Polyline positions={trailRef.current} color="#00e5ff" weight={2} opacity={0.6} />
         )}
         {hasFix && (

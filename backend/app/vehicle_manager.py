@@ -1,8 +1,14 @@
 import threading
 import time
+import json
+from datetime import datetime
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 from pymavlink import mavutil
+
+# Flight logs live next to the app package.
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 
 # Mission command types we support, mapped to their MAVLink NAV commands.
 _CMD_TO_MAV = {
@@ -52,6 +58,10 @@ class VehicleManager:
         # is considered lost and we mark ourselves disconnected.
         self._last_heartbeat = 0.0
         self._link_timeout = 5.0
+        # Flight logging: one file per flight (opened on arm, closed on disarm).
+        self._log_fh = None
+        self._log_start = 0.0
+        self._last_sample = 0.0
         # Serializes access to the MAVLink connection so the telemetry thread and
         # mission upload/download (which also read the link) don't steal each
         # other's messages. Held briefly per telemetry read, and for the whole
@@ -92,6 +102,7 @@ class VehicleManager:
         self._running = False
         if self._telemetry_thread:
             self._telemetry_thread.join(timeout=5)
+        self._close_log()
         if self.connection:
             self.connection.close()
         self.connection = None
@@ -125,6 +136,7 @@ class VehicleManager:
                     mode = mavutil.mode_string_v10(msg)
                     self.telemetry.mode = mode
                     self.telemetry.armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                    self._maybe_log()
 
                 elif msg_type == "GLOBAL_POSITION_INT":
                     self.telemetry.lat = msg.lat / 1e7
@@ -169,12 +181,67 @@ class VehicleManager:
         clean reconnect is possible."""
         self._running = False
         self.connected = False
+        self._close_log()
         try:
             if self.connection:
                 self.connection.close()
         except Exception:
             pass
         self.connection = None
+
+    # --- Flight logging: one JSON-lines file per flight (arm -> disarm) ---
+    def _maybe_log(self):
+        """Called on each heartbeat. Opens a log when the vehicle arms, samples
+        telemetry at ~4 Hz while armed, and closes the log when it disarms."""
+        armed = self.telemetry.armed
+        if armed and self._log_fh is None:
+            self._open_log()
+        elif not armed and self._log_fh is not None:
+            self._close_log()
+
+        if self._log_fh is None:
+            return
+        now = time.time()
+        if now - self._last_sample < 0.25:
+            return
+        self._last_sample = now
+        t = self.telemetry
+        rec = {
+            "t": round(now - self._log_start, 2),
+            "lat": t.lat, "lon": t.lon, "alt": round(t.altitude, 2),
+            "hdg": t.heading, "as": round(t.airspeed, 2), "gs": round(t.groundspeed, 2),
+            "pitch": round(t.pitch, 4), "roll": round(t.roll, 4), "yaw": round(t.yaw, 4),
+            "volt": t.battery_voltage, "batt": t.battery_level, "mode": t.mode,
+        }
+        try:
+            self._log_fh.write(json.dumps(rec) + "\n")
+            self._log_fh.flush()
+        except Exception:
+            pass
+
+    def _open_log(self):
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            name = "flight_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".jsonl"
+            self._log_fh = open(LOG_DIR / name, "w", encoding="utf-8")
+            self._log_start = time.time()
+            self._last_sample = 0.0
+            # Header line carries flight metadata (marked with "meta").
+            self._log_fh.write(json.dumps({
+                "meta": True,
+                "started": datetime.now().isoformat(timespec="seconds"),
+                "home_lat": self.home_lat, "home_lon": self.home_lon,
+            }) + "\n")
+        except Exception:
+            self._log_fh = None
+
+    def _close_log(self):
+        if self._log_fh is not None:
+            try:
+                self._log_fh.close()
+            except Exception:
+                pass
+            self._log_fh = None
 
     def set_mode(self, mode: str) -> bool:
         if not self.connection:
