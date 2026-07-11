@@ -21,8 +21,8 @@ const DEFAULT_TELEMETRY = {
 function App() {
   const [telemetry, setTelemetry] = useState(DEFAULT_TELEMETRY);
   const [connected, setConnected] = useState(false);
+  const [backendUp, setBackendUp] = useState(true);
   const [showConnect, setShowConnect] = useState(false);
-  const wsRef = useRef(null);
 
   // Mission planning state
   const [planning, setPlanning] = useState(false);
@@ -30,27 +30,53 @@ function App() {
   const [defaultAlt, setDefaultAlt] = useState(100);
   const nextId = useRef(1);
 
-  // On load, adopt an existing backend connection (e.g. SITL already linked,
-  // or the page was refreshed mid-flight) so the dashboard wakes up on its own.
+  // Poll the backend for the true link state every 3s. This is the single
+  // source of truth for `connected`, so the UI self-heals: it reflects link
+  // loss (SITL exit, radio dropout), backend restarts, and page refreshes
+  // without the user having to do anything.
   useEffect(() => {
-    fetch('http://localhost:8000/api/connection/status')
-      .then((r) => r.json())
-      .then((s) => { if (s.connected) setConnected(true); })
-      .catch(() => {});
+    let alive = true;
+    const poll = async () => {
+      try {
+        const r = await fetch('http://localhost:8000/api/connection/status');
+        const s = await r.json();
+        if (!alive) return;
+        setBackendUp(true);
+        setConnected(s.connected);
+      } catch {
+        if (!alive) return;
+        setBackendUp(false);
+        setConnected(false);
+      }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(id); };
   }, []);
 
+  // Telemetry WebSocket, opened whenever we're connected and auto-reconnected
+  // if it drops while still connected.
   useEffect(() => {
-    if (!connected) return;
-
-    const ws = new WebSocket('ws://localhost:8000/api/telemetry/ws');
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      setTelemetry(JSON.parse(event.data));
+    if (!connected) {
+      setTelemetry(DEFAULT_TELEMETRY);
+      return;
+    }
+    let closedByUs = false;
+    let ws;
+    let retry;
+    const open = () => {
+      ws = new WebSocket('ws://localhost:8000/api/telemetry/ws');
+      ws.onmessage = (event) => setTelemetry(JSON.parse(event.data));
+      ws.onclose = () => {
+        if (!closedByUs) retry = setTimeout(open, 1000);
+      };
     };
-
-    ws.onclose = () => setConnected(false);
-    return () => ws.close();
+    open();
+    return () => {
+      closedByUs = true;
+      clearTimeout(retry);
+      if (ws) ws.close();
+    };
   }, [connected]);
 
   // --- Mission editing handlers ---
@@ -100,6 +126,7 @@ function App() {
       <TopBar
         telemetry={telemetry}
         connected={connected}
+        backendUp={backendUp}
         planning={planning}
         onPlanClick={() => setPlanning((p) => !p)}
         onConnectClick={() => setShowConnect(!showConnect)}

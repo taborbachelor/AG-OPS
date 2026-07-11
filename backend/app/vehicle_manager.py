@@ -48,6 +48,10 @@ class VehicleManager:
         self.home_lat = 0.0
         self.home_lon = 0.0
         self.home_alt = 0.0
+        # Link watchdog: if no heartbeat arrives for this long, the vehicle link
+        # is considered lost and we mark ourselves disconnected.
+        self._last_heartbeat = 0.0
+        self._link_timeout = 5.0
         # Serializes access to the MAVLink connection so the telemetry thread and
         # mission upload/download (which also read the link) don't steal each
         # other's messages. Held briefly per telemetry read, and for the whole
@@ -60,6 +64,7 @@ class VehicleManager:
             self.connection.wait_heartbeat(timeout=30)
             self.connected = True
             self.connection_string = connection_string
+            self._last_heartbeat = time.time()
             self._mode_mapping = self.connection.mode_mapping()
             self._request_data_streams()
             # Ask for the home position (used by the landing flow).
@@ -100,6 +105,12 @@ class VehicleManager:
 
     def _update_telemetry(self):
         while self._running and self.connection:
+            # Link watchdog, checked every iteration up front so it fires whether
+            # the read returns no data OR raises (a reset socket raises, which is
+            # exactly what happens when the vehicle/SITL goes away).
+            if time.time() - self._last_heartbeat > self._link_timeout:
+                self._on_link_lost()
+                break
             try:
                 with self._link_lock:
                     msg = self.connection.recv_match(blocking=False)
@@ -110,6 +121,7 @@ class VehicleManager:
                 msg_type = msg.get_type()
 
                 if msg_type == "HEARTBEAT":
+                    self._last_heartbeat = time.time()
                     mode = mavutil.mode_string_v10(msg)
                     self.telemetry.mode = mode
                     self.telemetry.armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
@@ -147,7 +159,22 @@ class VehicleManager:
                     self.home_alt = msg.altitude / 1000.0
 
             except Exception:
-                pass
+                # Socket error / decode error: don't spin hot; the watchdog
+                # below will mark us disconnected if heartbeats stop.
+                time.sleep(0.05)
+
+    def _on_link_lost(self):
+        """Called when no heartbeat has arrived within the timeout. Mark the
+        vehicle disconnected and tear the link down so the UI reflects it and a
+        clean reconnect is possible."""
+        self._running = False
+        self.connected = False
+        try:
+            if self.connection:
+                self.connection.close()
+        except Exception:
+            pass
+        self.connection = None
 
     def set_mode(self, mode: str) -> bool:
         if not self.connection:
