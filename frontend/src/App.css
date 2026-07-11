@@ -660,3 +660,82 @@ body {
     height: 150px;
   }
 }
+
+/* ===== PLAN TOGGLE ===== */
+.status-chip.plan-active {
+  background: rgba(0, 229, 255, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ===== MISSION PANEL ===== */
+.mission-panel {
+  position: absolute;
+  left: 16px;
+  top: 56px;
+  bottom: 96px;
+  width: 300px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.wp-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-right: 2px;
+}
+
+.wp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  background: rgba(0, 10, 30, 0.5);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+}
+
+.wp-seq {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  color: #04121f;
+}
+
+.wp-del {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(255, 23, 68, 0.15);
+  color: var(--accent-red);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wp-del:hover {
+  background: rgba(255, 23, 68, 0.3);
+}
+
+.wp-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.wp-list::-webkit-scrollbar-thumb {
+  background: rgba(0, 229, 255, 0.2);
+  border-radius: 3px;
+}

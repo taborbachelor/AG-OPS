@@ -1,37 +1,42 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Literal
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
 
+CommandType = Literal["TAKEOFF", "WAYPOINT", "LOITER", "LAND", "RTL"]
 
-class Waypoint(BaseModel):
+
+class MissionItem(BaseModel):
+    command: CommandType = "WAYPOINT"
     lat: float
     lon: float
     alt: float
+    param1: float = 0.0
 
 
 class MissionUpload(BaseModel):
-    waypoints: list[Waypoint]
+    items: list[MissionItem]
 
 
 @router.get("/download")
 async def download_mission():
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    waypoints = vehicle_manager.download_mission()
-    return {"waypoints": waypoints}
+    items = vehicle_manager.download_mission()
+    return {"items": items}
 
 
 @router.post("/upload")
 async def upload_mission(mission: MissionUpload):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    wps = [{"lat": wp.lat, "lon": wp.lon, "alt": wp.alt} for wp in mission.waypoints]
-    success = vehicle_manager.upload_mission(wps)
-    if not success:
-        raise HTTPException(500, "Mission upload failed")
-    return {"status": "uploaded", "count": len(wps)}
+    items = [i.model_dump() for i in mission.items]
+    result = vehicle_manager.upload_mission(items)
+    if not result.get("ok"):
+        raise HTTPException(500, f"Mission upload failed: {result}")
+    return result
 
 
 @router.post("/start")

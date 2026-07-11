@@ -1,6 +1,6 @@
 import React from 'react';
 
-function TopBar({ telemetry, connected, onConnectClick }) {
+function TopBar({ telemetry, connected, planning, onPlanClick, onConnectClick }) {
   const t = telemetry;
   const gpsLabel = ['--', 'NO FIX', '2D', '3D', 'DGPS', 'RTK'][t.gps_fix] || `${t.gps_fix}`;
   const batteryColor = (t.battery_level ?? 100) < 20 ? 'var(--accent-red)' :
@@ -13,6 +13,14 @@ function TopBar({ telemetry, connected, onConnectClick }) {
         <div className="status-chip" onClick={onConnectClick} style={{ cursor: 'pointer' }}>
           <span className={`dot ${connected ? 'green' : 'red'}`}></span>
           <span>{connected ? 'LINKED' : 'OFFLINE'}</span>
+        </div>
+        <div
+          className={`status-chip ${planning ? 'plan-active' : ''}`}
+          onClick={onPlanClick}
+          style={{ cursor: 'pointer' }}
+        >
+          <span className="dot cyan"></span>
+          <span>{planning ? 'PLANNING' : 'PLAN'}</span>
         </div>
       </div>
 
