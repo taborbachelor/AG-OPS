@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
@@ -27,7 +27,7 @@ class ArmRequest(BaseModel):
 
 
 class TakeoffRequest(BaseModel):
-    alt: float = 100.0
+    alt: float = Field(100.0, gt=0, le=2000)
     force: bool = False
 
 

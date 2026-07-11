@@ -1,8 +1,20 @@
-from fastapi import FastAPI
+import logging
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import telemetry, mission, connection, vehicle, safety, logs
 
+logger = logging.getLogger("gcs")
+
 app = FastAPI(title="RC Plane GCS", version="0.1.0")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Never let an unexpected error take the server down or leak a stack trace
+    to the UI — return a clean 500 the frontend can surface."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {exc}"})
 
 app.add_middleware(
     CORSMiddleware,

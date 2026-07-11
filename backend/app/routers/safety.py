@@ -1,6 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
@@ -13,9 +12,9 @@ FENCE_TYPE_CIRCLE_ALT = 3
 
 class GeofenceConfig(BaseModel):
     enable: bool
-    radius: float = 300.0       # m
-    alt_max: float = 120.0      # m
-    action: int = 1             # 0 = report only, 1 = RTL/land
+    radius: float = Field(300.0, gt=0, le=50000)    # m
+    alt_max: float = Field(120.0, gt=0, le=10000)   # m
+    action: int = Field(1, ge=0, le=6)              # 0 = report only, 1 = RTL/land
 
 
 class FailsafeConfig(BaseModel):

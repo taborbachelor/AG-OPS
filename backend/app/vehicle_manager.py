@@ -302,6 +302,8 @@ class VehicleManager:
         hold the lock here (threading.Lock is not reentrant)."""
         if not self.connection:
             return {"ok": False, "error": "not connected"}
+        if self.telemetry.armed:
+            return {"ok": False, "error": "already armed / airborne"}
         if self.telemetry.gps_fix < 3:
             return {"ok": False, "error": "waiting for GPS 3D fix"}
 

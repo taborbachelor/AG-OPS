@@ -79,7 +79,9 @@ function App() {
     let retry;
     const open = () => {
       ws = new WebSocket('ws://localhost:8000/api/telemetry/ws');
-      ws.onmessage = (event) => setTelemetry(JSON.parse(event.data));
+      ws.onmessage = (event) => {
+        try { setTelemetry(JSON.parse(event.data)); } catch { /* ignore bad frame */ }
+      };
       ws.onclose = () => {
         if (!closedByUs) retry = setTimeout(open, 1000);
       };
