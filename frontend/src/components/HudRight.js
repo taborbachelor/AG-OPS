@@ -54,13 +54,6 @@ function HudRight({ telemetry, connected }) {
     } catch (e) { console.error(e); }
   };
 
-  const toggleArm = async () => {
-    try {
-      const endpoint = t.armed ? 'disarm' : 'arm';
-      await fetch(`${API}/vehicle/${endpoint}`, { method: 'POST' });
-    } catch (e) { console.error(e); }
-  };
-
   return (
     <div className="hud-right">
       <Compass heading={t.heading} />
@@ -72,13 +65,6 @@ function HudRight({ telemetry, connected }) {
       />
 
       <div className="side-controls">
-        <button
-          className={`control-btn ${t.armed ? 'danger' : 'success'}`}
-          onClick={toggleArm}
-          disabled={!connected}
-        >
-          {t.armed ? 'DISARM' : 'ARM'}
-        </button>
         <button
           className="control-btn danger"
           onClick={() => setMode('RTL')}

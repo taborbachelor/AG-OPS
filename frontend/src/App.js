@@ -7,6 +7,7 @@ import MapView from './components/MapView';
 import VideoFeed from './components/VideoFeed';
 import ConnectionOverlay from './components/ConnectionOverlay';
 import MissionPanel from './components/MissionPanel';
+import LaunchControl from './components/LaunchControl';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -123,6 +124,9 @@ function App() {
 
       <HudRight telemetry={telemetry} connected={connected} />
       <HudBottom telemetry={telemetry} />
+
+      {/* Arm + takeoff flow (hidden while planning to keep the map clear) */}
+      {!planning && <LaunchControl telemetry={telemetry} connected={connected} />}
 
       {/* Video Picture-in-Picture */}
       <VideoFeed />

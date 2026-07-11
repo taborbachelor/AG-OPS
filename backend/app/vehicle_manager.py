@@ -145,17 +145,75 @@ class VehicleManager:
         self.connection.set_mode(mode_id)
         return True
 
-    def arm(self) -> bool:
-        if not self.connection:
-            return False
-        self.connection.arducopter_arm()
-        return True
+    def _wait_command_ack(self, command: int, timeout: float = 5.0):
+        """Read COMMAND_ACK for a specific command. Must be called while holding
+        _link_lock, otherwise the telemetry thread will consume (and drop) the ack."""
+        start = time.time()
+        while time.time() - start < timeout:
+            ack = self.connection.recv_match(type="COMMAND_ACK", blocking=True, timeout=timeout)
+            if ack is None:
+                return None
+            if ack.command == command:
+                return ack
+        return None
 
-    def disarm(self) -> bool:
+    def arm(self, force: bool = False) -> dict:
+        """Arm the vehicle. `force` bypasses pre-arm safety checks (21196 magic).
+        Returns whether the vehicle actually accepted the command."""
         if not self.connection:
-            return False
-        self.connection.arducopter_disarm()
-        return True
+            return {"ok": False, "error": "not connected"}
+        conn = self.connection
+        with self._link_lock:
+            conn.mav.command_long_send(
+                conn.target_system, conn.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+                1, (21196 if force else 0), 0, 0, 0, 0, 0)
+            ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
+        if ack is None:
+            return {"ok": False, "error": "no acknowledgement from vehicle"}
+        ok = ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+        return {"ok": ok, "result": ack.result,
+                "error": None if ok else "vehicle rejected arming (pre-arm checks?)"}
+
+    def disarm(self, force: bool = False) -> dict:
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        conn = self.connection
+        with self._link_lock:
+            conn.mav.command_long_send(
+                conn.target_system, conn.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+                0, (21196 if force else 0), 0, 0, 0, 0, 0)
+            ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
+        ok = ack is not None and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+        return {"ok": ok}
+
+    def takeoff(self, alt: float = 100.0, force: bool = False) -> dict:
+        """Auto-takeoff for a fixed-wing: load a minimal takeoff+loiter mission at
+        the current position, switch to AUTO, and arm. The plane launches itself
+        and climbs to `alt`. Each step manages its own link lock, so we must not
+        hold the lock here (threading.Lock is not reentrant)."""
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        if self.telemetry.gps_fix < 3:
+            return {"ok": False, "error": "waiting for GPS 3D fix"}
+
+        lat, lon = self.telemetry.lat, self.telemetry.lon
+        mission = [
+            {"command": "TAKEOFF", "lat": lat, "lon": lon, "alt": alt},
+            {"command": "LOITER", "lat": lat, "lon": lon, "alt": alt},
+        ]
+        up = self.upload_mission(mission)
+        if not up.get("ok"):
+            return {"ok": False, "error": f"could not load takeoff mission: {up.get('error')}"}
+
+        self.set_mode("AUTO")
+        time.sleep(0.5)
+        armed = self.arm(force=force)
+        if not armed.get("ok"):
+            return {"ok": False, "error": armed.get("error", "arming failed"),
+                    "hint": "enable Force arm to bypass pre-arm checks"}
+        return {"ok": True, "alt": alt}
 
     def get_available_modes(self) -> list[str]:
         return [

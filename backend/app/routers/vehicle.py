@@ -22,20 +22,41 @@ async def set_mode(req: ModeRequest):
     return {"status": "ok", "mode": req.mode}
 
 
+class ArmRequest(BaseModel):
+    force: bool = False
+
+
+class TakeoffRequest(BaseModel):
+    alt: float = 100.0
+    force: bool = False
+
+
 @router.post("/arm")
-async def arm():
+async def arm(req: ArmRequest = ArmRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    vehicle_manager.arm()
-    return {"status": "armed"}
+    result = vehicle_manager.arm(force=req.force)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "arming failed"))
+    return {"status": "armed", **result}
 
 
 @router.post("/disarm")
-async def disarm():
+async def disarm(req: ArmRequest = ArmRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    vehicle_manager.disarm()
+    vehicle_manager.disarm(force=req.force)
     return {"status": "disarmed"}
+
+
+@router.post("/takeoff")
+async def takeoff(req: TakeoffRequest = TakeoffRequest()):
+    if not vehicle_manager.connected:
+        raise HTTPException(400, "Not connected")
+    result = vehicle_manager.takeoff(alt=req.alt, force=req.force)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "takeoff failed"))
+    return {"status": "takeoff", **result}
 
 
 class ParamUpdate(BaseModel):
