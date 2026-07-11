@@ -59,6 +59,16 @@ async def takeoff(req: TakeoffRequest = TakeoffRequest()):
     return {"status": "takeoff", **result}
 
 
+@router.post("/land")
+async def land():
+    if not vehicle_manager.connected:
+        raise HTTPException(400, "Not connected")
+    result = vehicle_manager.land()
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "landing failed"))
+    return {"status": "landing", **result}
+
+
 class ParamUpdate(BaseModel):
     name: str
     value: float

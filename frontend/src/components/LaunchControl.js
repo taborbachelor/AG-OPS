@@ -35,6 +35,19 @@ function LaunchControl({ telemetry, connected }) {
     setBusy(false);
   };
 
+  const land = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/vehicle/land`, { method: 'POST' });
+      const data = await res.json();
+      flash(res.ok ? 'Landing — flying approach to home ✓' : (data.detail || 'Landing failed'),
+        res.ok ? 'ok' : 'err');
+    } catch (e) {
+      flash('Landing error', 'err');
+    }
+    setBusy(false);
+  };
+
   const disarm = async () => {
     setBusy(true);
     try {
@@ -85,6 +98,9 @@ function LaunchControl({ telemetry, connected }) {
           <span className="airborne-status">
             <span className="dot green" /> AIRBORNE · {telemetry.mode} · {telemetry.altitude.toFixed(0)} m
           </span>
+          <button className="control-btn success" onClick={land} disabled={busy}>
+            LAND
+          </button>
           <button className="control-btn danger" onClick={disarm} disabled={busy}>
             DISARM
           </button>

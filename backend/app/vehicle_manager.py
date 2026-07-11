@@ -44,6 +44,10 @@ class VehicleManager:
         self._telemetry_thread = None
         self._running = False
         self._mode_mapping = {}
+        # Home / launch point, learned from HOME_POSITION messages.
+        self.home_lat = 0.0
+        self.home_lon = 0.0
+        self.home_alt = 0.0
         # Serializes access to the MAVLink connection so the telemetry thread and
         # mission upload/download (which also read the link) don't steal each
         # other's messages. Held briefly per telemetry read, and for the whole
@@ -58,6 +62,10 @@ class VehicleManager:
             self.connection_string = connection_string
             self._mode_mapping = self.connection.mode_mapping()
             self._request_data_streams()
+            # Ask for the home position (used by the landing flow).
+            self.connection.mav.command_long_send(
+                self.connection.target_system, self.connection.target_component,
+                mavutil.mavlink.MAV_CMD_GET_HOME_POSITION, 0, 0, 0, 0, 0, 0, 0, 0)
             self._start_telemetry_loop()
             return True
         except Exception as e:
@@ -132,6 +140,11 @@ class VehicleManager:
                 elif msg_type == "GPS_RAW_INT":
                     self.telemetry.gps_fix = msg.fix_type
                     self.telemetry.gps_satellites = msg.satellites_visible
+
+                elif msg_type == "HOME_POSITION":
+                    self.home_lat = msg.latitude / 1e7
+                    self.home_lon = msg.longitude / 1e7
+                    self.home_alt = msg.altitude / 1000.0
 
             except Exception:
                 pass
@@ -214,6 +227,35 @@ class VehicleManager:
             return {"ok": False, "error": armed.get("error", "arming failed"),
                     "hint": "enable Force arm to bypass pre-arm checks"}
         return {"ok": True, "alt": alt}
+
+    def land(self) -> dict:
+        """Auto-land a fixed-wing at the home/launch point: load an approach
+        waypoint + NAV_LAND touchdown and fly it in AUTO. The plane descends
+        along the line from the approach fix to the landing point and touches
+        down (ArduPlane disarms itself after landing)."""
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        home_lat = self.home_lat or self.telemetry.lat
+        home_lon = self.home_lon or self.telemetry.lon
+        if not home_lat or not home_lon:
+            return {"ok": False, "error": "home/position not known yet"}
+
+        # Approach fix ~600 m north of home at 80 m; the plane descends along the
+        # line from this fix down to the touchdown point.
+        approach_lat = home_lat + 600.0 / 111320.0
+        mission = [
+            {"command": "WAYPOINT", "lat": approach_lat, "lon": home_lon, "alt": 80.0},
+            {"command": "LAND", "lat": home_lat, "lon": home_lon, "alt": 0.0},
+        ]
+        up = self.upload_mission(mission)
+        if not up.get("ok"):
+            return {"ok": False, "error": f"could not load landing mission: {up.get('error')}"}
+
+        # Start from the approach leg (seq 1) rather than continuing an old index.
+        self.connection.mav.mission_set_current_send(
+            self.connection.target_system, self.connection.target_component, 1)
+        self.set_mode("AUTO")
+        return {"ok": True}
 
     def get_available_modes(self) -> list[str]:
         return [
