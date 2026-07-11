@@ -32,7 +32,10 @@ function RCPanel({ telemetry, connected }) {
 
   const [manual, setManual] = useState(false);
   const [gpName, setGpName] = useState(null);
+  const [note, setNote] = useState('');
   const wsRef = useRef(null);
+
+  const flash = (m) => { setNote(m); setTimeout(() => setNote(''), 6000); };
 
   // Track gamepad connect/disconnect for the status line.
   useEffect(() => {
@@ -78,6 +81,26 @@ function RCPanel({ telemetry, connected }) {
     body: body ? JSON.stringify(body) : undefined,
   }).catch(() => {});
 
+  // Read the current throttle from the gamepad (axis 2) as a PWM value.
+  const currentThrottle = () => {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = Array.from(pads).find((p) => p);
+    if (!gp || gp.axes[2] === undefined) return null;
+    return Math.round(1500 + gp.axes[2] * 500);
+  };
+
+  // Safety: refuse to arm unless the throttle stick is at/near idle, so a real
+  // motor can't jump to speed the instant it arms.
+  const armSafe = () => {
+    const thr = manual ? currentThrottle() : (chans[2] || null);
+    if (thr !== null && thr > 1150) {
+      flash(`⚠ Throttle is ${thr} — pull it to minimum before arming`);
+      return;
+    }
+    post('/vehicle/arm', { force: true });
+    flash('Armed (force). Motor is LIVE if the flight battery is connected.');
+  };
+
   return (
     <div className="rc-panel glass-panel">
       <div className="panel-title" style={{ marginBottom: 10 }}>RC Input · RadioMaster</div>
@@ -122,11 +145,13 @@ function RCPanel({ telemetry, connected }) {
             disabled={!connected}>FBWA</button>
           <button className="control-btn" onClick={() => post('/vehicle/mode', { mode: 'MANUAL' })}
             disabled={!connected}>MANUAL</button>
-          <button className="control-btn success" onClick={() => post('/vehicle/arm', { force: true })}
+          <button className="control-btn success" onClick={armSafe}
             disabled={!connected}>ARM</button>
-          <button className="control-btn danger" onClick={() => post('/vehicle/disarm', { force: true })}
+          <button className="control-btn danger" onClick={() => { post('/vehicle/disarm', { force: true }); flash('Disarmed — motor cut.'); }}
             disabled={!connected}>DISARM</button>
         </div>
+        {note && <div className="rc-note">{note}</div>}
+        <div className="rc-motorwarn">⚠ Real motor test: PROP OFF, motor secured, throttle at idle before ARM.</div>
         {manual && (
           <div className="rc-hint" style={{ color: 'var(--accent-orange)' }}>
             Streaming sticks → sim. Set <b>FBWA</b> (stabilized) + <b>ARM</b>, then fly.
