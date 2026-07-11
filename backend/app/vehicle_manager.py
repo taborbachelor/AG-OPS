@@ -3,7 +3,7 @@ import time
 import json
 from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from pymavlink import mavutil
 
@@ -39,6 +39,9 @@ class TelemetryData:
     yaw: float = 0.0
     gps_fix: int = 0
     gps_satellites: int = 0
+    # RC input: raw PWM per channel (µs, ~1000-2000) and receiver signal strength.
+    rc_channels: list = field(default_factory=list)
+    rc_rssi: int = 0
 
 
 class VehicleManager:
@@ -164,6 +167,17 @@ class VehicleManager:
                 elif msg_type == "GPS_RAW_INT":
                     self.telemetry.gps_fix = msg.fix_type
                     self.telemetry.gps_satellites = msg.satellites_visible
+
+                elif msg_type in ("RC_CHANNELS", "RC_CHANNELS_RAW"):
+                    count = getattr(msg, "chancount", 8) or 8
+                    chans = []
+                    for i in range(1, min(count, 16) + 1):
+                        v = getattr(msg, f"chan{i}_raw", 0)
+                        # 65535 = "not present" in the MAVLink spec; treat as 0.
+                        chans.append(0 if v in (65535, None) else v)
+                    self.telemetry.rc_channels = chans
+                    rssi = getattr(msg, "rssi", 0)
+                    self.telemetry.rc_rssi = 0 if rssi in (255, None) else rssi
 
                 elif msg_type == "HOME_POSITION":
                     self.home_lat = msg.latitude / 1e7

@@ -10,6 +10,7 @@ import MissionPanel from './components/MissionPanel';
 import LaunchControl from './components/LaunchControl';
 import SafetyPanel from './components/SafetyPanel';
 import LogsPanel from './components/LogsPanel';
+import RCPanel from './components/RCPanel';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -42,6 +43,9 @@ function App() {
   const [playbackTelem, setPlaybackTelem] = useState(null);
   const [playbackPath, setPlaybackPath] = useState(null);
   const viewTelem = playbackTelem || telemetry;
+
+  // RC bench-test view
+  const [rcMode, setRcMode] = useState(false);
 
   // Poll the backend for the true link state every 3s. This is the single
   // source of truth for `connected`, so the UI self-heals: it reflects link
@@ -147,10 +151,12 @@ function App() {
         planning={planning}
         safety={safety}
         logsMode={logsMode}
+        rcMode={rcMode}
         playback={!!playbackTelem}
-        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); setLogsMode(false); }}
-        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); setLogsMode(false); }}
-        onLogsClick={() => { setLogsMode((l) => !l); setPlanning(false); setSafety(false); }}
+        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); setLogsMode(false); setRcMode(false); }}
+        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); setLogsMode(false); setRcMode(false); }}
+        onLogsClick={() => { setLogsMode((l) => !l); setPlanning(false); setSafety(false); setRcMode(false); }}
+        onRcClick={() => { setRcMode((r) => !r); setPlanning(false); setSafety(false); setLogsMode(false); }}
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
@@ -172,6 +178,8 @@ function App() {
         <SafetyPanel connected={connected} fence={fence} setFence={setFence} />
       ) : logsMode ? (
         <LogsPanel setPlaybackTelem={setPlaybackTelem} setPlaybackPath={setPlaybackPath} />
+      ) : rcMode ? (
+        <RCPanel telemetry={telemetry} />
       ) : (
         <HudLeft telemetry={viewTelem} />
       )}

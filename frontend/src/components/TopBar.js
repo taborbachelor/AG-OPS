@@ -1,6 +1,6 @@
 import React from 'react';
 
-function TopBar({ telemetry, connected, backendUp, planning, safety, logsMode, playback, onPlanClick, onSafetyClick, onLogsClick, onConnectClick }) {
+function TopBar({ telemetry, connected, backendUp, planning, safety, logsMode, rcMode, playback, onPlanClick, onSafetyClick, onLogsClick, onRcClick, onConnectClick }) {
   const linkLabel = !backendUp ? 'NO BACKEND' : connected ? 'LINKED' : 'OFFLINE';
   const linkDot = !backendUp ? 'orange' : connected ? 'green' : 'red';
   const t = telemetry;
@@ -39,6 +39,14 @@ function TopBar({ telemetry, connected, backendUp, planning, safety, logsMode, p
         >
           <span className="dot cyan"></span>
           <span>LOGS</span>
+        </div>
+        <div
+          className={`status-chip ${rcMode ? 'plan-active' : ''}`}
+          onClick={onRcClick}
+          style={{ cursor: 'pointer' }}
+        >
+          <span className="dot cyan"></span>
+          <span>RC</span>
         </div>
         {playback && (
           <div className="status-chip" style={{ color: 'var(--accent-orange)' }}>
