@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import TopBar from './components/TopBar';
+import NavRail from './components/NavRail';
 import HudLeft from './components/HudLeft';
 import HudRight from './components/HudRight';
 import HudBottom from './components/HudBottom';
@@ -20,6 +21,7 @@ const DEFAULT_TELEMETRY = {
   lat: 0, lon: 0, battery_voltage: 0, battery_current: 0,
   battery_level: null, pitch: 0, roll: 0, yaw: 0,
   gps_fix: 0, gps_satellites: 0,
+  rc_channels: [], rc_rssi: 0, servo_outputs: [],
 };
 
 function App() {
@@ -28,26 +30,22 @@ function App() {
   const [backendUp, setBackendUp] = useState(true);
   const [showConnect, setShowConnect] = useState(false);
 
+  // One active view, switched from the left nav rail.
+  const [view, setView] = useState('fly'); // fly | plan | safety | rc | controls | logs
+
   // Mission planning state
-  const [planning, setPlanning] = useState(false);
   const [waypoints, setWaypoints] = useState([]); // {id, command, lat, lon, alt}
   const [defaultAlt, setDefaultAlt] = useState(100);
   const nextId = useRef(1);
 
   // Safety state
-  const [safety, setSafety] = useState(false);
   const [fence, setFence] = useState({ enable: false, radius: 300, alt_max: 120, action: 1 });
 
   // Flight-log playback state. When playbackTelem is set, the map/HUD show the
   // recorded flight instead of live telemetry.
-  const [logsMode, setLogsMode] = useState(false);
   const [playbackTelem, setPlaybackTelem] = useState(null);
   const [playbackPath, setPlaybackPath] = useState(null);
   const viewTelem = playbackTelem || telemetry;
-
-  // RC bench-test + control-surface views
-  const [rcMode, setRcMode] = useState(false);
-  const [controlsMode, setControlsMode] = useState(false);
 
   // Poll the backend for the true link state every 3s. This is the single
   // source of truth for `connected`, so the UI self-heals: it reflects link
@@ -136,7 +134,7 @@ function App() {
       <div className="fullscreen-map">
         <MapView
           telemetry={viewTelem}
-          planning={planning}
+          planning={view === 'plan'}
           waypoints={waypoints}
           onAddWaypoint={addWaypoint}
           onMoveWaypoint={moveWaypoint}
@@ -145,28 +143,21 @@ function App() {
         />
       </div>
 
-      {/* HUD Overlays */}
+      {/* Flight-critical status only */}
       <TopBar
         telemetry={viewTelem}
         connected={connected}
         backendUp={backendUp}
-        planning={planning}
-        safety={safety}
-        logsMode={logsMode}
-        rcMode={rcMode}
-        controlsMode={controlsMode}
         playback={!!playbackTelem}
-        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); setLogsMode(false); setRcMode(false); setControlsMode(false); }}
-        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); setLogsMode(false); setRcMode(false); setControlsMode(false); }}
-        onLogsClick={() => { setLogsMode((l) => !l); setPlanning(false); setSafety(false); setRcMode(false); setControlsMode(false); }}
-        onRcClick={() => { setRcMode((r) => !r); setPlanning(false); setSafety(false); setLogsMode(false); setControlsMode(false); }}
-        onControlsClick={() => { setControlsMode((c) => !c); setPlanning(false); setSafety(false); setLogsMode(false); setRcMode(false); }}
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
-      {/* Left side: mission editor when planning, safety config when in safety
-          mode, otherwise the attitude/gauges HUD. */}
-      {planning ? (
+      {/* View switcher */}
+      <NavRail view={view} setView={setView} />
+
+      {/* Active view's panel (FLY shows the attitude/gauge HUD) */}
+      {view === 'fly' && <HudLeft telemetry={viewTelem} />}
+      {view === 'plan' && (
         <MissionPanel
           connected={connected}
           waypoints={waypoints}
@@ -178,23 +169,23 @@ function App() {
           clearMission={clearMission}
           nextId={nextId}
         />
-      ) : safety ? (
+      )}
+      {view === 'safety' && (
         <SafetyPanel connected={connected} fence={fence} setFence={setFence} />
-      ) : logsMode ? (
+      )}
+      {view === 'rc' && <RCPanel telemetry={telemetry} connected={connected} />}
+      {view === 'controls' && <ControlsPanel telemetry={telemetry} />}
+      {view === 'logs' && (
         <LogsPanel setPlaybackTelem={setPlaybackTelem} setPlaybackPath={setPlaybackPath} />
-      ) : rcMode ? (
-        <RCPanel telemetry={telemetry} connected={connected} />
-      ) : controlsMode ? (
-        <ControlsPanel telemetry={telemetry} />
-      ) : (
-        <HudLeft telemetry={viewTelem} />
       )}
 
       <HudRight telemetry={telemetry} connected={connected} />
       <HudBottom telemetry={viewTelem} />
 
       {/* Arm + takeoff flow (hidden while planning or reviewing logs) */}
-      {!planning && !logsMode && <LaunchControl telemetry={telemetry} connected={connected} />}
+      {view !== 'plan' && view !== 'logs' && (
+        <LaunchControl telemetry={telemetry} connected={connected} />
+      )}
 
       {/* Video Picture-in-Picture */}
       <VideoFeed />

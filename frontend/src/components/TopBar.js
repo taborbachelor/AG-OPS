@@ -1,60 +1,30 @@
 import React from 'react';
 
-function TopBar({ telemetry, connected, backendUp, planning, safety, logsMode, rcMode, controlsMode, playback, onPlanClick, onSafetyClick, onLogsClick, onRcClick, onControlsClick, onConnectClick }) {
-  const linkLabel = !backendUp ? 'NO BACKEND' : connected ? 'LINKED' : 'OFFLINE';
-  const linkDot = !backendUp ? 'orange' : connected ? 'green' : 'red';
+// Flight-critical status only — view switching lives in the NavRail.
+function TopBar({ telemetry, connected, backendUp, playback, onConnectClick }) {
   const t = telemetry;
   const gpsLabel = ['--', 'NO FIX', '2D', '3D', 'DGPS', 'RTK'][t.gps_fix] || `${t.gps_fix}`;
   const batteryColor = (t.battery_level ?? 100) < 20 ? 'var(--accent-red)' :
     (t.battery_level ?? 100) < 50 ? 'var(--accent-orange)' : 'var(--accent-green)';
 
+  const linkLabel = !backendUp ? 'NO BACKEND' : connected ? 'LINKED' : 'OFFLINE';
+  const linkDot = !backendUp ? 'orange' : connected ? 'green' : 'red';
+
   return (
     <div className="top-bar">
       <div className="top-bar-left">
         <span className="brand-title">GCS</span>
-        <div className="status-chip" onClick={onConnectClick} style={{ cursor: 'pointer' }}>
+        <div className="status-chip" onClick={onConnectClick} style={{ cursor: 'pointer' }}
+          title="Connection settings">
           <span className={`dot ${linkDot}`}></span>
           <span>{linkLabel}</span>
         </div>
-        <div
-          className={`status-chip ${planning ? 'plan-active' : ''}`}
-          onClick={onPlanClick}
-          style={{ cursor: 'pointer' }}
-        >
-          <span className="dot cyan"></span>
-          <span>{planning ? 'PLANNING' : 'PLAN'}</span>
-        </div>
-        <div
-          className={`status-chip ${safety ? 'plan-active' : ''}`}
-          onClick={onSafetyClick}
-          style={{ cursor: 'pointer' }}
-        >
-          <span className="dot cyan"></span>
-          <span>SAFETY</span>
-        </div>
-        <div
-          className={`status-chip ${logsMode ? 'plan-active' : ''}`}
-          onClick={onLogsClick}
-          style={{ cursor: 'pointer' }}
-        >
-          <span className="dot cyan"></span>
-          <span>LOGS</span>
-        </div>
-        <div
-          className={`status-chip ${rcMode ? 'plan-active' : ''}`}
-          onClick={onRcClick}
-          style={{ cursor: 'pointer' }}
-        >
-          <span className="dot cyan"></span>
-          <span>RC</span>
-        </div>
-        <div
-          className={`status-chip ${controlsMode ? 'plan-active' : ''}`}
-          onClick={onControlsClick}
-          style={{ cursor: 'pointer' }}
-        >
-          <span className="dot cyan"></span>
-          <span>CONTROLS</span>
+      </div>
+
+      <div className="top-bar-center">
+        <div className="mode-badge">{t.mode}</div>
+        <div className={`armed-pill ${t.armed ? 'armed' : 'disarmed'}`}>
+          {t.armed ? '● ARMED' : 'DISARMED'}
         </div>
         {playback && (
           <div className="status-chip" style={{ color: 'var(--accent-orange)' }}>
@@ -64,11 +34,7 @@ function TopBar({ telemetry, connected, backendUp, planning, safety, logsMode, r
         )}
       </div>
 
-      <div className="top-bar-center">
-        <div className={`mode-badge ${t.armed ? 'armed' : ''}`}>
-          {t.armed ? '● ' : ''}{t.mode}
-        </div>
-
+      <div className="top-bar-right">
         <div className="status-chip">
           <span>GPS</span>
           <span className="status-value">{gpsLabel}</span>
@@ -88,9 +54,7 @@ function TopBar({ telemetry, connected, backendUp, planning, safety, logsMode, r
             </span>
           )}
         </div>
-      </div>
 
-      <div className="top-bar-right">
         <div className="status-chip">
           <span className="status-value">{t.lat.toFixed(5)}</span>
           <span style={{ color: 'var(--text-dim)' }}>|</span>
