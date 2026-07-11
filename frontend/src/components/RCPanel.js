@@ -1,4 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+
+const API = 'http://localhost:8000/api';
 
 // Typical AETR-ish channel roles on a plane (RadioMaster default). CH5+ vary.
 const ROLES = {
@@ -7,7 +9,6 @@ const ROLES = {
 };
 
 function ChannelBar({ n, value }) {
-  // Map 1000–2000 µs to 0–100%. Values outside that clamp.
   const pct = Math.max(0, Math.min(100, (value - 1000) / 10));
   const live = value >= 900 && value <= 2100;
   return (
@@ -24,10 +25,58 @@ function ChannelBar({ n, value }) {
   );
 }
 
-function RCPanel({ telemetry }) {
+function RCPanel({ telemetry, connected }) {
   const chans = telemetry.rc_channels || [];
   const rssi = telemetry.rc_rssi || 0;
   const hasInput = chans.some((v) => v >= 900 && v <= 2100);
+
+  const [manual, setManual] = useState(false);
+  const [gpName, setGpName] = useState(null);
+  const wsRef = useRef(null);
+
+  // Track gamepad connect/disconnect for the status line.
+  useEffect(() => {
+    const on = (e) => setGpName(e.gamepad.id);
+    const off = () => setGpName(null);
+    window.addEventListener('gamepadconnected', on);
+    window.addEventListener('gamepaddisconnected', off);
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = Array.from(pads).find((p) => p);
+    if (gp) setGpName(gp.id);
+    return () => {
+      window.removeEventListener('gamepadconnected', on);
+      window.removeEventListener('gamepaddisconnected', off);
+    };
+  }, []);
+
+  // While manual control is on, stream gamepad axes -> RC override WebSocket at ~25Hz.
+  useEffect(() => {
+    if (!manual) return;
+    const ws = new WebSocket('ws://localhost:8000/api/vehicle/rc');
+    wsRef.current = ws;
+    let raf, last = 0;
+    const loop = (ts) => {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const gp = Array.from(pads).find((p) => p);
+      if (gp && ws.readyState === 1 && ts - last > 40) {
+        last = ts;
+        const out = [];
+        for (let i = 0; i < 8; i++) {
+          const a = gp.axes[i];
+          out.push(a === undefined ? 0 : Math.round(1500 + a * 500));
+        }
+        ws.send(JSON.stringify({ channels: out }));
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { cancelAnimationFrame(raf); ws.close(); };
+  }, [manual]);
+
+  const post = (path, body) => fetch(`${API}${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  }).catch(() => {});
 
   return (
     <div className="rc-panel glass-panel">
@@ -44,8 +93,9 @@ function RCPanel({ telemetry }) {
       {chans.length === 0 ? (
         <div className="rc-empty">
           No RC channels reported.<br />
-          Check that a receiver is bound to the RadioMaster and wired to the Cube's
-          RC input, and that the transmitter is on.
+          For a real receiver: bind it to the RadioMaster and wire it to the Cube's
+          RC input. Or use <b>Manual Control</b> below to fly the sim from the
+          RadioMaster in USB-Joystick mode.
         </div>
       ) : (
         <div className="rc-list">
@@ -53,8 +103,39 @@ function RCPanel({ telemetry }) {
         </div>
       )}
 
+      {/* Manual control: fly from a laptop-connected transmitter/gamepad */}
+      <div className="rc-manual">
+        <div className="rc-manual-head">
+          <span>MANUAL CONTROL</span>
+          <label className={`mini-toggle ${manual ? 'on' : ''}`}>
+            <input type="checkbox" checked={manual}
+              onChange={(e) => setManual(e.target.checked)} disabled={!connected} />
+            {manual ? 'LIVE' : 'OFF'}
+          </label>
+        </div>
+        <div className="rc-gp-status">
+          <span className={`dot ${gpName ? 'green' : 'red'}`} />
+          <span>{gpName ? gpName.slice(0, 30) : 'No gamepad — plug in RadioMaster (USB Joystick)'}</span>
+        </div>
+        <div className="rc-manual-btns">
+          <button className="control-btn" onClick={() => post('/vehicle/mode', { mode: 'FBWA' })}
+            disabled={!connected}>FBWA</button>
+          <button className="control-btn" onClick={() => post('/vehicle/mode', { mode: 'MANUAL' })}
+            disabled={!connected}>MANUAL</button>
+          <button className="control-btn success" onClick={() => post('/vehicle/arm', { force: true })}
+            disabled={!connected}>ARM</button>
+          <button className="control-btn danger" onClick={() => post('/vehicle/disarm', { force: true })}
+            disabled={!connected}>DISARM</button>
+        </div>
+        {manual && (
+          <div className="rc-hint" style={{ color: 'var(--accent-orange)' }}>
+            Streaming sticks → sim. Set <b>FBWA</b> (stabilized) + <b>ARM</b>, then fly.
+          </div>
+        )}
+      </div>
+
       <div className="rc-hint">
-        Move the sticks and flip the switches — the bars should track them live.
+        Move the sticks/switches — the bars track them live.
       </div>
     </div>
   );

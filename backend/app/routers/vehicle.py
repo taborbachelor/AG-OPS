@@ -1,8 +1,27 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
+
+
+@router.websocket("/rc")
+async def rc_override_ws(ws: WebSocket):
+    """Receive a stream of {channels:[...]} from a laptop-connected transmitter/
+    gamepad and forward each as an RC override. Releases the override on
+    disconnect so the plane never keeps stuck stick positions."""
+    await ws.accept()
+    try:
+        while True:
+            data = await ws.receive_json()
+            if vehicle_manager.connected:
+                vehicle_manager.send_rc_override(data.get("channels", []))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        vehicle_manager.release_rc_override()
 
 
 class ModeRequest(BaseModel):

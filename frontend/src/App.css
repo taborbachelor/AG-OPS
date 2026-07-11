@@ -1306,3 +1306,135 @@ body {
   text-align: center;
   color: var(--text-secondary);
 }
+
+.rc-manual {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.rc-manual-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.rc-gp-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.rc-manual-btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.rc-manual-btns .control-btn {
+  font-size: 11px;
+  padding: 5px 8px;
+}
+
+/* ===== CONTROL SURFACES PANEL ===== */
+.controls-panel {
+  position: absolute;
+  left: 16px;
+  top: 56px;
+  bottom: 96px;
+  width: 300px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.controls-panel::-webkit-scrollbar { width: 6px; }
+.controls-panel::-webkit-scrollbar-thumb { background: rgba(0,229,255,0.2); border-radius: 3px; }
+
+.aircraft-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  margin: 2px 0 8px;
+}
+
+@keyframes propspin {
+  to { transform: rotate(360deg); }
+}
+
+.controls-warn {
+  font-size: 10px;
+  text-align: center;
+  color: var(--accent-orange);
+  margin-bottom: 8px;
+}
+
+.thr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.thr-track {
+  flex: 1;
+  height: 8px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.thr-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-green), var(--accent-orange));
+  border-radius: 4px;
+  transition: width 0.06s linear;
+}
+
+.thr-val {
+  font-family: var(--font-display);
+  font-size: 12px;
+  color: var(--text-primary);
+  width: 40px;
+  text-align: right;
+}
+
+.io-head, .io-row {
+  display: grid;
+  grid-template-columns: 1fr 46px 16px 46px;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
+}
+
+.io-head {
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--glass-border);
+  margin-bottom: 2px;
+}
+
+.io-head span:nth-child(2), .io-head span:nth-child(4) { text-align: right; }
+
+.io-label { font-size: 11px; color: var(--text-secondary); }
+.io-in { font-family: var(--font-display); font-size: 11px; color: var(--text-dim); text-align: right; }
+.io-arrow { color: var(--text-dim); text-align: center; font-size: 10px; }
+.io-out { font-family: var(--font-display); font-size: 11px; color: var(--accent); text-align: right; }
+
+.controls-hint {
+  margin-top: 10px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}

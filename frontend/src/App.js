@@ -11,6 +11,7 @@ import LaunchControl from './components/LaunchControl';
 import SafetyPanel from './components/SafetyPanel';
 import LogsPanel from './components/LogsPanel';
 import RCPanel from './components/RCPanel';
+import ControlsPanel from './components/ControlsPanel';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -44,8 +45,9 @@ function App() {
   const [playbackPath, setPlaybackPath] = useState(null);
   const viewTelem = playbackTelem || telemetry;
 
-  // RC bench-test view
+  // RC bench-test + control-surface views
   const [rcMode, setRcMode] = useState(false);
+  const [controlsMode, setControlsMode] = useState(false);
 
   // Poll the backend for the true link state every 3s. This is the single
   // source of truth for `connected`, so the UI self-heals: it reflects link
@@ -152,11 +154,13 @@ function App() {
         safety={safety}
         logsMode={logsMode}
         rcMode={rcMode}
+        controlsMode={controlsMode}
         playback={!!playbackTelem}
-        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); setLogsMode(false); setRcMode(false); }}
-        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); setLogsMode(false); setRcMode(false); }}
-        onLogsClick={() => { setLogsMode((l) => !l); setPlanning(false); setSafety(false); setRcMode(false); }}
-        onRcClick={() => { setRcMode((r) => !r); setPlanning(false); setSafety(false); setLogsMode(false); }}
+        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); setLogsMode(false); setRcMode(false); setControlsMode(false); }}
+        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); setLogsMode(false); setRcMode(false); setControlsMode(false); }}
+        onLogsClick={() => { setLogsMode((l) => !l); setPlanning(false); setSafety(false); setRcMode(false); setControlsMode(false); }}
+        onRcClick={() => { setRcMode((r) => !r); setPlanning(false); setSafety(false); setLogsMode(false); setControlsMode(false); }}
+        onControlsClick={() => { setControlsMode((c) => !c); setPlanning(false); setSafety(false); setLogsMode(false); setRcMode(false); }}
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
@@ -179,7 +183,9 @@ function App() {
       ) : logsMode ? (
         <LogsPanel setPlaybackTelem={setPlaybackTelem} setPlaybackPath={setPlaybackPath} />
       ) : rcMode ? (
-        <RCPanel telemetry={telemetry} />
+        <RCPanel telemetry={telemetry} connected={connected} />
+      ) : controlsMode ? (
+        <ControlsPanel telemetry={telemetry} />
       ) : (
         <HudLeft telemetry={viewTelem} />
       )}

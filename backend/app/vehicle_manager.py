@@ -42,6 +42,8 @@ class TelemetryData:
     # RC input: raw PWM per channel (µs, ~1000-2000) and receiver signal strength.
     rc_channels: list = field(default_factory=list)
     rc_rssi: int = 0
+    # Servo/motor outputs the flight controller is actually commanding (PWM µs).
+    servo_outputs: list = field(default_factory=list)
 
 
 class VehicleManager:
@@ -178,6 +180,11 @@ class VehicleManager:
                     self.telemetry.rc_channels = chans
                     rssi = getattr(msg, "rssi", 0)
                     self.telemetry.rc_rssi = 0 if rssi in (255, None) else rssi
+
+                elif msg_type == "SERVO_OUTPUT_RAW":
+                    self.telemetry.servo_outputs = [
+                        getattr(msg, f"servo{i}_raw", 0) or 0 for i in range(1, 9)
+                    ]
 
                 elif msg_type == "HOME_POSITION":
                     self.home_lat = msg.latitude / 1e7
@@ -421,6 +428,37 @@ class VehicleManager:
                 name.encode(), float(value), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
             time.sleep(0.05)
         return {"ok": True, "count": len(params)}
+
+    def send_rc_override(self, channels: list) -> bool:
+        """Push RC channel values (PWM µs) into the vehicle as RC_CHANNELS_OVERRIDE
+        — used to fly from a laptop-connected transmitter/gamepad. 0 on a channel
+        releases it back to the real RC input. Must be sent continuously (~20Hz)
+        or ArduPilot times the override out."""
+        if not self.connection:
+            return False
+        ch = []
+        for i in range(8):
+            v = channels[i] if i < len(channels) else 0
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                v = 0
+            ch.append(0 if v == 0 else max(900, min(2100, v)))
+        self.connection.mav.rc_channels_override_send(
+            self.connection.target_system, self.connection.target_component, *ch)
+        return True
+
+    def release_rc_override(self):
+        """Release all RC overrides (send zeros) so the plane isn't left with the
+        last stick positions after manual control stops."""
+        if not self.connection:
+            return
+        try:
+            self.connection.mav.rc_channels_override_send(
+                self.connection.target_system, self.connection.target_component,
+                0, 0, 0, 0, 0, 0, 0, 0)
+        except Exception:
+            pass
 
     def upload_mission(self, items: list[dict]) -> dict:
         """Upload a mission. `items` is an ordered list of dicts with keys
