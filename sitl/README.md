@@ -35,7 +35,7 @@ location).
 
 - **SITL exits when the GCS disconnects.** This is expected for this build — just
   re-run `run_sitl.bat`. As long as the GCS stays connected, it keeps flying.
-- Home is set to CMAC (the classic ArduPilot test field in Australia). Change the
+- Home is set to Sabetha, KS (`39.9042,-95.7997`). Change the
   `-O lat,lon,alt,heading` argument in `run_sitl.bat` to start somewhere else.
 - Add `-w` to wipe the simulated EEPROM back to default parameters.
 - Other vehicle types are available from the same server (ArduCopter.elf,
