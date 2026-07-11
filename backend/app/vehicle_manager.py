@@ -304,6 +304,41 @@ class VehicleManager:
         self.connection.param_set_send(name, value)
         return True
 
+    def get_params(self, names: list[str]) -> dict:
+        """Fetch several named parameters, matching each reply by param_id so we
+        never mismatch values. Held under the link lock (it reads the link)."""
+        if not self.connection:
+            return {}
+        conn = self.connection
+        result = {}
+        with self._link_lock:
+            for name in names:
+                conn.mav.param_request_read_send(
+                    conn.target_system, conn.target_component, name.encode(), -1)
+                start = time.time()
+                while time.time() - start < 1.5:
+                    msg = conn.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.5)
+                    if msg is None:
+                        break
+                    pid = msg.param_id
+                    if isinstance(pid, bytes):
+                        pid = pid.decode(errors="ignore")
+                    if pid.rstrip("\x00") == name:
+                        result[name] = msg.param_value
+                        break
+        return result
+
+    def set_params(self, params: dict) -> dict:
+        """Set several parameters (fire-and-forget; caller re-reads to confirm)."""
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        for name, value in params.items():
+            self.connection.mav.param_set_send(
+                self.connection.target_system, self.connection.target_component,
+                name.encode(), float(value), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+            time.sleep(0.05)
+        return {"ok": True, "count": len(params)}
+
     def upload_mission(self, items: list[dict]) -> dict:
         """Upload a mission. `items` is an ordered list of dicts with keys
         command (TAKEOFF/WAYPOINT/LOITER/LAND/RTL), lat, lon, alt, and optional

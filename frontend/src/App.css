@@ -923,3 +923,112 @@ body {
   font-size: 9px !important;
 }
 .leaflet-control-attribution a { color: var(--text-secondary) !important; }
+
+/* ===== SAFETY PANEL ===== */
+.safety-panel {
+  position: absolute;
+  left: 16px;
+  top: 56px;
+  bottom: 96px;
+  width: 300px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.safety-scroll {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.safety-scroll::-webkit-scrollbar { width: 6px; }
+.safety-scroll::-webkit-scrollbar-thumb { background: rgba(0,229,255,0.2); border-radius: 3px; }
+
+.safety-card {
+  background: rgba(0, 10, 30, 0.5);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.safety-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.safety-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.safety-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 74px;
+}
+
+.safety-unit {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: -4px;
+}
+
+.safety-field select {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.mini-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+
+.mini-toggle.on {
+  color: var(--accent-green);
+  border-color: rgba(0, 230, 118, 0.4);
+  background: rgba(0, 230, 118, 0.1);
+}
+
+.mini-toggle input { accent-color: var(--accent-green); cursor: pointer; }
+
+.safety-status {
+  margin-top: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  text-align: center;
+  background: rgba(0, 229, 255, 0.1);
+  color: var(--accent);
+}
+
+.safety-warn {
+  margin-top: 8px;
+  font-size: 10px;
+  text-align: center;
+  color: var(--accent-orange);
+}

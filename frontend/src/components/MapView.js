@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Marker, Polyline, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polyline, Circle, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -128,7 +128,7 @@ function MapControls({ layer, setLayer, follow, setFollow, onCenter }) {
   );
 }
 
-function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint }) {
+function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence }) {
   const [layer, setLayer] = useState('sat');
   const [follow, setFollow] = useState(true);
   const trailRef = useRef([]);
@@ -193,6 +193,16 @@ function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWay
             eventHandlers={{ dragend: (e) => onMoveWaypoint(w.id, e.target.getLatLng()) }}
           />
         ))}
+
+        {/* Geofence (circular) centered on home */}
+        {fence && fence.enable && fence.radius > 0 && homeRef.current && (
+          <Circle
+            center={homeRef.current}
+            radius={fence.radius}
+            pathOptions={{ color: '#ff9100', weight: 2, opacity: 0.8,
+              fillColor: '#ff9100', fillOpacity: 0.06, dashArray: '4 6' }}
+          />
+        )}
 
         {/* Home / launch point */}
         {homeRef.current && <Marker position={homeRef.current} icon={homeIcon} />}

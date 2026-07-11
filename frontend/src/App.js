@@ -8,6 +8,7 @@ import VideoFeed from './components/VideoFeed';
 import ConnectionOverlay from './components/ConnectionOverlay';
 import MissionPanel from './components/MissionPanel';
 import LaunchControl from './components/LaunchControl';
+import SafetyPanel from './components/SafetyPanel';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -29,6 +30,10 @@ function App() {
   const [waypoints, setWaypoints] = useState([]); // {id, command, lat, lon, alt}
   const [defaultAlt, setDefaultAlt] = useState(100);
   const nextId = useRef(1);
+
+  // Safety state
+  const [safety, setSafety] = useState(false);
+  const [fence, setFence] = useState({ enable: false, radius: 300, alt_max: 120, action: 1 });
 
   // Poll the backend for the true link state every 3s. This is the single
   // source of truth for `connected`, so the UI self-heals: it reflects link
@@ -119,6 +124,7 @@ function App() {
           waypoints={waypoints}
           onAddWaypoint={addWaypoint}
           onMoveWaypoint={moveWaypoint}
+          fence={fence}
         />
       </div>
 
@@ -128,11 +134,14 @@ function App() {
         connected={connected}
         backendUp={backendUp}
         planning={planning}
-        onPlanClick={() => setPlanning((p) => !p)}
+        safety={safety}
+        onPlanClick={() => { setPlanning((p) => !p); setSafety(false); }}
+        onSafetyClick={() => { setSafety((s) => !s); setPlanning(false); }}
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
-      {/* Left side: attitude/gauges when flying, mission editor when planning */}
+      {/* Left side: mission editor when planning, safety config when in safety
+          mode, otherwise the attitude/gauges HUD. */}
       {planning ? (
         <MissionPanel
           connected={connected}
@@ -145,6 +154,8 @@ function App() {
           clearMission={clearMission}
           nextId={nextId}
         />
+      ) : safety ? (
+        <SafetyPanel connected={connected} fence={fence} setFence={setFence} />
       ) : (
         <HudLeft telemetry={telemetry} />
       )}

@@ -1,6 +1,6 @@
 import React from 'react';
 
-function TopBar({ telemetry, connected, backendUp, planning, onPlanClick, onConnectClick }) {
+function TopBar({ telemetry, connected, backendUp, planning, safety, onPlanClick, onSafetyClick, onConnectClick }) {
   const linkLabel = !backendUp ? 'NO BACKEND' : connected ? 'LINKED' : 'OFFLINE';
   const linkDot = !backendUp ? 'orange' : connected ? 'green' : 'red';
   const t = telemetry;
@@ -23,6 +23,14 @@ function TopBar({ telemetry, connected, backendUp, planning, onPlanClick, onConn
         >
           <span className="dot cyan"></span>
           <span>{planning ? 'PLANNING' : 'PLAN'}</span>
+        </div>
+        <div
+          className={`status-chip ${safety ? 'plan-active' : ''}`}
+          onClick={onSafetyClick}
+          style={{ cursor: 'pointer' }}
+        >
+          <span className="dot cyan"></span>
+          <span>SAFETY</span>
         </div>
       </div>
 
