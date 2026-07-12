@@ -2,19 +2,16 @@ import React, { useState } from 'react';
 
 const API = 'http://localhost:8000/api';
 
-// m² per acre — matches the backend constant so the live readout agrees
-// with the server-priced acreage once an order is loaded.
 const SQ_M_PER_ACRE = 4046.8564224;
 const EARTH_R = 6371000;
 const DEG = Math.PI / 180;
 
 // Planar shoelace on an equirectangular projection (x scaled by cos(lat)).
-// Sub-1% error at field scale — plenty for a live readout while drawing.
-function fieldAcres(pts) {
-  if (pts.length < 3) return 0;
+function polyAcres(pts) {
+  if (!pts || pts.length < 3) return 0;
   const lat0 = (pts.reduce((s, p) => s + p.lat, 0) / pts.length) * DEG;
-  const kx = Math.cos(lat0) * EARTH_R * DEG; // deg lon -> m
-  const ky = EARTH_R * DEG;                  // deg lat -> m
+  const kx = Math.cos(lat0) * EARTH_R * DEG;
+  const ky = EARTH_R * DEG;
   let area = 0;
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
@@ -22,26 +19,6 @@ function fieldAcres(pts) {
     area += a.lon * kx * (b.lat * ky) - b.lon * kx * (a.lat * ky);
   }
   return Math.abs(area / 2) / SQ_M_PER_ACRE;
-}
-
-function centroidOf(pts) {
-  return {
-    lat: pts.reduce((s, p) => s + p.lat, 0) / pts.length,
-    lon: pts.reduce((s, p) => s + p.lon, 0) / pts.length,
-  };
-}
-
-// Zone-lookup radius: farthest vertex from the centroid plus margin for the
-// largest keepout buffer, clamped to the backend's 5 km Overpass cap.
-function lookupRadius(pts, c) {
-  let max = 0;
-  for (const p of pts) {
-    const dx = (p.lon - c.lon) * DEG * EARTH_R * Math.cos(c.lat * DEG);
-    const dy = (p.lat - c.lat) * DEG * EARTH_R;
-    const d = Math.hypot(dx, dy);
-    if (d > max) max = d;
-  }
-  return Math.round(Math.min(5000, Math.max(400, max + 250)));
 }
 
 const fmt = (v, digits) => (Number.isFinite(v) ? v.toFixed(digits) : '—');
@@ -66,10 +43,15 @@ function Stat({ v, l }) {
   );
 }
 
+// Multi-field spray JOB panel: build a list of fields (draw / snap / auto-
+// detect inside a selected area / load from a customer order), then plan the
+// whole job at once — per-field spray patterns plus the transit legs between
+// them — and upload it as one mission.
 function SprayPanel({
-  connected, field, setField, drawing, setDrawing,
+  connected, draft, setDraft, fields, setFields, area, setArea,
+  drawing, setDrawing, areaDrawing, setAreaDrawing,
   snapping, setSnapping, snapStatus,
-  plan, setPlan, zones, setZones,
+  plan, setPlan, zones, setZones, homePos,
 }) {
   const [orderId, setOrderId] = useState('');
   const [order, setOrder] = useState(null);
@@ -79,22 +61,68 @@ function SprayPanel({
   const [bufTrees, setBufTrees] = useState(10);
   const [bufBuildings, setBufBuildings] = useState(10);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState('');          // transient errors
-  const [keepouts, setKeepouts] = useState(null);    // count from plan_auto stats
-  const [zonesNote, setZonesNote] = useState('');    // amber caveat on the plan card
-  const [upStatus, setUpStatus] = useState(null);    // {ok, msg} after upload
+  const [status, setStatus] = useState('');
+  const [zonesNote, setZonesNote] = useState('');
+  const [upStatus, setUpStatus] = useState(null);
 
-  const acres = fieldAcres(field);
   const flash = (m) => { setStatus(m); setTimeout(() => setStatus(''), 5000); };
 
   const resetResults = () => {
-    setPlan(null); setZones(null); setKeepouts(null);
-    setZonesNote(''); setUpStatus(null);
+    setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
   };
 
-  const clearField = () => {
-    setField([]); setOrder(null); setDrawing(false);
+  // Exclusive input modes: draw / area / snap.
+  const setMode = (mode) => {
+    setDrawing(mode === 'draw' ? !drawing : false);
+    setAreaDrawing(mode === 'area' ? !areaDrawing : false);
+    setSnapping(mode === 'snap' ? !snapping : false);
+  };
+
+  const commitDraft = () => {
+    if (draft.length < 3) { flash('Need at least 3 points'); return; }
+    setFields((f) => [...f, { polygon: draft, acres: null, source: 'drawn' }]);
+    setDraft([]);
+    setDrawing(false);
     resetResults();
+  };
+
+  const removeField = (i) => {
+    setFields((f) => f.filter((_, j) => j !== i));
+    resetResults();
+  };
+
+  const clearJob = () => {
+    setFields([]); setDraft([]); setArea([]); setOrder(null);
+    setDrawing(false); setAreaDrawing(false); setSnapping(false);
+    resetResults();
+  };
+
+  // Auto-detect mapped parcels inside the selected area.
+  const detectFields = async () => {
+    if (area.length < 3) { flash('Close the selection area first'); return; }
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/fields/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ polygon: area }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.detail || res.status);
+      if (d.found === 0) {
+        flash('No mapped fields in that area — add them with Draw or Snap');
+      } else {
+        setFields((f) => [
+          ...f,
+          ...d.fields.map((fd) => ({ polygon: fd.polygon, acres: fd.acres, source: 'auto' })),
+        ]);
+        resetResults();
+        flash(`${d.found} field${d.found === 1 ? '' : 's'} detected ✓`);
+      }
+    } catch (e) {
+      flash(`Detect failed: ${e.message}`);
+    }
+    setBusy(false);
   };
 
   const loadOrder = async () => {
@@ -104,14 +132,11 @@ function SprayPanel({
     try {
       const res = await fetch(`${API}/orders/${encodeURIComponent(id)}`);
       if (!res.ok) {
-        flash(res.status === 404 ? 'Order not found (or orders API not live)'
-          : `Order load failed (${res.status})`);
+        flash(res.status === 404 ? 'Order not found' : `Order load failed (${res.status})`);
         setBusy(false);
         return;
       }
       const o = await res.json();
-      // field_geojson is a STRING of a GeoJSON Polygon whose ring is
-      // [lon,lat] pairs with the first point repeated — swap and unclose.
       const gj = JSON.parse(o.field_geojson);
       let pts = ((gj.coordinates && gj.coordinates[0]) || [])
         .map(([lon, lat]) => ({ lat, lon }));
@@ -123,10 +148,10 @@ function SprayPanel({
       if (pts.length < 3) {
         flash('Order has no usable field polygon');
       } else {
-        setField(pts);
-        setDrawing(false);
+        setFields((f) => [...f, { polygon: pts, acres: o.acres, source: `order` }]);
         resetResults();
         setOrder({ name: o.name, acres: o.acres, date: o.date, slot: o.slot, status: o.status });
+        flash(`Order field added to job ✓`);
       }
     } catch (e) {
       flash('Order load error — is the backend running?');
@@ -134,46 +159,31 @@ function SprayPanel({
     setBusy(false);
   };
 
-  // Overlay zones for the map. plan_auto may return them inline one day;
-  // until then (and on the fallback path) the live /api/zones endpoint is
-  // the source of truth.
-  const fetchZones = async () => {
-    try {
-      const c = centroidOf(field);
-      const r = lookupRadius(field, c);
-      const res = await fetch(`${API}/zones/?lat=${c.lat}&lon=${c.lon}&radius=${r}`);
-      if (!res.ok) throw new Error(String(res.status));
-      const z = await res.json();
-      setZones({ water: z.water || [], trees: z.trees || [], buildings: z.buildings || [] });
-    } catch (e) {
-      setZones(null);
-      setZonesNote((n) => n || 'Zones unavailable — no overlay to show');
-    }
-  };
-
+  // One call plans the whole job: per-field zone-aware coverage + transit
+  // ordering. Zones come back inline; degrade is flagged, never silent.
   const generate = async () => {
-    if (field.length < 3) { flash('Draw or load a field first (3+ points)'); return; }
+    let jobFields = fields;
+    if (jobFields.length === 0 && draft.length >= 3) {
+      // Courtesy: an unclosed draft becomes the job's single field.
+      jobFields = [{ polygon: draft, acres: null, source: 'drawn' }];
+      setFields(jobFields);
+      setDraft([]);
+      setDrawing(false);
+    }
+    if (jobFields.length === 0) { flash('Add at least one field first'); return; }
     setBusy(true);
     resetResults();
     try {
-      const headers = { 'Content-Type': 'application/json' };
-      // Preferred path: the auto-keepout planner. 404/405 means that
-      // endpoint isn't deployed yet — fall back to the plain planner.
-      let usedAuto = true;
-      let res = await fetch(`${API}/coverage/plan_auto`, {
-        method: 'POST', headers,
+      const res = await fetch(`${API}/coverage/plan_multi`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          polygon: field, swath, alt,
+          fields: jobFields.map((f) => f.polygon),
+          swath, alt,
           water_buffer: bufWater, tree_buffer: bufTrees, building_buffer: bufBuildings,
+          home: homePos || undefined,
         }),
       });
-      if (res.status === 404 || res.status === 405) {
-        usedAuto = false;
-        res = await fetch(`${API}/coverage/plan`, {
-          method: 'POST', headers,
-          body: JSON.stringify({ polygon: field, swath, alt }),
-        });
-      }
       const data = await res.json();
       if (!res.ok) {
         flash(`Plan failed: ${data.detail || res.status}`);
@@ -181,24 +191,18 @@ function SprayPanel({
         return;
       }
       setPlan(data);
-      if (usedAuto) {
-        const s = data.stats || {};
-        const k = [s.keepouts_applied, s.n_keepouts, s.keepouts]
-          .find((v) => typeof v === 'number');
-        setKeepouts(k === undefined ? null : k);
-        // plan_auto degrades to an UNCLIPPED plan when Overpass is down
-        // (200 + zones_unavailable:true) — warn exactly like the fallback
-        // path so the operator never mistakes it for a keepout-aware plan.
-        if (data.zones_unavailable) {
-          setZonesNote('Zones unavailable — path does not avoid no-spray areas');
-        }
-      } else {
-        setZonesNote('Zones unavailable — path does not avoid no-spray areas');
+      if (data.zones_unavailable) {
+        setZonesNote('Zones unavailable — paths do not avoid no-spray areas');
+        setZones(null);
+      } else if (data.zones && data.zones.water) {
+        setZones({
+          water: data.zones.water || [],
+          trees: data.zones.trees || [],
+          buildings: data.zones.buildings || [],
+        });
       }
-      if (usedAuto && data.zones && data.zones.water) {
-        setZones(data.zones);
-      } else {
-        await fetchZones();
+      if ((data.skipped || []).length > 0) {
+        flash(`${data.skipped.length} field(s) skipped: ${data.skipped[0].error}`);
       }
     } catch (e) {
       flash('Plan error — is the backend running?');
@@ -207,13 +211,11 @@ function SprayPanel({
   };
 
   const upload = async () => {
-    const wps = (plan && plan.waypoints) || [];
+    const wps = (plan && plan.combined_waypoints) || [];
     if (wps.length === 0) { setUpStatus({ ok: false, msg: 'Generate a plan first' }); return; }
     setBusy(true);
     try {
       const first = wps[0];
-      // TAKEOFF toward the first pass, fly every plan waypoint, then RTL
-      // (home is auto-inserted at seq 0 by the backend).
       const items = [
         { command: 'TAKEOFF', lat: first.lat, lon: first.lon, alt: 80, param1: 0 },
         ...wps.map((w) => ({
@@ -237,59 +239,100 @@ function SprayPanel({
     setBusy(false);
   };
 
-  const stats = plan && plan.stats;
+  const totals = plan && plan.totals;
+  const keepoutsApplied = plan
+    ? plan.fields.reduce((s, f) => s + (f.stats.keepouts_applied || 0), 0)
+    : 0;
+  const jobAcres = fields.reduce((s, f) => s + (f.acres != null ? f.acres : polyAcres(f.polygon)), 0);
 
   return (
     <div className="spray-panel glass-panel">
       <div className="panel-title" style={{ marginBottom: 10 }}>Spray Job</div>
 
       <div className="spray-scroll">
-        {/* FIELD: hand-drawn boundary or a customer order's polygon */}
+        {/* FIELDS: build the job's field list */}
         <div className="safety-card">
           <div className="safety-card-head">
-            <span>FIELD</span>
+            <span>FIELDS ({fields.length})</span>
             <span className="spray-acres">
-              {acres > 0 ? `${acres.toFixed(2)} ac` : `${field.length} pts`}
+              {jobAcres > 0 ? `${jobAcres.toFixed(1)} ac` : ''}
             </span>
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
-            <button
-              className={`control-btn ${drawing ? 'active' : ''}`}
-              onClick={() => { setDrawing(!drawing); setSnapping(false); }}
-              style={{ flex: 1 }}
-            >
-              {drawing ? 'Drawing…' : 'Draw field'}
+            <button className={`control-btn ${drawing ? 'active' : ''}`}
+              onClick={() => setMode('draw')} style={{ flex: 1 }}>
+              {drawing ? 'Drawing…' : 'Draw'}
             </button>
-            <button
-              className={`control-btn ${snapping ? 'active' : ''}`}
-              onClick={() => { setSnapping(!snapping); setDrawing(false); }}
-              style={{ flex: 1 }}
-              title="Click a field on the map to snap to its mapped boundary"
-            >
-              {snapping ? 'Click a field…' : 'Snap'}
+            <button className={`control-btn ${areaDrawing ? 'active' : ''}`}
+              onClick={() => setMode('area')} style={{ flex: 1 }}
+              title="Select an area, then auto-detect the fields inside it">
+              {areaDrawing ? 'Area…' : 'Area'}
             </button>
-            <button className="control-btn" onClick={() => setDrawing(false)} disabled={!drawing}>
-              Close
-            </button>
-            <button className="control-btn danger" onClick={clearField}
-              disabled={field.length === 0 && !order}>
-              Clear
+            <button className={`control-btn ${snapping ? 'active' : ''}`}
+              onClick={() => setMode('snap')} style={{ flex: 1 }}
+              title="Click a field to snap to its mapped boundary">
+              {snapping ? 'Click…' : 'Snap'}
             </button>
           </div>
+
           {drawing && (
-            <div className="spray-hint">Click the map to add vertices</div>
+            <>
+              <div className="spray-hint">
+                Click the map to outline a field ({draft.length} pts
+                {draft.length >= 3 ? ` · ${polyAcres(draft).toFixed(1)} ac` : ''})
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="control-btn success" onClick={commitDraft}
+                  disabled={draft.length < 3} style={{ flex: 1 }}>
+                  Add field to job
+                </button>
+                <button className="control-btn" onClick={() => setDraft([])}
+                  disabled={draft.length === 0}>
+                  Restart
+                </button>
+              </div>
+            </>
           )}
+
+          {areaDrawing && (
+            <div className="spray-hint">
+              Click the map to outline the search area ({area.length} pts)
+            </div>
+          )}
+          {area.length >= 3 && (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="control-btn success" onClick={() => { setAreaDrawing(false); detectFields(); }}
+                disabled={busy} style={{ flex: 1 }}>
+                {busy ? 'Detecting…' : 'Detect fields in area'}
+              </button>
+              <button className="control-btn" onClick={() => { setArea([]); setAreaDrawing(false); }}>
+                ×
+              </button>
+            </div>
+          )}
+
           {snapping && (
             <div className="spray-hint">Click inside a field — it snaps to the mapped perimeter</div>
           )}
           {snapStatus && <div className="spray-hint">{snapStatus}</div>}
+
+          {fields.length > 0 && (
+            <div className="sfield-list">
+              {fields.map((f, i) => (
+                <div key={i} className="sfield-row">
+                  <span className="sfield-n">{i + 1}</span>
+                  <span className="sfield-meta">
+                    {(f.acres != null ? f.acres : polyAcres(f.polygon)).toFixed(1)} ac · {f.source}
+                  </span>
+                  <button className="wp-del" onClick={() => removeField(i)} title="Remove">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="safety-field" style={{ marginTop: 4 }}>
-            <input
-              placeholder="Order ID"
-              value={orderId}
-              onChange={(e) => setOrderId(e.target.value)}
-              style={{ flex: 1, minWidth: 0 }}
-            />
+            <input placeholder="Order ID" value={orderId}
+              onChange={(e) => setOrderId(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
             <button className="control-btn" onClick={loadOrder}
               disabled={busy || !orderId.trim()}>
               Load
@@ -308,9 +351,15 @@ function SprayPanel({
               </div>
             </div>
           )}
+
+          {(fields.length > 0 || area.length > 0 || draft.length > 0) && (
+            <button className="control-btn danger" onClick={clearJob} style={{ width: '100%' }}>
+              Clear job
+            </button>
+          )}
         </div>
 
-        {/* SETTINGS: swath/altitude + no-spray keepout buffers */}
+        {/* SETTINGS */}
         <div className="safety-card">
           <div className="safety-card-head"><span>SETTINGS</span></div>
           <NumField label="Swath" value={swath} unit="m" onChange={setSwath} />
@@ -320,24 +369,25 @@ function SprayPanel({
           <NumField label="Bldg buf" value={bufBuildings} unit="m" onChange={setBufBuildings} />
         </div>
 
-        {/* GENERATE */}
         <button className="control-btn success" onClick={generate}
-          disabled={busy || field.length < 3} style={{ width: '100%' }}>
-          {busy ? 'Working…' : 'Generate Spray Plan'}
+          disabled={busy || (fields.length === 0 && draft.length < 3)} style={{ width: '100%' }}>
+          {busy ? 'Working…' : `Generate Spray Plan${fields.length > 1 ? ` (${fields.length} fields)` : ''}`}
         </button>
 
-        {stats && (
+        {totals && (
           <div className="safety-card">
-            <div className="safety-card-head"><span>PLAN</span></div>
+            <div className="safety-card-head"><span>JOB PLAN</span></div>
             <div className="spray-stats">
-              <Stat v={fmt(stats.area_acres, 1)} l="acres" />
-              <Stat v={fmt(stats.n_passes, 0)} l="passes" />
-              <Stat v={fmt(stats.path_length_m / 1000, 1)} l="path km" />
-              <Stat v={fmt(stats.est_time_s / 60, 0)} l="est min" />
+              <Stat v={totals.fields} l="fields" />
+              <Stat v={fmt(totals.area_acres, 1)} l="acres" />
+              <Stat v={fmt(totals.est_time_s / 60, 0)} l="est min" />
+              <Stat v={fmt(totals.spray_path_m / 1000, 1)} l="spray km" />
+              <Stat v={fmt(totals.transit_m / 1000, 1)} l="transit km" />
+              <Stat v={totals.waypoints} l="waypoints" />
             </div>
-            {keepouts != null && (
+            {keepoutsApplied > 0 && (
               <div className="spray-keep">
-                {keepouts} keepout{keepouts === 1 ? '' : 's'} applied
+                {keepoutsApplied} keepout{keepoutsApplied === 1 ? '' : 's'} applied
               </div>
             )}
             {zones && (
@@ -345,7 +395,17 @@ function SprayPanel({
                 zones: {zones.water.length} water · {zones.trees.length} trees · {zones.buildings.length} bldgs
               </div>
             )}
+            {(plan.skipped || []).length > 0 && (
+              <div className="spray-note">
+                {plan.skipped.length} field(s) skipped — {plan.skipped[0].error}
+              </div>
+            )}
             {zonesNote && <div className="spray-note">{zonesNote}</div>}
+            <div className="spray-hint" style={{ textAlign: 'left' }}>
+              Legend: <span style={{ color: '#00e5ff' }}>■ spray</span> ·{' '}
+              <span style={{ color: '#ff9100' }}>■ transit</span> ·{' '}
+              <span style={{ color: '#b388ff' }}>■ home legs</span>
+            </div>
           </div>
         )}
 
@@ -353,7 +413,7 @@ function SprayPanel({
         <div className="safety-card">
           <div className="safety-card-head"><span>MISSION</span></div>
           <button className="control-btn success" onClick={upload}
-            disabled={!connected || busy || !plan || !(plan.waypoints || []).length}
+            disabled={!connected || busy || !plan || !(plan.combined_waypoints || []).length}
             style={{ width: '100%' }}>
             Upload Mission
           </button>

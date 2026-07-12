@@ -118,6 +118,55 @@ def point_in_ring(lat: float, lon: float, ring: list) -> bool:
     return inside
 
 
+def ring_acres(ring: list) -> float:
+    """Shoelace area of a [{lat,lon}] ring in acres (equirectangular)."""
+    pts = ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring
+    if len(pts) < 3:
+        return 0.0
+    clat = sum(p["lat"] for p in pts) / len(pts)
+    kx = 111320.0 * math.cos(math.radians(clat))
+    ky = 111320.0
+    area = 0.0
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        area += (a["lon"] * kx) * (b["lat"] * ky) - (b["lon"] * kx) * (a["lat"] * ky)
+    return abs(area / 2.0) / 4046.8564224
+
+
+def fields_in_area(selection: list, cap: int = 40) -> list:
+    """All mapped ag parcels inside a selection polygon: parcel centroid (or
+    any sampled vertex) inside the selection counts. Selection drives the
+    Overpass radius, capped like everything else."""
+    if len(selection) < 3:
+        raise ValueError("selection polygon needs at least 3 vertices")
+    clat = sum(p["lat"] for p in selection) / len(selection)
+    clon = sum(p["lon"] for p in selection) / len(selection)
+    kx = 111320.0 * math.cos(math.radians(clat))
+    span = max(math.hypot((p["lat"] - clat) * 111320.0, (p["lon"] - clon) * kx)
+               for p in selection)
+    radius = min(MAX_RADIUS_M, span + 300.0)
+
+    sel_ring = list(selection)
+    if sel_ring[0] != sel_ring[-1]:
+        sel_ring = sel_ring + [sel_ring[0]]
+
+    parcels = fetch_fields(clat, clon, radius)
+    out = []
+    for f in parcels:
+        cs = f["coords"]
+        pc_lat = sum(c["lat"] for c in cs) / len(cs)
+        pc_lon = sum(c["lon"] for c in cs) / len(cs)
+        inside = point_in_ring(pc_lat, pc_lon, sel_ring)
+        if not inside:
+            step = max(1, len(cs) // 10)
+            inside = any(point_in_ring(c["lat"], c["lon"], sel_ring) for c in cs[::step])
+        if inside:
+            out.append(f)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def snap_to_field(lat: float, lon: float, radius_m: float = 1500.0):
     """The parcel containing the click, else the one whose centroid is
     nearest within 300 m, else None."""

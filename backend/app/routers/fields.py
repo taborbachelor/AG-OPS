@@ -1,7 +1,55 @@
+import math
+
 from fastapi import APIRouter, HTTPException
-from app.field_boundaries import fetch_fields, snap_to_field
+from pydantic import BaseModel, Field
+from app.field_boundaries import fetch_fields, fields_in_area, ring_acres, snap_to_field
 
 router = APIRouter()
+
+
+class AreaLatLon(BaseModel):
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
+class AreaBody(BaseModel):
+    polygon: list[AreaLatLon] = Field(min_length=3, max_length=200)
+
+
+def _clean_ring(coords):
+    """Drop the ring-closing duplicate and downsample to stay editable and
+    under the planner's 500-vertex cap."""
+    ring = coords[:-1] if len(coords) > 1 and coords[0] == coords[-1] else list(coords)
+    if len(ring) > 400:
+        step = (len(ring) // 400) + 1
+        ring = ring[::step]
+    return ring
+
+
+@router.post("/detect")
+def detect_fields(body: AreaBody):
+    """Auto-detect mapped ag parcels inside a selection area. found=0 is a
+    normal outcome in sparsely-mapped country — operators add fields by hand."""
+    selection = [{"lat": p.lat, "lon": p.lon} for p in body.polygon]
+    if not all(math.isfinite(p["lat"]) and math.isfinite(p["lon"]) for p in selection):
+        raise HTTPException(422, "selection coordinates must be finite")
+    try:
+        parcels = fields_in_area(selection)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    fields = []
+    for f in parcels:
+        ring = _clean_ring(f["coords"])
+        if len(ring) < 3:
+            continue
+        fields.append({
+            "polygon": ring,
+            "acres": round(ring_acres(f["coords"]), 2),
+            "tags": f.get("tags", {}),
+        })
+    return {"found": len(fields), "fields": fields}
 
 
 @router.get("/")

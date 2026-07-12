@@ -2188,6 +2188,48 @@ body {
   text-align: center;
 }
 
+/* ===== SPRAY JOB FIELD LIST ===== */
+.sfield-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 128px;
+  overflow-y: auto;
+}
+
+.sfield-list::-webkit-scrollbar { width: 6px; }
+.sfield-list::-webkit-scrollbar-thumb { background: rgba(0,229,255,0.2); border-radius: 3px; }
+
+.sfield-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  background: rgba(0, 10, 30, 0.5);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+}
+
+.sfield-n {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent-green);
+  color: #04121f;
+  font-size: 11px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sfield-meta {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 /* ===== SPRAY PANEL ===== */
 .spray-panel {
   position: absolute;

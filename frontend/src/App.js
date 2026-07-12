@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import TopBar from './components/TopBar';
 import NavRail from './components/NavRail';
 import HudLeft from './components/HudLeft';
@@ -58,9 +58,12 @@ function App() {
 
   // Spray workflow state (view 'spray'): customer field boundary, generated
   // coverage plan and the no-spray zones fetched alongside it.
-  const [sprayField, setSprayField] = useState([]);     // [{lat, lon}]
+  const [sprayField, setSprayField] = useState([]);     // working draft [{lat,lon}]
   const [sprayDrawing, setSprayDrawing] = useState(false);
-  const [sprayPlan, setSprayPlan] = useState(null);      // coverage API response
+  const [sprayFields, setSprayFields] = useState([]);    // committed job fields [{polygon, acres, source}]
+  const [sprayArea, setSprayArea] = useState([]);        // selection area for auto-detect
+  const [areaDrawing, setAreaDrawing] = useState(false);
+  const [sprayPlan, setSprayPlan] = useState(null);      // plan_multi response
   const [sprayZones, setSprayZones] = useState(null);    // {water, trees, buildings}
   // Snap-to-field: one map click looks up the mapped parcel boundary under it.
   const [spraySnap, setSpraySnap] = useState(false);
@@ -205,13 +208,17 @@ function App() {
   // Any boundary edit invalidates a previously generated plan so the shown
   // path can never disagree with the shown field.
   const addSprayVertex = (latlng) => {
-    setSprayField((f) => [...f, { lat: latlng.lat, lon: latlng.lng }]);
+    if (areaDrawing) {
+      setSprayArea((a) => [...a, { lat: latlng.lat, lon: latlng.lng }]);
+    } else {
+      setSprayField((f) => [...f, { lat: latlng.lat, lon: latlng.lng }]);
+    }
     setSprayPlan(null);
   };
 
   // Snap mode: the click doesn't add a vertex — it asks the backend for the
-  // mapped field boundary containing that point. found:false is normal in
-  // sparsely-mapped areas; the operator just draws instead.
+  // mapped field boundary containing that point, then commits it straight
+  // into the job. found:false is normal in sparsely-mapped areas.
   const snapClick = async (latlng) => {
     setSnapStatus('Looking up field boundary…');
     try {
@@ -219,10 +226,10 @@ function App() {
         `http://localhost:8000/api/fields/snap?lat=${latlng.lat}&lon=${latlng.lng}&radius=2000`);
       const d = await r.json();
       if (r.ok && d.found) {
-        setSprayField(d.polygon);
+        setSprayFields((f) => [...f, { polygon: d.polygon, acres: null, source: 'snap' }]);
         setSprayPlan(null);
         setSpraySnap(false);
-        setSnapStatus(`Snapped to mapped field boundary (${d.polygon.length} pts)`);
+        setSnapStatus(`Snapped field added to job (${d.polygon.length} pts)`);
       } else {
         setSnapStatus('No mapped field boundary here — draw it manually');
       }
@@ -231,6 +238,35 @@ function App() {
     }
     setTimeout(() => setSnapStatus(''), 6000);
   };
+
+  // Whole-job flight legs for the map, derived from the plan_multi response:
+  // spray passes solid, in-field hops faint, inter-field transits orange,
+  // home legs purple. Waypoints are (start,end) pairs per spray segment.
+  const sprayLegs = useMemo(() => {
+    const p = sprayPlan;
+    if (!p || !p.flight_order) return [];
+    const byIndex = Object.fromEntries(p.fields.map((f) => [f.index, f]));
+    const legs = [];
+    for (const stop of p.flight_order) {
+      let wps = byIndex[stop.index].waypoints;
+      if (stop.reversed) wps = [...wps].reverse();
+      for (let i = 0; i + 1 < wps.length; i += 2) {
+        legs.push({ kind: 'spray', pts: [[wps[i].lat, wps[i].lon], [wps[i + 1].lat, wps[i + 1].lon]] });
+        if (i + 2 < wps.length) {
+          legs.push({ kind: 'hop', pts: [[wps[i + 1].lat, wps[i + 1].lon], [wps[i + 2].lat, wps[i + 2].lon]] });
+        }
+      }
+    }
+    const ts = p.transits || [];
+    // With a home position the planner emits n+1 transit legs (out + back);
+    // without, n-1 (between fields only).
+    const hasHome = ts.length === p.flight_order.length + 1;
+    ts.forEach((t, ti) => {
+      const kind = hasHome && (ti === 0 || ti === ts.length - 1) ? 'home' : 'transit';
+      legs.push({ kind, pts: t.pts.map((q) => [q.lat, q.lon]) });
+    });
+    return legs;
+  }, [sprayPlan]);
 
   // Full tools show when not flying, or when peeked mid-flight.
   const tools = !flying || toolsPeek;
@@ -248,9 +284,11 @@ function App() {
           fence={fence}
           playbackPath={playbackPath}
           sprayField={sprayField}
-          sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap)}
+          sprayFields={sprayFields.map((f) => f.polygon)}
+          sprayArea={sprayArea}
+          sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing)}
           onAddSprayVertex={spraySnap ? snapClick : addSprayVertex}
-          sprayPath={sprayPlan ? sprayPlan.waypoints : []}
+          sprayLegs={view === 'spray' ? sprayLegs : []}
           zones={view === 'spray' ? sprayZones : null}
         />
       </div>
@@ -297,10 +335,16 @@ function App() {
       {tools && view === 'spray' && (
         <SprayPanel
           connected={connected}
-          field={sprayField}
-          setField={setSprayField}
+          draft={sprayField}
+          setDraft={setSprayField}
+          fields={sprayFields}
+          setFields={setSprayFields}
+          area={sprayArea}
+          setArea={setSprayArea}
           drawing={sprayDrawing}
           setDrawing={setSprayDrawing}
+          areaDrawing={areaDrawing}
+          setAreaDrawing={setAreaDrawing}
           snapping={spraySnap}
           setSnapping={setSpraySnap}
           snapStatus={snapStatus}
@@ -308,6 +352,7 @@ function App() {
           setPlan={setSprayPlan}
           zones={sprayZones}
           setZones={setSprayZones}
+          homePos={telemetry.home_lat ? { lat: telemetry.home_lat, lon: telemetry.home_lon } : null}
         />
       )}
       {tools && view === 'safety' && (

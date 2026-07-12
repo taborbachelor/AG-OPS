@@ -2,7 +2,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import telemetry, mission, connection, vehicle, safety, logs, coverage, zones, orders, fields
+from app.routers import telemetry, mission, connection, vehicle, safety, logs, coverage, coverage_multi, zones, orders, fields
 
 logger = logging.getLogger("gcs")
 
@@ -31,6 +31,7 @@ app.include_router(vehicle.router, prefix="/api/vehicle", tags=["vehicle"])
 app.include_router(safety.router, prefix="/api/safety", tags=["safety"])
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 app.include_router(coverage.router, prefix="/api/coverage", tags=["coverage"])
+app.include_router(coverage_multi.router, prefix="/api/coverage", tags=["coverage"])
 app.include_router(zones.router, prefix="/api/zones", tags=["zones"])
 app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
 app.include_router(fields.router, prefix="/api/fields", tags=["fields"])

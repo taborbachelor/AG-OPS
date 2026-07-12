@@ -58,6 +58,27 @@ const CMD_COLOR = {
 // No-spray zone tints: water blue, trees green, buildings orange.
 const ZONE_COLOR = { water: '#3b82f6', trees: '#00e676', buildings: '#ff9100' };
 
+// Whole-job flight legs: spray-on solid, in-field hops faint, inter-field
+// transit orange, home legs purple — the operator sees the ENTIRE flight.
+const LEG_STYLE = {
+  spray: { color: '#00e5ff', weight: 3, opacity: 0.95 },
+  hop: { color: '#00e5ff', weight: 1.5, opacity: 0.45, dashArray: '3 5' },
+  transit: { color: '#ff9100', weight: 2.5, opacity: 0.85, dashArray: '8 6' },
+  home: { color: '#b388ff', weight: 2, opacity: 0.8, dashArray: '8 6' },
+};
+
+function fieldBadge(n) {
+  return L.divIcon({
+    html: `<div style="width:20px;height:20px;border-radius:50%;background:#00e676;
+      border:2px solid #fff;color:#04121f;font:800 11px 'Inter',system-ui,sans-serif;
+      display:flex;align-items:center;justify-content:center;
+      box-shadow:0 0 8px rgba(0,230,118,.6)">${n}</div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+    className: '',
+  });
+}
+
 function waypointIcon(seq, command, draggable) {
   const color = CMD_COLOR[command] || '#00e5ff';
   return L.divIcon({
@@ -146,9 +167,25 @@ function MapControls({ layer, setLayer, follow, setFollow, onCenter }) {
   );
 }
 
+// Frame the whole job when a field is added/removed (never mid-draw).
+function FitJob({ fields, area, drawing }) {
+  const map = useMap();
+  const prevCount = useRef(0);
+  useEffect(() => {
+    const count = fields.length;
+    if (count !== prevCount.current && !drawing) {
+      const pts = [...fields.flat(), ...area].map((p) => [p.lat, p.lon]);
+      if (pts.length >= 3) map.fitBounds(pts, { padding: [60, 60] });
+    }
+    prevCount.current = count;
+  }, [fields, area, drawing, map]);
+  return null;
+}
+
 function MapView({
   telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence, playbackPath,
-  sprayField = [], sprayDrawing, onAddSprayVertex, sprayPath = [], zones,
+  sprayField = [], sprayFields = [], sprayArea = [], sprayDrawing, onAddSprayVertex,
+  sprayLegs = [], zones,
 }) {
   const [layer, setLayer] = useState('sat');
   const [follow, setFollow] = useState(true);
@@ -206,6 +243,7 @@ function MapView({
             sprayDrawing is ever active, so the handlers cannot conflict. */}
         <ClickHandler enabled={sprayDrawing} onAddWaypoint={onAddSprayVertex} />
         <FitField field={sprayField} drawing={sprayDrawing} />
+        <FitJob fields={sprayFields} area={sprayArea} drawing={sprayDrawing} />
 
         {/* No-spray zones (semi-transparent tints under everything else) */}
         {zones && ['water', 'trees', 'buildings'].map((kind) =>
@@ -241,13 +279,38 @@ function MapView({
           />
         ))}
 
-        {/* Generated spray plan — solid cyan serpentine */}
-        {sprayPath.length > 1 && (
-          <Polyline
-            positions={sprayPath.map((w) => [w.lat, w.lon])}
-            pathOptions={{ color: '#00e5ff', weight: 2.5, opacity: 0.9 }}
+        {/* Selection area for auto-detect — white dashed */}
+        {sprayArea.length >= 2 && (
+          <Polygon
+            positions={sprayArea.map((p) => [p.lat, p.lon])}
+            pathOptions={{ color: '#ffffff', weight: 2, dashArray: '10 8',
+              opacity: 0.7, fillColor: '#ffffff', fillOpacity: 0.04 }}
           />
         )}
+
+        {/* Committed job fields — numbered */}
+        {sprayFields.map((poly, i) => poly.length >= 3 && (
+          <React.Fragment key={`jf-${i}`}>
+            <Polygon
+              positions={poly.map((p) => [p.lat, p.lon])}
+              pathOptions={{ color: '#00e676', weight: 2,
+                fillColor: '#00e676', fillOpacity: 0.08 }}
+            />
+            <Marker
+              position={[
+                poly.reduce((s, p) => s + p.lat, 0) / poly.length,
+                poly.reduce((s, p) => s + p.lon, 0) / poly.length,
+              ]}
+              icon={fieldBadge(i + 1)}
+            />
+          </React.Fragment>
+        ))}
+
+        {/* Whole-job flight: spray passes, hops, transits, home legs */}
+        {sprayLegs.map((leg, i) => (
+          <Polyline key={`leg-${i}`} positions={leg.pts}
+            pathOptions={LEG_STYLE[leg.kind] || LEG_STYLE.spray} />
+        ))}
 
         {/* Planned flight path */}
         {pathLine.length > 1 && (
