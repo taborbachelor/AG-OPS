@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 
 const API = 'http://localhost:8000/api';
 const COMMANDS = ['TAKEOFF', 'WAYPOINT', 'LOITER', 'LAND', 'RTL'];
@@ -29,6 +29,7 @@ function MissionPanel({
     try {
       const items = waypoints.map((w) => ({
         command: w.command, lat: w.lat, lon: w.lon, alt: Number(w.alt), param1: 0,
+        radius: Number(w.radius) || 0,
       }));
       const res = await fetch(`${API}/mission/upload`, {
         method: 'POST',
@@ -61,6 +62,59 @@ function MissionPanel({
       flash('Download error');
     }
     setBusy(false);
+  };
+
+  // Swap a waypoint with its neighbor (reorder without redrawing).
+  const moveWp = (idx, dir) => {
+    setWaypoints((w) => {
+      const j = idx + dir;
+      if (j < 0 || j >= w.length) return w;
+      const copy = [...w];
+      [copy[idx], copy[j]] = [copy[j], copy[idx]];
+      return copy;
+    });
+  };
+
+  // Save/load the mission as a plain JSON file so jobs are repeatable.
+  const fileRef = useRef(null);
+
+  const saveMission = () => {
+    const items = waypoints.map(({ command, lat, lon, alt, radius }) => ({
+      command, lat, lon, alt, radius: Number(radius) || 0,
+    }));
+    const blob = new Blob([JSON.stringify({ version: 1, items }, null, 2)],
+      { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mission.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const loadMission = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const items = Array.isArray(parsed) ? parsed : parsed.items;
+        if (!Array.isArray(items)) throw new Error('not a mission file');
+        const clean = items
+          .filter((it) => COMMANDS.includes(it.command)
+            && Number.isFinite(it.lat) && Number.isFinite(it.lon))
+          .map((it) => ({
+            id: nextId.current++, command: it.command, lat: it.lat, lon: it.lon,
+            alt: Number(it.alt) || 100, radius: Number(it.radius) || 0,
+          }));
+        setWaypoints(clean);
+        flash(`Loaded ${clean.length} waypoints ✓`);
+      } catch {
+        flash('Invalid mission file');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   };
 
   const start = async () => {
@@ -104,6 +158,10 @@ function MissionPanel({
           {waypoints.map((w, idx) => (
             <div key={w.id} className="wp-row">
               <span className="wp-seq" style={{ background: CMD_COLOR[w.command] }}>{idx + 1}</span>
+              <div className="wp-move">
+                <button onClick={() => moveWp(idx, -1)} disabled={idx === 0} title="Move up">▲</button>
+                <button onClick={() => moveWp(idx, 1)} disabled={idx === waypoints.length - 1} title="Move down">▼</button>
+              </div>
               <select
                 value={w.command}
                 onChange={(e) => updateWaypoint(w.id, { command: e.target.value })}
@@ -116,8 +174,18 @@ function MissionPanel({
                   type="number"
                   value={w.alt}
                   onChange={(e) => updateWaypoint(w.id, { alt: Number(e.target.value) })}
-                  style={{ width: 52, padding: '3px 6px', fontSize: 11 }}
+                  style={{ width: 46, padding: '3px 6px', fontSize: 11 }}
                   title="Altitude (m)"
+                />
+              )}
+              {w.command === 'LOITER' && (
+                <input
+                  type="number"
+                  value={w.radius || 0}
+                  onChange={(e) => updateWaypoint(w.id, { radius: Number(e.target.value) })}
+                  style={{ width: 46, padding: '3px 6px', fontSize: 11 }}
+                  title="Loiter radius (m), 0 = default"
+                  placeholder="rad"
                 />
               )}
               <button className="wp-del" onClick={() => removeWaypoint(w.id)} title="Delete">×</button>
@@ -141,6 +209,18 @@ function MissionPanel({
         <button className="control-btn danger" onClick={clearMission} disabled={busy} style={{ flex: 1 }}>
           Clear
         </button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <button className="control-btn" onClick={saveMission}
+          disabled={waypoints.length === 0} style={{ flex: 1 }}>
+          Save file
+        </button>
+        <button className="control-btn" onClick={() => fileRef.current && fileRef.current.click()}
+          style={{ flex: 1 }}>
+          Load file
+        </button>
+        <input ref={fileRef} type="file" accept=".json,application/json"
+          onChange={loadMission} style={{ display: 'none' }} />
       </div>
 
       {status && (

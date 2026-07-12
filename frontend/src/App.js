@@ -54,6 +54,9 @@ function App() {
   const [sprayDrawing, setSprayDrawing] = useState(false);
   const [sprayPlan, setSprayPlan] = useState(null);      // coverage API response
   const [sprayZones, setSprayZones] = useState(null);    // {water, trees, buildings}
+  // Snap-to-field: one map click looks up the mapped parcel boundary under it.
+  const [spraySnap, setSpraySnap] = useState(false);
+  const [snapStatus, setSnapStatus] = useState('');
 
   // Safety state
   const [fence, setFence] = useState({ enable: false, radius: 300, alt_max: 120, action: 1 });
@@ -160,6 +163,29 @@ function App() {
     setSprayPlan(null);
   };
 
+  // Snap mode: the click doesn't add a vertex — it asks the backend for the
+  // mapped field boundary containing that point. found:false is normal in
+  // sparsely-mapped areas; the operator just draws instead.
+  const snapClick = async (latlng) => {
+    setSnapStatus('Looking up field boundary…');
+    try {
+      const r = await fetch(
+        `http://localhost:8000/api/fields/snap?lat=${latlng.lat}&lon=${latlng.lng}&radius=2000`);
+      const d = await r.json();
+      if (r.ok && d.found) {
+        setSprayField(d.polygon);
+        setSprayPlan(null);
+        setSpraySnap(false);
+        setSnapStatus(`Snapped to mapped field boundary (${d.polygon.length} pts)`);
+      } else {
+        setSnapStatus('No mapped field boundary here — draw it manually');
+      }
+    } catch {
+      setSnapStatus('Field lookup failed — draw manually');
+    }
+    setTimeout(() => setSnapStatus(''), 6000);
+  };
+
   // Full tools show when not flying, or when peeked mid-flight.
   const tools = !flying || toolsPeek;
 
@@ -176,8 +202,8 @@ function App() {
           fence={fence}
           playbackPath={playbackPath}
           sprayField={sprayField}
-          sprayDrawing={view === 'spray' && tools && sprayDrawing}
-          onAddSprayVertex={addSprayVertex}
+          sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap)}
+          onAddSprayVertex={spraySnap ? snapClick : addSprayVertex}
           sprayPath={sprayPlan ? sprayPlan.waypoints : []}
           zones={view === 'spray' ? sprayZones : null}
         />
@@ -226,6 +252,9 @@ function App() {
           setField={setSprayField}
           drawing={sprayDrawing}
           setDrawing={setSprayDrawing}
+          snapping={spraySnap}
+          setSnapping={setSpraySnap}
+          snapStatus={snapStatus}
           plan={sprayPlan}
           setPlan={setSprayPlan}
           zones={sprayZones}

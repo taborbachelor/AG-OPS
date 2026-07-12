@@ -801,6 +801,36 @@ body {
   cursor: pointer;
 }
 
+.wp-move {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.wp-move button {
+  width: 16px;
+  height: 11px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: rgba(0, 229, 255, 0.1);
+  color: var(--text-secondary);
+  font-size: 7px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wp-move button:hover:not(:disabled) {
+  color: var(--accent);
+  background: rgba(0, 229, 255, 0.2);
+}
+
+.wp-move button:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
 .wp-del:hover {
   background: rgba(255, 23, 68, 0.3);
 }

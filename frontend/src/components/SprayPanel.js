@@ -68,6 +68,7 @@ function Stat({ v, l }) {
 
 function SprayPanel({
   connected, field, setField, drawing, setDrawing,
+  snapping, setSnapping, snapStatus,
   plan, setPlan, zones, setZones,
 }) {
   const [orderId, setOrderId] = useState('');
@@ -254,10 +255,18 @@ function SprayPanel({
           <div style={{ display: 'flex', gap: 6 }}>
             <button
               className={`control-btn ${drawing ? 'active' : ''}`}
-              onClick={() => setDrawing(!drawing)}
+              onClick={() => { setDrawing(!drawing); setSnapping(false); }}
               style={{ flex: 1 }}
             >
               {drawing ? 'Drawing…' : 'Draw field'}
+            </button>
+            <button
+              className={`control-btn ${snapping ? 'active' : ''}`}
+              onClick={() => { setSnapping(!snapping); setDrawing(false); }}
+              style={{ flex: 1 }}
+              title="Click a field on the map to snap to its mapped boundary"
+            >
+              {snapping ? 'Click a field…' : 'Snap'}
             </button>
             <button className="control-btn" onClick={() => setDrawing(false)} disabled={!drawing}>
               Close
@@ -270,6 +279,10 @@ function SprayPanel({
           {drawing && (
             <div className="spray-hint">Click the map to add vertices</div>
           )}
+          {snapping && (
+            <div className="spray-hint">Click inside a field — it snaps to the mapped perimeter</div>
+          )}
+          {snapStatus && <div className="spray-hint">{snapStatus}</div>}
           <div className="safety-field" style={{ marginTop: 4 }}>
             <input
               placeholder="Order ID"
