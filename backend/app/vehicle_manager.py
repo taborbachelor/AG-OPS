@@ -49,6 +49,10 @@ class TelemetryData:
     mission_seq: int = 0
     mission_count: int = 0
     wp_dist: float = 0.0
+    # Home/launch point mirrored into telemetry so the UI can compute
+    # distance-to-home (RTL margin) without extra endpoints.
+    home_lat: float = 0.0
+    home_lon: float = 0.0
 
 
 class VehicleManager:
@@ -72,6 +76,12 @@ class VehicleManager:
         # (FS_GCS_ENABL) triggers RTL if the ground station goes silent —
         # discovered live when a spray mission kept snapping back to RTL.
         self._last_hb_sent = 0.0
+        # Auto-reconnect: after an unexpected link loss (USB wiggle, radio
+        # dropout) retry the last connection string. User-initiated
+        # disconnects clear the flag so we never fight the operator.
+        self._auto_reconnect = False
+        self._conn_params = None
+        self.reconnecting = False
         # Flight logging: one file per flight (opened on arm, closed on disarm).
         self._log_fh = None
         self._log_start = 0.0
@@ -93,6 +103,9 @@ class VehicleManager:
             self.connected = True
             self.connection_string = connection_string
             self._last_heartbeat = time.time()
+            self._conn_params = (connection_string, baud)
+            self._auto_reconnect = True
+            self.reconnecting = False
             self._mode_mapping = self.connection.mode_mapping()
             self._request_data_streams()
             # Ask for the home position (used by the landing flow).
@@ -117,6 +130,9 @@ class VehicleManager:
         )
 
     def disconnect(self):
+        # Operator asked for this — never auto-reconnect afterwards.
+        self._auto_reconnect = False
+        self.reconnecting = False
         self._running = False
         if self._telemetry_thread:
             self._telemetry_thread.join(timeout=5)
@@ -222,6 +238,8 @@ class VehicleManager:
                     self.home_lat = msg.latitude / 1e7
                     self.home_lon = msg.longitude / 1e7
                     self.home_alt = msg.altitude / 1000.0
+                    self.telemetry.home_lat = self.home_lat
+                    self.telemetry.home_lon = self.home_lon
 
             except Exception:
                 # Socket error / decode error: don't spin hot; the watchdog
@@ -241,6 +259,27 @@ class VehicleManager:
         except Exception:
             pass
         self.connection = None
+        # Unexpected loss (not operator-initiated): try to get the link back.
+        if self._auto_reconnect and self._conn_params:
+            threading.Thread(target=self._reconnect_loop, daemon=True).start()
+
+    def _reconnect_loop(self, max_attempts: int = 20, delay_s: float = 5.0):
+        """Retry the last connection after a link drop (USB reseated, radio
+        back in range). Gives up after max_attempts; a user disconnect()
+        aborts it immediately via the _auto_reconnect flag."""
+        self.reconnecting = True
+        try:
+            for _ in range(max_attempts):
+                if not self._auto_reconnect or self.connected:
+                    return
+                cs, baud = self._conn_params
+                try:
+                    self.connect(cs, baud)
+                    return  # success — telemetry loop is running again
+                except Exception:
+                    time.sleep(delay_s)
+        finally:
+            self.reconnecting = False
 
     # --- Flight logging: one JSON-lines file per flight (arm -> disarm) ---
     def _maybe_log(self):
@@ -426,6 +465,45 @@ class VehicleManager:
         self.connection.param_set_send(name, value)
         return True
 
+    def get_all_params(self, timeout: float = 25.0) -> dict:
+        """Fetch the vehicle's full parameter table (several hundred entries).
+        Holds the link lock for the duration, so telemetry pauses briefly —
+        this is a ground/config activity. PARAM_VALUE traffic counts as proof
+        of life (and we keep heartbeating) so neither watchdog fires."""
+        if not self.connection:
+            return {}
+        conn = self.connection
+        params = {}
+        total = None
+        with self._link_lock:
+            conn.mav.param_request_list_send(conn.target_system, conn.target_component)
+            start = time.time()
+            last_rx = start
+            while time.time() - start < timeout:
+                if time.time() - self._last_hb_sent > 1.0:
+                    try:
+                        conn.mav.heartbeat_send(
+                            mavutil.mavlink.MAV_TYPE_GCS,
+                            mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+                        self._last_hb_sent = time.time()
+                    except Exception:
+                        pass
+                msg = conn.recv_match(type="PARAM_VALUE", blocking=True, timeout=2)
+                if msg is None:
+                    if time.time() - last_rx > 4:
+                        break  # stream dried up — return what we have
+                    continue
+                last_rx = time.time()
+                self._last_heartbeat = last_rx  # param traffic = link alive
+                pid = msg.param_id
+                if isinstance(pid, bytes):
+                    pid = pid.decode(errors="ignore")
+                params[pid.rstrip("\x00")] = msg.param_value
+                total = msg.param_count or total
+                if total and len(params) >= total:
+                    break
+        return params
+
     def get_params(self, names: list[str]) -> dict:
         """Fetch several named parameters, matching each reply by param_id so we
         never mismatch values. Held under the link lock (it reads the link)."""
@@ -520,7 +598,9 @@ class VehicleManager:
                     conn.target_system, conn.target_component, i,
                     mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
                     cmd, 0, 1,
-                    float(it.get("param1", 0.0)), 0.0, 0.0, 0.0,
+                    # param1 = hold time / command-specific; param3 = loiter
+                    # radius for LOITER items (ArduPlane convention).
+                    float(it.get("param1", 0.0)), 0.0, float(it.get("radius", 0.0)), 0.0,
                     int(float(it["lat"]) * 1e7), int(float(it["lon"]) * 1e7), float(it["alt"]),
                 )
             ack = conn.recv_match(type=["MISSION_ACK"], blocking=True, timeout=5)

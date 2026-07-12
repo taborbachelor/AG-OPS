@@ -39,4 +39,5 @@ async def connection_status():
     return {
         "connected": vehicle_manager.connected,
         "connection_string": vehicle_manager.connection_string,
+        "reconnecting": vehicle_manager.reconnecting,
     }

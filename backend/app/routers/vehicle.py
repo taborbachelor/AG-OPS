@@ -88,6 +88,18 @@ async def land():
     return {"status": "landing", **result}
 
 
+@router.get("/params")
+async def get_all_params():
+    """Full parameter table — takes a few seconds; telemetry pauses while the
+    link is dedicated to the transfer (ground/config activity)."""
+    if not vehicle_manager.connected:
+        raise HTTPException(400, "Not connected")
+    params = vehicle_manager.get_all_params()
+    if not params:
+        raise HTTPException(504, "Parameter download timed out")
+    return {"params": params, "count": len(params)}
+
+
 class ParamUpdate(BaseModel):
     name: str
     value: float

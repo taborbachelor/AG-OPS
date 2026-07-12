@@ -14,6 +14,8 @@ class MissionItem(BaseModel):
     lon: float
     alt: float
     param1: float = 0.0
+    # Loiter radius in meters (param3 for LOITER items; ignored otherwise).
+    radius: float = 0.0
 
 
 class MissionUpload(BaseModel):
