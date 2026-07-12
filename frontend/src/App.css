@@ -1747,3 +1747,202 @@ body {
   letter-spacing: 0.02em;
   font-weight: 600;
 }
+
+/* ===== SUPERVISOR CONSOLE (in-flight) ===== */
+
+/* Nav rail slides away while flying */
+.nav-rail {
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+.nav-rail.hidden {
+  transform: translateX(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rail-peek {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 64px;
+  z-index: 951;
+  border: 1px solid var(--glass-border);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.rail-peek:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Vitals console — bottom center */
+.flight-vitals {
+  position: absolute;
+  bottom: 26px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  animation: vitals-in 0.25s ease;
+}
+
+@keyframes vitals-in {
+  from { opacity: 0; transform: translate(-50%, 12px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.mission-progress {
+  padding: 5px 14px;
+  border-radius: 20px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.vitals-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.vitals-pill {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  padding: 12px 26px;
+  border-radius: 16px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  transition: border-color 0.15s;
+  user-select: none;
+}
+
+.vitals-pill:hover {
+  border-color: rgba(0, 229, 255, 0.35);
+}
+
+.vital {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 52px;
+}
+
+.vital-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.vital-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.vital-mode {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  padding-left: 20px;
+  border-left: 1px solid var(--glass-border);
+  min-width: 64px;
+  justify-content: center;
+}
+
+.vitals-btn {
+  padding: 0 28px;
+  border-radius: 14px;
+  border: 1px solid;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.vitals-btn.rtl {
+  border-color: rgba(255, 145, 0, 0.5);
+  color: var(--accent-orange);
+}
+
+.vitals-btn.rtl:hover {
+  background: rgba(255, 145, 0, 0.15);
+}
+
+.vitals-btn.land {
+  border-color: rgba(0, 230, 118, 0.4);
+  color: var(--accent-green);
+}
+
+.vitals-btn.land:hover {
+  background: rgba(0, 230, 118, 0.12);
+}
+
+.vitals-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Detail drawer above the pill */
+.vitals-drawer {
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  gap: 10px 26px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  align-items: center;
+  animation: vitals-in 0.18s ease;
+}
+
+.vd-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.vd-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.vd-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.vd-disarm {
+  grid-column: 4;
+  font-size: 11px;
+  padding: 6px 12px;
+}

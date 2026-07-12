@@ -44,6 +44,11 @@ class TelemetryData:
     rc_rssi: int = 0
     # Servo/motor outputs the flight controller is actually commanding (PWM µs).
     servo_outputs: list = field(default_factory=list)
+    # Mission progress: current item seq (0 = home), user-waypoint count, and
+    # distance to the active waypoint in meters.
+    mission_seq: int = 0
+    mission_count: int = 0
+    wp_dist: float = 0.0
 
 
 class VehicleManager:
@@ -189,6 +194,15 @@ class VehicleManager:
                     self.telemetry.servo_outputs = [
                         getattr(msg, f"servo{i}_raw", 0) or 0 for i in range(1, 9)
                     ]
+
+                elif msg_type == "MISSION_CURRENT":
+                    # Note: we deliberately ignore msg.total — its semantics vary
+                    # across firmware versions. mission_count comes from our own
+                    # upload/download, which we know is home-exclusive.
+                    self.telemetry.mission_seq = msg.seq
+
+                elif msg_type == "NAV_CONTROLLER_OUTPUT":
+                    self.telemetry.wp_dist = float(msg.wp_dist)
 
                 elif msg_type == "HOME_POSITION":
                     self.home_lat = msg.latitude / 1e7
@@ -498,6 +512,8 @@ class VehicleManager:
             ack = conn.recv_match(type=["MISSION_ACK"], blocking=True, timeout=5)
 
         ok = ack is not None and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED
+        if ok:
+            self.telemetry.mission_count = len(items)
         return {"ok": ok, "ack": (ack.type if ack else None), "count": len(items)}
 
     def download_mission(self) -> list[dict]:
@@ -532,7 +548,9 @@ class VehicleManager:
             conn.mav.mission_ack_send(conn.target_system, conn.target_component,
                                       mavutil.mavlink.MAV_MISSION_ACCEPTED)
 
-        return [w for w in result if w["seq"] != 0]
+        items = [w for w in result if w["seq"] != 0]
+        self.telemetry.mission_count = len(items)
+        return items
 
 
 # Singleton instance

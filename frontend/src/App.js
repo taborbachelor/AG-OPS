@@ -13,6 +13,7 @@ import SafetyPanel from './components/SafetyPanel';
 import LogsPanel from './components/LogsPanel';
 import RCPanel from './components/RCPanel';
 import ControlsPanel from './components/ControlsPanel';
+import FlightVitals from './components/FlightVitals';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -22,6 +23,7 @@ const DEFAULT_TELEMETRY = {
   battery_level: null, pitch: 0, roll: 0, yaw: 0,
   gps_fix: 0, gps_satellites: 0,
   rc_channels: [], rc_rssi: 0, servo_outputs: [],
+  mission_seq: 0, mission_count: 0, wp_dist: 0,
 };
 
 function App() {
@@ -32,6 +34,13 @@ function App() {
 
   // One active view, switched from the left nav rail.
   const [view, setView] = useState('fly'); // fly | plan | safety | rc | controls | logs
+
+  // Supervisor console: once the aircraft is genuinely in flight, the UI
+  // switches to a minimal supervision layout and latches there until disarm.
+  // The altitude/speed gate keeps bench tests (armed on the ground) in the
+  // full-tool layout.
+  const [flying, setFlying] = useState(false);
+  const [toolsPeek, setToolsPeek] = useState(false);
 
   // Mission planning state
   const [waypoints, setWaypoints] = useState([]); // {id, command, lat, lon, alt}
@@ -47,10 +56,7 @@ function App() {
   const [playbackPath, setPlaybackPath] = useState(null);
   const viewTelem = playbackTelem || telemetry;
 
-  // Poll the backend for the true link state every 3s. This is the single
-  // source of truth for `connected`, so the UI self-heals: it reflects link
-  // loss (SITL exit, radio dropout), backend restarts, and page refreshes
-  // without the user having to do anything.
+  // Poll the backend for the true link state every 3s (single source of truth).
   useEffect(() => {
     let alive = true;
     const poll = async () => {
@@ -71,8 +77,7 @@ function App() {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  // Telemetry WebSocket, opened whenever we're connected and auto-reconnected
-  // if it drops while still connected.
+  // Telemetry WebSocket with auto-reconnect.
   useEffect(() => {
     if (!connected) {
       setTelemetry(DEFAULT_TELEMETRY);
@@ -98,13 +103,24 @@ function App() {
     };
   }, [connected]);
 
+  // Enter supervision mode when actually airborne; leave it on disarm.
+  useEffect(() => {
+    if (!connected || !telemetry.armed) {
+      setFlying(false);
+      setToolsPeek(false);
+      return;
+    }
+    if (!flying && (telemetry.altitude > 8 || telemetry.groundspeed > 5)) {
+      setFlying(true);
+    }
+  }, [telemetry, connected, flying]);
+
   // --- Mission editing handlers ---
   const addWaypoint = (latlng) => {
     setWaypoints((w) => [
       ...w,
       {
         id: nextId.current++,
-        // First point defaults to TAKEOFF, the rest to WAYPOINT.
         command: w.length === 0 ? 'TAKEOFF' : 'WAYPOINT',
         lat: latlng.lat,
         lon: latlng.lng,
@@ -128,13 +144,16 @@ function App() {
 
   const clearMission = () => setWaypoints([]);
 
+  // Full tools show when not flying, or when peeked mid-flight.
+  const tools = !flying || toolsPeek;
+
   return (
     <div className="app">
       {/* Full-screen map background */}
       <div className="fullscreen-map">
         <MapView
           telemetry={viewTelem}
-          planning={view === 'plan'}
+          planning={view === 'plan' && tools}
           waypoints={waypoints}
           onAddWaypoint={addWaypoint}
           onMoveWaypoint={moveWaypoint}
@@ -152,12 +171,21 @@ function App() {
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
-      {/* View switcher */}
-      <NavRail view={view} setView={setView} />
+      {/* View switcher — slides away during flight */}
+      <NavRail view={view} setView={setView} hidden={!tools} />
+      {flying && (
+        <button
+          className="rail-peek"
+          onClick={() => setToolsPeek((p) => !p)}
+          title={toolsPeek ? 'Hide tools' : 'Show tools'}
+        >
+          {toolsPeek ? '‹' : '›'}
+        </button>
+      )}
 
-      {/* Active view's panel (FLY shows the attitude/gauge HUD) */}
-      {view === 'fly' && <HudLeft telemetry={viewTelem} />}
-      {view === 'plan' && (
+      {/* Active view's panel (hidden in supervision mode unless peeked) */}
+      {tools && view === 'fly' && !flying && <HudLeft telemetry={viewTelem} />}
+      {tools && view === 'plan' && (
         <MissionPanel
           connected={connected}
           waypoints={waypoints}
@@ -170,22 +198,24 @@ function App() {
           nextId={nextId}
         />
       )}
-      {view === 'safety' && (
+      {tools && view === 'safety' && (
         <SafetyPanel connected={connected} fence={fence} setFence={setFence} />
       )}
-      {view === 'rc' && <RCPanel telemetry={telemetry} connected={connected} />}
-      {view === 'controls' && <ControlsPanel telemetry={telemetry} />}
-      {view === 'logs' && (
+      {tools && view === 'rc' && <RCPanel telemetry={telemetry} connected={connected} />}
+      {tools && view === 'controls' && <ControlsPanel telemetry={telemetry} />}
+      {tools && view === 'logs' && (
         <LogsPanel setPlaybackTelem={setPlaybackTelem} setPlaybackPath={setPlaybackPath} />
       )}
 
-      <HudRight telemetry={telemetry} connected={connected} />
-      <HudBottom telemetry={viewTelem} />
+      {/* Instrument clusters: only in the full-tool layout */}
+      {!flying && <HudRight telemetry={telemetry} connected={connected} />}
+      {!flying && <HudBottom telemetry={viewTelem} />}
 
-      {/* Arm + takeoff flow (hidden while planning or reviewing logs) */}
-      {view !== 'plan' && view !== 'logs' && (
+      {/* Setup phase: arm + takeoff flow. Flight phase: the vitals console. */}
+      {!flying && view !== 'plan' && view !== 'logs' && (
         <LaunchControl telemetry={telemetry} connected={connected} />
       )}
+      {flying && <FlightVitals telemetry={telemetry} />}
 
       {/* Video Picture-in-Picture */}
       <VideoFeed />

@@ -52,9 +52,9 @@ const VIEWS = [
   { id: 'logs', label: 'LOGS' },
 ];
 
-function NavRail({ view, setView }) {
+function NavRail({ view, setView, hidden }) {
   return (
-    <nav className="nav-rail">
+    <nav className={`nav-rail ${hidden ? 'hidden' : ''}`}>
       {VIEWS.map((v) => (
         <button
           key={v.id}
