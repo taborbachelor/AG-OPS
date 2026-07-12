@@ -17,6 +17,7 @@ import ControlsPanel from './components/ControlsPanel';
 import FlightVitals from './components/FlightVitals';
 import AlertCenter from './components/AlertCenter';
 import FlightSummary from './components/FlightSummary';
+import ParamsPanel from './components/ParamsPanel';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -314,6 +315,7 @@ function App() {
       )}
       {tools && view === 'rc' && <RCPanel telemetry={telemetry} connected={connected} />}
       {tools && view === 'controls' && <ControlsPanel telemetry={telemetry} />}
+      {tools && view === 'params' && <ParamsPanel connected={connected} />}
       {tools && view === 'logs' && (
         <LogsPanel setPlaybackTelem={setPlaybackTelem} setPlaybackPath={setPlaybackPath} />
       )}

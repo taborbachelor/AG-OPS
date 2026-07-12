@@ -2106,6 +2106,88 @@ body {
   gap: 14px 10px;
 }
 
+/* ===== PARAMS PANEL ===== */
+.params-panel {
+  position: absolute;
+  left: 76px;
+  top: 56px;
+  bottom: 96px;
+  width: 300px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: panel-in 0.16s ease;
+}
+
+.params-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.params-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.params-list::-webkit-scrollbar { width: 6px; }
+.params-list::-webkit-scrollbar-thumb { background: rgba(0,229,255,0.2); border-radius: 3px; }
+
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.param-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.param-value {
+  width: 88px;
+  padding: 3px 6px;
+  font-size: 11px;
+  text-align: right;
+}
+
+.param-save {
+  border: 1px solid rgba(0, 230, 118, 0.4);
+  background: rgba(0, 230, 118, 0.1);
+  color: var(--accent-green);
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+
+.params-more {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 6px 0;
+}
+
+.params-caution {
+  margin-top: 8px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--accent-orange);
+  text-align: center;
+}
+
 /* ===== SPRAY PANEL ===== */
 .spray-panel {
   position: absolute;

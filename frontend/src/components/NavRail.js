@@ -47,6 +47,12 @@ const ICONS = {
       <path d="M10 8.2 L16 12 L10 15.8 Z" fill="currentColor" />
     </svg>
   ),
+  params: (
+    <svg viewBox="0 0 24 24">
+      <path d="M12 2.6 L20.2 7.3 V16.7 L12 21.4 L3.8 16.7 V7.3 Z" fill="currentColor" />
+      <circle cx="12" cy="12" r="3.4" fill="#04121f" />
+    </svg>
+  ),
 };
 
 const VIEWS = [
@@ -56,6 +62,7 @@ const VIEWS = [
   { id: 'safety', label: 'SAFETY' },
   { id: 'rc', label: 'RC' },
   { id: 'controls', label: 'CTRL' },
+  { id: 'params', label: 'PARAMS' },
   { id: 'logs', label: 'LOGS' },
 ];
 
