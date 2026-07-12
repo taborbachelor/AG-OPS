@@ -9,6 +9,11 @@ the +x axis, slice the polygon with horizontal lines spaced one swath apart,
 and stitch the resulting in-polygon segments into a boustrophedon (serpentine)
 path. A local flat projection is accurate to well under a meter for fields a
 few km across, which is far below GPS and spray-drift error.
+
+No-spray keepouts (water/trees/buildings) are clipped in the same rotated
+frame: every pass stays a horizontal segment there, so removing the buffered
+keepout region is exact 1-D interval subtraction along x rather than general
+polygon clipping.
 """
 
 import math
@@ -27,6 +32,8 @@ def plan_coverage(
     alt_m: float,
     angle_deg: Optional[float] = None,
     speed_ms: float = 18.0,
+    keepouts: Optional[list[list[dict]]] = None,
+    keepout_buffer_m: float = 0.0,
 ) -> dict:
     """Plan a serpentine spray pattern over a lat/lon polygon.
 
@@ -38,15 +45,36 @@ def plan_coverage(
             the orientation of the polygon's longest edge is used — long passes
             with few turns are almost always what an operator wants.
         speed_ms: cruise speed used only for the time estimate.
+        keepouts: optional no-spray polygons (water/trees/buildings), each a
+            list of {"lat", "lon"} dicts with >= 3 vertices. Spray passes are
+            clipped so NO point of any sprayed segment lies within
+            keepout_buffer_m of any keepout (inside a keepout counts as
+            distance 0). A pass crossing a keepout splits into sub-segments
+            outside the buffered zone; sub-segments shorter than
+            _MIN_SEGMENT_M are dropped — too short to cycle the spray valve.
+            LIMITATION: transit hops between passes are NOT rerouted around
+            keepouts in this version. The drone may overfly a keepout between
+            passes with the sprayer off; it just never sprays inside the
+            buffered zone.
+        keepout_buffer_m: extra standoff in meters around every keepout (>= 0).
 
     Returns:
-        {"waypoints": [{"lat", "lon", "alt"}, ...],  # pass endpoints in flight order
+        {"waypoints": [{"lat", "lon", "alt"}, ...],  # segment endpoints in flight order
          "stats": {area_m2, area_acres, n_passes, path_length_m, est_time_s,
                    swath_m, angle_deg}}
+        When keepouts is not None, stats additionally carries
+        "keepouts_applied" (how many keepout polygons actually removed spray
+        length from at least one pass) and "n_segments" (spray sub-segments
+        after clipping; n_passes stays the pre-clip sweep-pass count). Calls
+        without keepouts keep the exact legacy shape so existing clients see
+        byte-for-byte identical responses.
 
     Raises:
         ValueError: fewer than 3 vertices, zero-area (degenerate) polygon,
-            or non-positive swath/speed.
+            non-positive swath/speed, a malformed keepout (< 3 vertices or
+            non-{lat, lon} entries), a negative buffer, or when clipping
+            removes every spray segment ("field fully blocked by keepout
+            zones").
     """
     if len(polygon) < 3:
         raise ValueError("polygon needs at least 3 vertices")
@@ -54,6 +82,17 @@ def plan_coverage(
         raise ValueError("swath_m must be > 0")
     if speed_ms <= 0:
         raise ValueError("speed_ms must be > 0")
+    # NaN would silently disable every comparison below, so reject it too.
+    if not (math.isfinite(keepout_buffer_m) and keepout_buffer_m >= 0.0):
+        raise ValueError("keepout_buffer_m must be >= 0")
+    if keepouts is not None:
+        for i, kp in enumerate(keepouts):
+            if not isinstance(kp, (list, tuple)) or len(kp) < 3:
+                raise ValueError(f"keepout {i} needs at least 3 vertices")
+            for p in kp:
+                if not isinstance(p, dict) or "lat" not in p or "lon" not in p:
+                    raise ValueError(
+                        f"keepout {i} vertices must be {{lat, lon}} dicts")
 
     pts, proj = _project(polygon)
     area_m2 = _shoelace_area(pts)
@@ -73,11 +112,23 @@ def plan_coverage(
 
     passes = _boustrophedon_passes(rot, swath_m)
 
+    if keepouts is None:
+        # Legacy path: no clipping, no extra stats keys, identical output.
+        segments = passes
+        keepouts_applied = 0
+    else:
+        segments, keepouts_applied = _clip_passes_to_keepouts(
+            passes, keepouts, keepout_buffer_m, proj, cos_t, sin_t)
+        if not segments:
+            raise ValueError("field fully blocked by keepout zones")
+
     # Walk the full polyline (rotation preserves distance, so measure here):
-    # segment lengths plus the hop from each pass end to the next pass start.
+    # segment lengths plus the hop from each segment end to the next start.
+    # Hops are straight lines and are NOT rerouted around keepouts — the
+    # sprayer is off during transit, so overflight is acceptable there.
     path_length = 0.0
     flat: list[tuple[float, float]] = []
-    for a, b in passes:
+    for a, b in segments:
         flat.extend((a, b))
     for i in range(1, len(flat)):
         path_length += math.dist(flat[i - 1], flat[i])
@@ -90,7 +141,7 @@ def plan_coverage(
         lat, lon = _unproject(x, y, proj)
         waypoints.append({"lat": lat, "lon": lon, "alt": alt_m})
 
-    return {
+    result = {
         "waypoints": waypoints,
         "stats": {
             "area_m2": area_m2,
@@ -102,6 +153,12 @@ def plan_coverage(
             "angle_deg": theta,
         },
     }
+    if keepouts is not None:
+        # Only in keepout mode: pre-keepout clients keep the exact legacy
+        # stats shape (regression-pinned in tests).
+        result["stats"]["keepouts_applied"] = keepouts_applied
+        result["stats"]["n_segments"] = len(segments)
+    return result
 
 
 # --- local projection -------------------------------------------------------
@@ -223,3 +280,142 @@ def _boustrophedon_passes(
             passes.append((start, end))
             cur = end
     return passes
+
+
+# --- keepout clipping ---------------------------------------------------------
+
+# Sub-segments shorter than this are dropped after keepout clipping: they are
+# too short for the sprayer to cycle on/off and only add turn overhead.
+_MIN_SEGMENT_M = 2.0
+
+
+def _clip_passes_to_keepouts(
+    passes: list[tuple[tuple[float, float], tuple[float, float]]],
+    keepouts: list[list[dict]],
+    buffer_m: float,
+    proj: tuple,
+    cos_t: float,
+    sin_t: float,
+) -> tuple[list[tuple[tuple[float, float], tuple[float, float]]], int]:
+    """Clip horizontal spray passes against buffered keepout polygons.
+
+    Works entirely in the rotated local frame the passes were built in: each
+    keepout is projected with the field's projection and rotated with the
+    field's sweep rotation, so every pass stays a horizontal segment and
+    clipping reduces to exact 1-D interval subtraction along x.
+
+    Returns (segments, keepouts_applied): sub-segments in flight order (the
+    parent pass's direction is preserved, so serpentine ordering survives)
+    and the count of keepout polygons that removed spray length from at
+    least one pre-clip pass — an order-independent definition, so overlap
+    between keepouts can't hide one behind another.
+    """
+    lat0, lon0, m_per_deg, cos_lat = proj
+    kp_rot = []
+    for kp in keepouts:
+        pts = []
+        for p in kp:
+            x = (p["lon"] - lon0) * m_per_deg * cos_lat
+            y = (p["lat"] - lat0) * m_per_deg
+            pts.append((x * cos_t + y * sin_t, -x * sin_t + y * cos_t))
+        kp_rot.append(pts)
+
+    applied: set[int] = set()
+    segments = []
+    for (sx, sy), (ex, _ey) in passes:  # sy == _ey: passes are horizontal
+        lo, hi = (sx, ex) if sx <= ex else (ex, sx)
+        blocked: list[tuple[float, float]] = []
+        for k, ring in enumerate(kp_rot):
+            ivs = _merge_intervals(_blocked_intervals(ring, sy, buffer_m))
+            for blo, bhi in ivs:
+                if min(bhi, hi) - max(blo, lo) > 1e-9:
+                    applied.add(k)
+            blocked.extend(ivs)
+        allowed = [
+            (a, b)
+            for a, b in _subtract_intervals(lo, hi, _merge_intervals(blocked))
+            if b - a >= _MIN_SEGMENT_M
+        ]
+        if sx <= ex:
+            segments.extend(((a, sy), (b, sy)) for a, b in allowed)
+        else:  # pass flew right-to-left: keep flight order and direction
+            segments.extend(((b, sy), (a, sy)) for a, b in reversed(allowed))
+    return segments, len(applied)
+
+
+def _blocked_intervals(
+    ring: list[tuple[float, float]], c: float, buffer_m: float
+) -> list[tuple[float, float]]:
+    """x-intervals of the line y=c within buffer_m of the polygon `ring`.
+
+    The buffered region is the Minkowski sum of the polygon with a disc of
+    radius buffer_m, decomposed exactly as interior + per-edge capsules
+    (a disc around each vertex plus the buffer_m-wide rectangle along each
+    edge). Interior crossings alone handle buffer_m == 0 ("inside == 0
+    distance"). Intervals may overlap and are unsorted; callers merge them.
+    """
+    intervals = list(_line_crossings(ring, c))  # interior of the keepout
+    if buffer_m <= 0.0:
+        return intervals
+    n = len(ring)
+    for i in range(n):
+        ax, ay = ring[i]
+        bx, by = ring[(i + 1) % n]
+        # Disc around vertex a. Each vertex is the 'a' of exactly one edge,
+        # so one disc per loop iteration covers every capsule end cap.
+        d2 = buffer_m * buffer_m - (c - ay) * (c - ay)
+        if d2 > 0.0:
+            s = math.sqrt(d2)
+            intervals.append((ax - s, ax + s))
+        # Rectangle strip of half-width buffer_m along the edge; a simple
+        # convex quad, so _line_crossings yields its (single) x-interval.
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length > 1e-9:  # zero-length edges have no strip (discs suffice)
+            nx = -dy / length * buffer_m
+            ny = dx / length * buffer_m
+            quad = [(ax + nx, ay + ny), (bx + nx, by + ny),
+                    (bx - nx, by - ny), (ax - nx, ay - ny)]
+            intervals.extend(_line_crossings(quad, c))
+    return intervals
+
+
+def _merge_intervals(
+    intervals: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Union of possibly-overlapping (lo, hi) intervals, sorted by lo."""
+    ivs = sorted((lo, hi) for lo, hi in intervals if hi - lo > 1e-9)
+    merged: list[list[float]] = []
+    for lo, hi in ivs:
+        # The epsilon fuses intervals that abut within float noise (e.g. a
+        # vertex disc meeting its edge rectangle) so no sliver survives.
+        if merged and lo <= merged[-1][1] + 1e-9:
+            if hi > merged[-1][1]:
+                merged[-1][1] = hi
+        else:
+            merged.append([lo, hi])
+    return [(lo, hi) for lo, hi in merged]
+
+
+def _subtract_intervals(
+    lo: float, hi: float, blocked: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """Sub-intervals of [lo, hi] left after removing `blocked`.
+
+    `blocked` must be merged and sorted (see _merge_intervals).
+    """
+    out = []
+    cur = lo
+    for blo, bhi in blocked:
+        if bhi <= cur:
+            continue
+        if blo >= hi:
+            break
+        if blo > cur:
+            out.append((cur, blo))
+        cur = bhi
+        if cur >= hi:
+            break
+    if cur < hi:
+        out.append((cur, hi))
+    return out

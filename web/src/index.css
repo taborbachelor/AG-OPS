@@ -85,11 +85,18 @@ body {
 }
 
 .site-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   padding: 20px;
   text-align: center;
   color: var(--ink-soft);
   font-size: 13px;
   border-top: 1px solid var(--line);
+}
+
+.footer-contact {
+  font-size: 12.5px;
 }
 
 /* ---------- landing hero ---------- */
@@ -178,6 +185,29 @@ body {
 
 .price-note {
   font-size: 13px;
+}
+
+.landing-track {
+  margin: 14px 0 0;
+  font-size: 14.5px;
+  color: var(--ink-soft);
+}
+
+/* Text-style button so links inside copy don't look like form controls. */
+.link-btn {
+  font: inherit;
+  font-weight: 600;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--green-700);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  color: var(--green-900);
 }
 
 /* ---------- buttons ---------- */
@@ -474,6 +504,145 @@ body {
   margin: 14px 0 0;
 }
 
+/* ---------- spray-path preview (review step) ---------- */
+
+.plan-preview {
+  margin: 4px 0 18px;
+}
+
+.plan-map {
+  width: 100%;
+  height: min(44vh, 320px);
+  min-height: 240px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  /* Leaflet panes stack above page chrome without this. */
+  isolation: isolate;
+}
+
+.plan-note {
+  margin: 10px 0 0;
+  font-size: 14.5px;
+}
+
+/* ---------- order tracking ---------- */
+
+.track-intro {
+  margin-top: -6px;
+}
+
+.track-row {
+  display: flex;
+  gap: 10px;
+}
+
+.track-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.track-input:focus {
+  outline: 2px solid var(--green-600);
+  outline-offset: 1px;
+  background: #fff;
+}
+
+.track-error {
+  margin: 14px 0 0;
+}
+
+.track-result {
+  margin-top: 16px;
+}
+
+.timeline {
+  list-style: none;
+  margin: 4px 0 22px;
+  padding: 0;
+}
+
+.timeline li {
+  position: relative;
+  padding: 0 0 22px 44px;
+}
+
+.timeline li:last-child {
+  padding-bottom: 0;
+}
+
+/* Connector line from each dot down to the next stage's dot. */
+.timeline li:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 30px;
+  bottom: 2px;
+  width: 2px;
+  background: var(--line);
+}
+
+.timeline li.tl-done:not(:last-child)::before {
+  background: var(--green-600);
+}
+
+.tl-dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tl-done .tl-dot {
+  background: var(--green-700);
+  border-color: var(--green-700);
+  color: #fff;
+}
+
+.tl-current .tl-dot {
+  border-color: var(--green-700);
+  color: var(--green-700);
+  box-shadow: 0 0 0 4px var(--green-100);
+}
+
+/* A finished order's last stage is both done and current — keep the
+   filled-green "done" look in that case. */
+.tl-done.tl-current .tl-dot {
+  color: #fff;
+}
+
+.tl-label {
+  font-weight: 600;
+  color: var(--ink-soft);
+  line-height: 28px;
+}
+
+.tl-done .tl-label,
+.tl-current .tl-label {
+  color: var(--ink);
+}
+
+.tl-detail {
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+
 /* ---------- confirmation ---------- */
 
 .confirm-card {
@@ -548,5 +717,13 @@ body {
 
   .prog-label {
     display: none;
+  }
+
+  .track-row {
+    flex-direction: column;
+  }
+
+  .track-row .btn {
+    width: 100%;
   }
 }

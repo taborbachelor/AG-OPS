@@ -8,6 +8,7 @@ import MapView from './components/MapView';
 import VideoFeed from './components/VideoFeed';
 import ConnectionOverlay from './components/ConnectionOverlay';
 import MissionPanel from './components/MissionPanel';
+import SprayPanel from './components/SprayPanel';
 import LaunchControl from './components/LaunchControl';
 import SafetyPanel from './components/SafetyPanel';
 import LogsPanel from './components/LogsPanel';
@@ -33,7 +34,7 @@ function App() {
   const [showConnect, setShowConnect] = useState(false);
 
   // One active view, switched from the left nav rail.
-  const [view, setView] = useState('fly'); // fly | plan | safety | rc | controls | logs
+  const [view, setView] = useState('fly'); // fly | plan | spray | safety | rc | controls | logs
 
   // Supervisor console: once the aircraft is genuinely in flight, the UI
   // switches to a minimal supervision layout and latches there until disarm.
@@ -46,6 +47,13 @@ function App() {
   const [waypoints, setWaypoints] = useState([]); // {id, command, lat, lon, alt}
   const [defaultAlt, setDefaultAlt] = useState(100);
   const nextId = useRef(1);
+
+  // Spray workflow state (view 'spray'): customer field boundary, generated
+  // coverage plan and the no-spray zones fetched alongside it.
+  const [sprayField, setSprayField] = useState([]);     // [{lat, lon}]
+  const [sprayDrawing, setSprayDrawing] = useState(false);
+  const [sprayPlan, setSprayPlan] = useState(null);      // coverage API response
+  const [sprayZones, setSprayZones] = useState(null);    // {water, trees, buildings}
 
   // Safety state
   const [fence, setFence] = useState({ enable: false, radius: 300, alt_max: 120, action: 1 });
@@ -144,6 +152,14 @@ function App() {
 
   const clearMission = () => setWaypoints([]);
 
+  // Map clicks append spray-field vertices while the draw tool is armed.
+  // Any boundary edit invalidates a previously generated plan so the shown
+  // path can never disagree with the shown field.
+  const addSprayVertex = (latlng) => {
+    setSprayField((f) => [...f, { lat: latlng.lat, lon: latlng.lng }]);
+    setSprayPlan(null);
+  };
+
   // Full tools show when not flying, or when peeked mid-flight.
   const tools = !flying || toolsPeek;
 
@@ -159,6 +175,11 @@ function App() {
           onMoveWaypoint={moveWaypoint}
           fence={fence}
           playbackPath={playbackPath}
+          sprayField={sprayField}
+          sprayDrawing={view === 'spray' && tools && sprayDrawing}
+          onAddSprayVertex={addSprayVertex}
+          sprayPath={sprayPlan ? sprayPlan.waypoints : []}
+          zones={view === 'spray' ? sprayZones : null}
         />
       </div>
 
@@ -196,6 +217,19 @@ function App() {
           removeWaypoint={removeWaypoint}
           clearMission={clearMission}
           nextId={nextId}
+        />
+      )}
+      {tools && view === 'spray' && (
+        <SprayPanel
+          connected={connected}
+          field={sprayField}
+          setField={setSprayField}
+          drawing={sprayDrawing}
+          setDrawing={setSprayDrawing}
+          plan={sprayPlan}
+          setPlan={setSprayPlan}
+          zones={sprayZones}
+          setZones={setSprayZones}
         />
       )}
       {tools && view === 'safety' && (

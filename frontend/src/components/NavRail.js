@@ -14,6 +14,12 @@ const ICONS = {
       <path d="M6.8 17.2 C10 14, 14 10, 17.2 6.8" stroke="currentColor" strokeWidth="1.6" fill="none" strokeDasharray="3 2.4" />
     </svg>
   ),
+  spray: (
+    <svg viewBox="0 0 24 24">
+      <path d="M12 2 C12 2 5.5 9.8 5.5 14.6 A6.5 6.5 0 0 0 18.5 14.6 C18.5 9.8 12 2 12 2 Z" fill="currentColor" />
+      <path d="M9 14.4 A3.4 3.4 0 0 0 11.6 17.8" stroke="#04121f" strokeWidth="1.4" fill="none" strokeLinecap="round" />
+    </svg>
+  ),
   safety: (
     <svg viewBox="0 0 24 24">
       <path d="M12 2 L20 5.5 V11 C20 16.6 16.6 20.7 12 22 C7.4 20.7 4 16.6 4 11 V5.5 Z" fill="currentColor" />
@@ -46,6 +52,7 @@ const ICONS = {
 const VIEWS = [
   { id: 'fly', label: 'FLY' },
   { id: 'plan', label: 'PLAN' },
+  { id: 'spray', label: 'SPRAY' },
   { id: 'safety', label: 'SAFETY' },
   { id: 'rc', label: 'RC' },
   { id: 'controls', label: 'CTRL' },

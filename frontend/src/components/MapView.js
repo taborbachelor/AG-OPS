@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Marker, Polyline, Circle, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Polyline, Polygon, Circle, CircleMarker, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -55,6 +55,9 @@ const CMD_COLOR = {
   TAKEOFF: '#00e676', WAYPOINT: '#00e5ff', LOITER: '#ff9100', LAND: '#ff1744', RTL: '#b388ff',
 };
 
+// No-spray zone tints: water blue, trees green, buildings orange.
+const ZONE_COLOR = { water: '#3b82f6', trees: '#00e676', buildings: '#ff9100' };
+
 function waypointIcon(seq, command, draggable) {
   const color = CMD_COLOR[command] || '#00e5ff';
   return L.divIcon({
@@ -103,6 +106,21 @@ function ClickHandler({ enabled, onAddWaypoint }) {
   return null;
 }
 
+// Frame a newly set spray field (e.g. loaded from an order) once per change.
+// While drawing, the array changes on every click — skip those so the map
+// stays put under the operator's cursor.
+function FitField({ field, drawing }) {
+  const map = useMap();
+  const prev = useRef(field);
+  useEffect(() => {
+    const changed = field !== prev.current;
+    prev.current = field;
+    if (!changed || drawing || field.length < 3) return;
+    map.fitBounds(field.map((p) => [p.lat, p.lon]), { padding: [60, 60] });
+  }, [field, drawing, map]);
+  return null;
+}
+
 function MapControls({ layer, setLayer, follow, setFollow, onCenter }) {
   return (
     <div className="map-controls">
@@ -128,7 +146,10 @@ function MapControls({ layer, setLayer, follow, setFollow, onCenter }) {
   );
 }
 
-function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence, playbackPath }) {
+function MapView({
+  telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence, playbackPath,
+  sprayField = [], sprayDrawing, onAddSprayVertex, sprayPath = [], zones,
+}) {
   const [layer, setLayer] = useState('sat');
   const [follow, setFollow] = useState(true);
   const trailRef = useRef([]);
@@ -170,7 +191,7 @@ function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWay
         zoom={4}
         className={`layer-${layer}`}
         style={{ height: '100%', width: '100%', background: '#0a0e17',
-                 cursor: planning ? 'crosshair' : 'grab' }}
+                 cursor: planning || sprayDrawing ? 'crosshair' : 'grab' }}
         zoomControl={false}
         ref={mapRef}
       >
@@ -178,8 +199,55 @@ function MapView({ telemetry, planning, waypoints = [], onAddWaypoint, onMoveWay
         {active.overlay && <TileLayer key={`${layer}-ov`} url={active.overlay} maxZoom={19} />}
 
         <InitialCenter lat={telemetry.lat} lon={telemetry.lon} />
-        <Follow lat={telemetry.lat} lon={telemetry.lon} enabled={follow && !planning} />
+        <Follow lat={telemetry.lat} lon={telemetry.lon}
+          enabled={follow && !planning && !sprayDrawing} />
         <ClickHandler enabled={planning} onAddWaypoint={onAddWaypoint} />
+        {/* Spray-field drawing: App.js guarantees only one of planning /
+            sprayDrawing is ever active, so the handlers cannot conflict. */}
+        <ClickHandler enabled={sprayDrawing} onAddWaypoint={onAddSprayVertex} />
+        <FitField field={sprayField} drawing={sprayDrawing} />
+
+        {/* No-spray zones (semi-transparent tints under everything else) */}
+        {zones && ['water', 'trees', 'buildings'].map((kind) =>
+          (zones[kind] || []).map((z, i) => (
+            <Polygon
+              key={`${kind}-${i}`}
+              positions={z.coords.map((c) => [c.lat, c.lon])}
+              pathOptions={{ color: ZONE_COLOR[kind], weight: 1, opacity: 0.7,
+                fillColor: ZONE_COLOR[kind], fillOpacity: 0.25 }}
+            />
+          )))}
+
+        {/* Spray field boundary — green dashed, distinct from mission paths */}
+        {sprayField.length >= 3 && (
+          <Polygon
+            positions={sprayField.map((p) => [p.lat, p.lon])}
+            pathOptions={{ color: '#00e676', weight: 2, dashArray: '6 6',
+              fillColor: '#00e676', fillOpacity: 0.06 }}
+          />
+        )}
+        {sprayField.length === 2 && (
+          <Polyline
+            positions={sprayField.map((p) => [p.lat, p.lon])}
+            pathOptions={{ color: '#00e676', weight: 2, dashArray: '6 6' }}
+          />
+        )}
+        {sprayDrawing && sprayField.map((p, i) => (
+          <CircleMarker
+            key={`fv-${i}`}
+            center={[p.lat, p.lon]}
+            radius={4}
+            pathOptions={{ color: '#fff', weight: 1, fillColor: '#00e676', fillOpacity: 1 }}
+          />
+        ))}
+
+        {/* Generated spray plan — solid cyan serpentine */}
+        {sprayPath.length > 1 && (
+          <Polyline
+            positions={sprayPath.map((w) => [w.lat, w.lon])}
+            pathOptions={{ color: '#00e5ff', weight: 2.5, opacity: 0.9 }}
+          />
+        )}
 
         {/* Planned flight path */}
         {pathLine.length > 1 && (

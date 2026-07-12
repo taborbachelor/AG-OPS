@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
 import FieldMap from './FieldMap.jsx'
+import SprayPlanPreview from './SprayPlanPreview.jsx'
+import TrackOrder from './TrackOrder.jsx'
 import {
   polygonAcres,
   estimateCents,
@@ -17,8 +19,11 @@ const API_BASE = '/api/orders'
 const STEPS = ['Contact', 'Field', 'Schedule', 'Review']
 
 function App() {
-  // 'landing' | 0..3 (STEPS index) | 'confirmed'
+  // 'landing' | 0..3 (STEPS index) | 'confirmed' | 'track'
   const [step, setStep] = useState('landing')
+
+  // Order id handed to the tracking view ('' = customer types their own).
+  const [trackId, setTrackId] = useState('')
 
   // Step 1 — contact
   const [name, setName] = useState('')
@@ -145,7 +150,28 @@ function App() {
           <button className="btn btn-primary btn-lg" onClick={() => go(0)}>
             Get an instant quote
           </button>
+          <p className="landing-track">
+            Already booked?{' '}
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => {
+                setTrackId('')
+                go('track')
+              }}
+            >
+              Check my order
+            </button>
+          </p>
         </section>
+      </Shell>
+    )
+  }
+
+  if (step === 'track') {
+    return (
+      <Shell>
+        <TrackOrder initialId={trackId} onBack={() => go('landing')} />
       </Shell>
     )
   }
@@ -170,6 +196,16 @@ function App() {
             <strong>Save this ID</strong> — you&rsquo;ll need it to check on or
             change your order.
           </p>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              setTrackId(order.id)
+              go('track')
+            }}
+          >
+            Track your order
+          </button>
           <p className="muted">
             Status: <span className="status-chip">{order.status}</span>
             {order.status === 'pending_payment' &&
@@ -349,6 +385,7 @@ function App() {
               book you in by hand.
             </div>
           )}
+          <SprayPlanPreview vertices={vertices} />
           <dl className="review">
             <div>
               <dt>Contact</dt>
@@ -412,7 +449,11 @@ function Shell({ children }) {
       </header>
       <main className="content">{children}</main>
       <footer className="site-footer">
-        PrairieSpray · Sabetha, Kansas · from $12/acre
+        <span>PrairieSpray · Sabetha, Kansas · from $12/acre</span>
+        {/* Placeholder contact details until the real lines are set up. */}
+        <span className="footer-contact">
+          Questions? hello@prairiespray.example · (785) 555-0148
+        </span>
       </footer>
     </div>
   )
