@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 const API = 'http://localhost:8000/api';
 
@@ -7,6 +7,18 @@ function LaunchControl({ telemetry, connected }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null); // { msg, kind }
+  const [fenceOn, setFenceOn] = useState(null);      // null = unknown
+  const [override, setOverride] = useState(false);   // bypass blocking checks
+  const [showChecks, setShowChecks] = useState(true);
+
+  // Geofence state feeds the pre-flight checklist (advisory item).
+  useEffect(() => {
+    if (!connected) { setFenceOn(null); return; }
+    fetch(`${API}/safety/geofence`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((g) => setFenceOn(g ? !!g.enable : null))
+      .catch(() => setFenceOn(null));
+  }, [connected]);
 
   const flash = (msg, kind = 'info') => {
     setStatus({ msg, kind });
@@ -65,8 +77,51 @@ function LaunchControl({ telemetry, connected }) {
 
   const gpsReady = telemetry.gps_fix >= 3;
 
+  // Pre-flight checklist. Blockers gate ARM & TAKEOFF (override available);
+  // advisories warn but never block — bench setups legitimately lack them.
+  const t = telemetry;
+  const rcSeen = (t.rc_channels || []).some((v) => v >= 900 && v <= 2100);
+  const checks = [
+    { label: 'Link', ok: connected, block: true },
+    { label: 'GPS 3D fix', ok: gpsReady, block: true },
+    { label: 'Home set', ok: t.home_lat !== 0 || t.home_lon !== 0, block: true },
+    { label: 'Battery', ok: t.battery_level != null && t.battery_level > 30,
+      warn: t.battery_level == null ? 'no data' : `${t.battery_level}%` },
+    { label: 'RC input', ok: rcSeen, warn: 'none seen' },
+    { label: 'Geofence', ok: fenceOn === true, warn: fenceOn == null ? 'unknown' : 'off' },
+  ];
+  const blockersPass = checks.filter((c) => c.block).every((c) => c.ok);
+  const canLaunch = blockersPass || override;
+
   return (
     <div className="launch-control glass-panel">
+      {!telemetry.armed && connected && (
+        <div className="checklist">
+          <div className="checklist-head" onClick={() => setShowChecks((s) => !s)}>
+            <span>PRE-FLIGHT {blockersPass ? '✓' : '— NOT READY'}</span>
+            <span className="checklist-chevron">{showChecks ? '▾' : '▸'}</span>
+          </div>
+          {showChecks && (
+            <div className="checklist-items">
+              {checks.map((c) => (
+                <span key={c.label}
+                  className={`check-item ${c.ok ? 'ok' : c.block ? 'bad' : 'warn'}`}>
+                  {c.ok ? '✓' : c.block ? '✕' : '△'} {c.label}
+                  {!c.ok && c.warn ? ` (${c.warn})` : ''}
+                </span>
+              ))}
+              {!blockersPass && (
+                <label className={`force-toggle ${override ? 'on' : ''}`}
+                  title="Launch despite failed blocking checks">
+                  <input type="checkbox" checked={override}
+                    onChange={(e) => setOverride(e.target.checked)} />
+                  OVERRIDE
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {!telemetry.armed ? (
         <div className="launch-row">
           <label className="launch-label">TAKEOFF ALT</label>
@@ -87,8 +142,8 @@ function LaunchControl({ telemetry, connected }) {
           <button
             className="control-btn success launch-btn"
             onClick={takeoff}
-            disabled={!connected || busy || !gpsReady}
-            title={!gpsReady ? 'Waiting for GPS 3D fix' : ''}
+            disabled={!connected || busy || !canLaunch}
+            title={!canLaunch ? 'Pre-flight checks not passed (override available)' : ''}
           >
             {busy ? 'LAUNCHING…' : 'ARM & TAKEOFF'}
           </button>

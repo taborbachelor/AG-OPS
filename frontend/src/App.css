@@ -1977,6 +1977,135 @@ body {
   padding: 6px 12px;
 }
 
+/* ===== ANNUNCIATOR (alerts + voice) ===== */
+.alert-center {
+  position: absolute;
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1500;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.alert-center > * { pointer-events: auto; }
+
+.alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  backdrop-filter: var(--glass-blur);
+  animation: vitals-in 0.2s ease;
+}
+
+.alert-banner.amber {
+  background: rgba(255, 145, 0, 0.16);
+  border: 1px solid rgba(255, 145, 0, 0.55);
+  color: var(--accent-orange);
+}
+
+.alert-banner.red {
+  background: rgba(255, 23, 68, 0.18);
+  border: 1px solid rgba(255, 23, 68, 0.6);
+  color: var(--accent-red);
+  animation: vitals-in 0.2s ease, armpulse 1.2s ease-in-out infinite;
+}
+
+.alert-x {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.alert-x:hover { opacity: 1; }
+
+.voice-toggle {
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.voice-toggle.on { border-color: rgba(0, 229, 255, 0.35); }
+.voice-toggle:hover { opacity: 1; }
+
+/* ===== PRE-FLIGHT CHECKLIST ===== */
+.checklist {
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--glass-border);
+  padding-bottom: 8px;
+}
+
+.checklist-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checklist-chevron { color: var(--text-dim); }
+
+.checklist-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 7px;
+  align-items: center;
+}
+
+.check-item {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.check-item.ok { color: var(--accent-green); }
+.check-item.bad { color: var(--accent-red); }
+.check-item.warn { color: var(--accent-orange); }
+
+/* ===== POST-FLIGHT SUMMARY ===== */
+.summary-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.summary-card {
+  min-width: 380px;
+  padding: 22px;
+  animation: vitals-in 0.2s ease;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px 10px;
+}
+
 /* ===== SPRAY PANEL ===== */
 .spray-panel {
   position: absolute;

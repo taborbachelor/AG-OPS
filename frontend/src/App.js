@@ -15,6 +15,8 @@ import LogsPanel from './components/LogsPanel';
 import RCPanel from './components/RCPanel';
 import ControlsPanel from './components/ControlsPanel';
 import FlightVitals from './components/FlightVitals';
+import AlertCenter from './components/AlertCenter';
+import FlightSummary from './components/FlightSummary';
 import './App.css';
 
 const DEFAULT_TELEMETRY = {
@@ -31,7 +33,12 @@ function App() {
   const [telemetry, setTelemetry] = useState(DEFAULT_TELEMETRY);
   const [connected, setConnected] = useState(false);
   const [backendUp, setBackendUp] = useState(true);
+  const [reconnecting, setReconnecting] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+
+  // Post-flight debrief (set on disarm after a real flight).
+  const [flightSummary, setFlightSummary] = useState(null);
+  const flightRef = useRef(null);
 
   // One active view, switched from the left nav rail.
   const [view, setView] = useState('fly'); // fly | plan | spray | safety | rc | controls | logs
@@ -77,10 +84,12 @@ function App() {
         if (!alive) return;
         setBackendUp(true);
         setConnected(s.connected);
+        setReconnecting(!!s.reconnecting);
       } catch {
         if (!alive) return;
         setBackendUp(false);
         setConnected(false);
+        setReconnecting(false);
       }
     };
     poll();
@@ -125,6 +134,42 @@ function App() {
       setFlying(true);
     }
   }, [telemetry, connected, flying]);
+
+  // Flight accumulator: stats gathered while armed, debrief card on disarm.
+  useEffect(() => {
+    const t = telemetry;
+    if (connected && t.armed) {
+      if (!flightRef.current) {
+        flightRef.current = {
+          start: Date.now(), maxAlt: 0, maxSpd: 0, dist: 0,
+          last: null, battStart: t.battery_level, battEnd: t.battery_level,
+        };
+      }
+      const f = flightRef.current;
+      f.maxAlt = Math.max(f.maxAlt, t.altitude || 0);
+      f.maxSpd = Math.max(f.maxSpd, t.groundspeed || 0);
+      if (t.lat && t.lon) {
+        if (f.last) {
+          const kx = 111320 * Math.cos((t.lat * Math.PI) / 180);
+          f.dist += Math.hypot((t.lat - f.last.lat) * 111320, (t.lon - f.last.lon) * kx);
+        }
+        f.last = { lat: t.lat, lon: t.lon };
+      }
+      if (t.battery_level != null) f.battEnd = t.battery_level;
+    } else if (flightRef.current) {
+      const f = flightRef.current;
+      flightRef.current = null;
+      const dur = (Date.now() - f.start) / 1000;
+      // Only debrief real flights — not bench arms or aborted starts.
+      if (dur > 20 && (f.maxAlt > 5 || f.dist > 50)) {
+        setFlightSummary({
+          dur, maxAlt: f.maxAlt, maxSpd: f.maxSpd, dist: f.dist,
+          battUsed: (f.battStart != null && f.battEnd != null)
+            ? Math.max(0, f.battStart - f.battEnd) : null,
+        });
+      }
+    }
+  }, [telemetry, connected]);
 
   // --- Mission editing handlers ---
   const addWaypoint = (latlng) => {
@@ -218,6 +263,9 @@ function App() {
         onConnectClick={() => setShowConnect(!showConnect)}
       />
 
+      {/* Annunciator — quiet until something needs the operator */}
+      <AlertCenter telemetry={telemetry} connected={connected} reconnecting={reconnecting} />
+
       {/* View switcher — slides away during flight */}
       <NavRail view={view} setView={setView} hidden={!tools} />
       {flying && (
@@ -289,6 +337,15 @@ function App() {
           connected={connected}
           setConnected={setConnected}
           onClose={() => setShowConnect(false)}
+        />
+      )}
+
+      {/* Post-flight debrief */}
+      {flightSummary && (
+        <FlightSummary
+          summary={flightSummary}
+          onClose={() => setFlightSummary(null)}
+          onReplay={() => { setFlightSummary(null); setView('logs'); }}
         />
       )}
     </div>

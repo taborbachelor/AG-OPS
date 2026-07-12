@@ -31,6 +31,18 @@ function FlightVitals({ telemetry }) {
   const battWarn = t.battery_level !== null && t.battery_level < 25;
   const deg = (r) => (r * 57.2958).toFixed(0);
 
+  // RTL margin: how far/long is home, colored by remaining battery — the
+  // "can I still get home" glance value.
+  const homeSet = t.home_lat !== 0 || t.home_lon !== 0;
+  const kxh = 111320 * Math.cos(((t.lat || 0) * Math.PI) / 180);
+  const distHome = homeSet && t.lat
+    ? Math.hypot((t.lat - t.home_lat) * 111320, (t.lon - t.home_lon) * kxh)
+    : null;
+  const etaHome = distHome != null && gs > 2 ? distHome / gs : null;
+  const marginColor = t.battery_level == null ? undefined
+    : t.battery_level < 25 ? 'var(--accent-red)'
+      : t.battery_level < 40 ? 'var(--accent-orange)' : 'var(--accent-green)';
+
   return (
     <div className="flight-vitals">
       {drawer && (
@@ -81,6 +93,16 @@ function FlightVitals({ telemetry }) {
             </span>
             <span className="vital-label">BATT</span>
           </div>
+          {distHome != null && (
+            <div className="vital">
+              <span className="vital-value" style={marginColor ? { color: marginColor } : undefined}>
+                {distHome >= 1000 ? `${(distHome / 1000).toFixed(1)}k` : Math.round(distHome)}
+              </span>
+              <span className="vital-label">
+                HOME M{etaHome != null ? ` · ${fmtEta(etaHome)}` : ''}
+              </span>
+            </div>
+          )}
           <div className="vital vital-mode">{t.mode}</div>
         </div>
 
