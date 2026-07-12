@@ -284,7 +284,7 @@ function App() {
           fence={fence}
           playbackPath={playbackPath}
           sprayField={sprayField}
-          sprayFields={sprayFields.map((f) => f.polygon)}
+          sprayFields={sprayFields.map((f) => ({ polygon: f.polygon, holes: f.holes || [] }))}
           sprayArea={sprayArea}
           sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing)}
           onAddSprayVertex={spraySnap ? snapClick : addSprayVertex}

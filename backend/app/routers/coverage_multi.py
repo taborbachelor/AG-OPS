@@ -24,6 +24,10 @@ class MultiRequest(BaseModel):
     tree_buffer: float = Field(10, ge=0, le=200)
     building_buffer: float = Field(10, ge=0, le=200)
     home: Optional[LatLon] = None
+    # Caller-supplied keepouts (e.g. detected in-field holes: farmsteads,
+    # ponds). Merged with the OSM zone keepouts; honored even when the zone
+    # service is down.
+    keepouts: Optional[list] = Field(None, max_length=100)
 
 
 @router.post("/plan_multi")
@@ -62,14 +66,29 @@ def plan_multi_endpoint(req: MultiRequest):
     )
     radius = min(5000.0, span + 500.0)
 
+    # Caller-supplied keepouts (validated like fields, but only 3+ vertices).
+    user_keepouts = []
+    for ki, ring in enumerate(req.keepouts or []):
+        if not isinstance(ring, list) or len(ring) < 3 or len(ring) > 500:
+            raise HTTPException(422, f"keepout {ki}: needs 3..500 vertices")
+        clean = []
+        for p in ring:
+            try:
+                lat, lon = float(p["lat"]), float(p["lon"])
+            except (TypeError, KeyError, ValueError):
+                raise HTTPException(422, f"keepout {ki}: vertices must be {{lat,lon}}")
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                raise HTTPException(422, f"keepout {ki}: coordinate out of range")
+            clean.append({"lat": lat, "lon": lon})
+        user_keepouts.append(clean)
+
     zones = {}
     zones_unavailable = False
-    keepouts = None
-    buf = 0.0
+    buf = max(req.water_buffer, req.tree_buffer, req.building_buffer)
+    keepouts = list(user_keepouts)
     try:
         z = fetch_zones(clat, clon, radius)
         zones = z
-        keepouts = []
         for kind in ("water", "trees", "buildings"):
             for zone in z.get(kind, []) or []:
                 ring = list(zone.get("coords", []))
@@ -79,10 +98,11 @@ def plan_multi_endpoint(req: MultiRequest):
                     keepouts.append(ring)
         # Same conservative choice as plan_auto: clip with the largest of the
         # per-kind buffers (over-standoff never sprays a keepout).
-        buf = max(req.water_buffer, req.tree_buffer, req.building_buffer)
     except RuntimeError:
+        # Zone service down: user keepouts (detected holes) still apply.
         zones_unavailable = True
-        keepouts = None
+        if not user_keepouts:
+            keepouts = None
 
     home = {"lat": req.home.lat, "lon": req.home.lon} if req.home else None
     try:

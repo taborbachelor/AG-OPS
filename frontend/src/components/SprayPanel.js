@@ -116,6 +116,7 @@ function SprayPanel({
           ...f,
           ...d.fields.map((fd) => ({
             polygon: fd.polygon,
+            holes: fd.holes || [],   // in-field non-crop islands -> keepouts
             acres: fd.acres,
             // Field list rows read "356.7 ac · Corn" when USDA supplied a crop.
             source: (fd.tags && fd.tags.crop) || 'auto',
@@ -178,6 +179,9 @@ function SprayPanel({
     if (jobFields.length === 0) { flash('Add at least one field first'); return; }
     setBusy(true);
     resetResults();
+    // Detected in-field holes (farmsteads/ponds/tree stands) ride along as
+    // keepouts so the passes clip around them automatically.
+    const holeKeepouts = jobFields.flatMap((f) => f.holes || []);
     try {
       const res = await fetch(`${API}/coverage/plan_multi`, {
         method: 'POST',
@@ -187,6 +191,7 @@ function SprayPanel({
           swath, alt,
           water_buffer: bufWater, tree_buffer: bufTrees, building_buffer: bufBuildings,
           home: homePos || undefined,
+          keepouts: holeKeepouts.length ? holeKeepouts : undefined,
         }),
       });
       const data = await res.json();
@@ -196,14 +201,18 @@ function SprayPanel({
         return;
       }
       setPlan(data);
+      const holesAsZones = holeKeepouts.map((h) => ({ kind: 'hole', coords: h }));
       if (data.zones_unavailable) {
-        setZonesNote('Zones unavailable — paths do not avoid no-spray areas');
-        setZones(null);
+        setZonesNote(holeKeepouts.length
+          ? 'Zone service down — only detected in-field holes are avoided'
+          : 'Zones unavailable — paths do not avoid no-spray areas');
+        setZones(holesAsZones.length ? { water: [], trees: [], buildings: [], holes: holesAsZones } : null);
       } else if (data.zones && data.zones.water) {
         setZones({
           water: data.zones.water || [],
           trees: data.zones.trees || [],
           buildings: data.zones.buildings || [],
+          holes: holesAsZones,
         });
       }
       if ((data.skipped || []).length > 0) {
@@ -398,6 +407,7 @@ function SprayPanel({
             {zones && (
               <div className="spray-zones-line">
                 zones: {zones.water.length} water · {zones.trees.length} trees · {zones.buildings.length} bldgs
+                {(zones.holes || []).length > 0 ? ` · ${zones.holes.length} in-field holes` : ''}
               </div>
             )}
             {(plan.skipped || []).length > 0 && (

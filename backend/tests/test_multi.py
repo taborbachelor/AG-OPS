@@ -77,6 +77,26 @@ class TestPlanMulti(unittest.TestCase):
             job["totals"]["spray_path_m"] + job["totals"]["transit_m"], places=0)
 
 
+class TestUserKeepouts(unittest.TestCase):
+    def test_holes_apply_even_when_zone_service_down(self):
+        """Detected in-field holes must clip passes even if OSM is down."""
+        from app.routers import coverage_multi as cm
+
+        # Pond centered INSIDE the field (NEAR spans lon -95.8000..-95.79766,
+        # lat 39.9010..39.9019) so crossing passes must SPLIT, not shorten.
+        pond = [{"lat": 39.90135, "lon": -95.79900},
+                {"lat": 39.90165, "lon": -95.79900},
+                {"lat": 39.90165, "lon": -95.79866},
+                {"lat": 39.90135, "lon": -95.79866}]
+        req = cm.MultiRequest(fields=[NEAR], keepouts=[pond])
+        with mock.patch.object(cm, "fetch_zones", side_effect=RuntimeError("down")):
+            out = cm.plan_multi_endpoint(req)
+        self.assertTrue(out["zones_unavailable"])
+        f = out["fields"][0]
+        # The pond splits at least one pass -> more segments than passes.
+        self.assertGreater(f["stats"]["n_segments"], f["stats"]["n_passes"])
+
+
 class TestFieldsInArea(unittest.TestCase):
     def _parcel(self, lat, lon):
         return {"coords": [

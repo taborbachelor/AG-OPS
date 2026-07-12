@@ -3,11 +3,17 @@
 The CDL classifies every 30m pixel of the continental US by land cover
 (corn, soybeans, wheat, ... water, forest, developed). Given a selection
 area we: fetch the CDL clip from CropScape, keep only cropland pixels,
-segment them into connected fields, trace each field's boundary, and hand
-back lat/lon polygons — the software literally "draws around the fields".
+segment them into connected fields, trace each field's EXACT pixel-edge
+boundary (plus interior non-crop holes), and hand back lat/lon polygons —
+the software literally "draws around the fields".
 
-Non-field cover (water/trees/developed/wetlands) is excluded by
-classification, which is exactly the "know what a field is" requirement.
+Precision notes:
+- Boundaries follow pixel EDGES (not centers), so the polygon hugs the
+  classified footprint exactly — no half-pixel inset.
+- Interior non-crop islands (farmsteads, ponds, tree stands) are returned as
+  hole polygons so the planner can keep them out automatically.
+- Single-pixel classification speckle is filled before tracing.
+
 Powerlines are NOT in the CDL — known gap, handled separately later.
 
 Pure stdlib + Pillow (TIFF decode). Grid sizes at 30m are tiny (a 3x3 km
@@ -18,7 +24,6 @@ import io
 import math
 import re
 import time
-import urllib.parse
 import urllib.request
 
 from PIL import Image
@@ -33,7 +38,9 @@ PIXEL_M = 30.0
 ACRES_PER_PX = (PIXEL_M * PIXEL_M) / 4046.8564224   # ~0.2224 ac
 MAX_SPAN_M = 6000.0        # selection bbox cap (keeps rasters small)
 MIN_FIELD_PX = 10          # ~2.2 acres — ignore slivers
+MIN_HOLE_PX = 2            # interior islands >= ~0.45 ac become keepout holes
 MAX_FIELDS = 40
+SIMPLIFY_TOL_PX = 0.9      # straightens 30m staircases into clean diagonals
 
 # CDL land-cover codes. Cropland = 1..61 (row crops, grains, hay, fallow),
 # 66..77 (orchards/fruit), 196..255 (double-crops & misc crops). Explicitly
@@ -88,6 +95,28 @@ def _fetch_clip(bbox_5070, year: int):
     return grid, gt
 
 
+def _despeckle(mask, w, h):
+    """Fill single-pixel classification noise: a non-crop cell with all four
+    neighbors crop becomes crop; an isolated crop cell (no crop neighbors)
+    is dropped. One pass each — 30m speckle, not real features."""
+    fill = []
+    drop = []
+    for r in range(h):
+        for c in range(w):
+            n = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
+            inb = [(rr, cc) for rr, cc in n if 0 <= rr < h and 0 <= cc < w]
+            crop_n = sum(1 for rr, cc in inb if mask[rr][cc])
+            if not mask[r][c] and len(inb) == 4 and crop_n == 4:
+                fill.append((r, c))
+            elif mask[r][c] and crop_n == 0:
+                drop.append((r, c))
+    for r, c in fill:
+        mask[r][c] = True
+    for r, c in drop:
+        mask[r][c] = False
+    return mask
+
+
 def _segment(mask, w, h):
     """4-connected components over a boolean grid -> list of cell lists."""
     seen = [[False] * w for _ in range(h)]
@@ -110,32 +139,92 @@ def _segment(mask, w, h):
     return comps
 
 
-def _boundary(comp, w, h):
-    """Ordered outer boundary of a component (Moore-neighbor tracing over
-    cell centers). Returns [(r, c), ...] in walk order."""
-    cells = set(comp)
-    start = min(comp)  # topmost-leftmost
-    # Moore neighborhood in clockwise order starting from W.
-    nbrs = [(-0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1)]
-    boundary = [start]
-    prev_dir = 0
-    cur = start
-    for _ in range(8 * len(comp) + 8):  # hard bound
-        found = False
-        for k in range(8):
-            d = (prev_dir + k) % 8
-            nr, nc = cur[0] + nbrs[d][0], cur[1] + nbrs[d][1]
-            if (nr, nc) in cells:
-                if (nr, nc) == start and len(boundary) > 2:
-                    return boundary
-                boundary.append((nr, nc))
-                cur = (nr, nc)
-                prev_dir = (d + 5) % 8  # back up two steps clockwise
-                found = True
+def _edge_loops(comp):
+    """EXACT pixel-edge outline of a cell set.
+
+    Emits every boundary edge on the pixel-corner grid (cell (r,c) owns the
+    corners (c,r)..(c+1,r+1)), directed so the component interior stays on the
+    left, then chains edges into closed loops. Returns a list of corner-coord
+    loops [(cx, cy), ...]: the largest is the outer boundary, the rest are
+    interior holes. This is the raster's true footprint — no center-inset."""
+    S = set(comp)
+    edges = {}
+
+    def add(a, b):
+        edges.setdefault(a, []).append(b)
+
+    for (r, c) in S:
+        if (r - 1, c) not in S:
+            add((c, r), (c + 1, r))            # top edge, walking east
+        if (r, c + 1) not in S:
+            add((c + 1, r), (c + 1, r + 1))    # right edge, walking south
+        if (r + 1, c) not in S:
+            add((c + 1, r + 1), (c, r + 1))    # bottom edge, walking west
+        if (r, c - 1) not in S:
+            add((c, r + 1), (c, r))            # left edge, walking north
+
+    loops = []
+    while edges:
+        start = next(iter(edges))
+        outs = edges[start]
+        cur_edge_end = outs.pop()
+        if not outs:
+            del edges[start]
+        loop = [start]
+        prev_dir = (cur_edge_end[0] - start[0], cur_edge_end[1] - start[1])
+        cur = cur_edge_end
+        # Hard bound: total edges is finite; each iteration consumes one.
+        for _ in range(4 * len(comp) + 8):
+            if cur == start:
                 break
-        if not found:  # single cell / isolated
-            return boundary
-    return boundary
+            loop.append(cur)
+            outs = edges.get(cur)
+            if not outs:
+                break  # malformed (shouldn't happen) — bail with what we have
+            if len(outs) == 1:
+                nxt = outs.pop()
+            else:
+                # Corner where the ring pinches (diagonal cells): take the
+                # sharpest LEFT turn to stay on this ring.
+                def key(o):
+                    dx, dy = o[0] - cur[0], o[1] - cur[1]
+                    cross = prev_dir[0] * dy - prev_dir[1] * dx
+                    dot = prev_dir[0] * dx + prev_dir[1] * dy
+                    return (cross, dot)
+                outs.sort(key=key)
+                nxt = outs.pop()
+            if not edges[cur]:
+                del edges[cur]
+            prev_dir = (nxt[0] - cur[0], nxt[1] - cur[1])
+            cur = nxt
+        loops.append(loop)
+    return loops
+
+
+def _loop_area_px(loop):
+    """|shoelace| of a corner loop, in pixels² (== cells enclosed)."""
+    a = 0.0
+    n = len(loop)
+    for i in range(n):
+        x1, y1 = loop[i]
+        x2, y2 = loop[(i + 1) % n]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2.0
+
+
+def _collapse_collinear(pts):
+    """Drop midpoints of straight runs (rectilinear outlines get tiny)."""
+    if len(pts) < 3:
+        return pts
+    out = []
+    n = len(pts)
+    for i in range(n):
+        px, py = pts[(i - 1) % n]
+        cx, cy = pts[i]
+        nx, ny = pts[(i + 1) % n]
+        if (cx - px) * (ny - cy) != (cy - py) * (nx - cx):
+            out.append((cx, cy))
+    return out if len(out) >= 3 else pts
 
 
 def _simplify(pts, tol):
@@ -166,7 +255,9 @@ def _simplify(pts, tol):
 def detect_fields_cdl(selection, include_pasture=False, year=None):
     """Selection polygon [{lat,lon}] -> auto-traced field polygons.
 
-    Returns {"fields": [{polygon, acres, crop}], "year": used_year}.
+    Returns {"fields": [{polygon, holes, acres, crop}], "year": used_year}.
+    `polygon` follows the exact classified footprint edge; `holes` are
+    interior non-crop islands (>= MIN_HOLE_PX) for use as keepouts.
     Raises ValueError on bad selection, RuntimeError when CropScape fails.
     """
     if len(selection) < 3:
@@ -201,30 +292,47 @@ def detect_fields_cdl(selection, include_pasture=False, year=None):
 
     h, w = len(grid), len(grid[0])
     mask = [[grid[r][c] in codes for c in range(w)] for r in range(h)]
+    mask = _despeckle(mask, w, h)
 
     comps = [c for c in _segment(mask, w, h) if len(c) >= MIN_FIELD_PX]
     comps.sort(key=len, reverse=True)
 
     ulx, uly, sx, sy = gt
-    fields = []
-    for comp in comps[:MAX_FIELDS]:
-        walk = _boundary(comp, w, h)
-        pix = _simplify([(c, r) for r, c in walk], tol=1.2)
-        if len(pix) < 3:
-            continue
+
+    def corners_to_geo(loop_pts):
         poly = []
-        for c, r in pix:
-            x = ulx + (c + 0.5) * sx
-            y = uly - (r + 0.5) * sy
+        for cx, cy in loop_pts:
+            x = ulx + cx * sx
+            y = uly - cy * sy
             lat, lon = from_albers(x, y)
             poly.append({"lat": round(lat, 7), "lon": round(lon, 7)})
+        return poly
+
+    fields = []
+    for comp in comps[:MAX_FIELDS]:
+        loops = _edge_loops(comp)
+        if not loops:
+            continue
+        loops.sort(key=_loop_area_px, reverse=True)
+        outer = _simplify(_collapse_collinear(loops[0]), SIMPLIFY_TOL_PX)
+        if len(outer) < 3:
+            continue
+        holes = []
+        for hl in loops[1:]:
+            if _loop_area_px(hl) < MIN_HOLE_PX:
+                continue
+            hp = _simplify(_collapse_collinear(hl), SIMPLIFY_TOL_PX)
+            if len(hp) >= 3:
+                holes.append(corners_to_geo(hp))
+
         # Dominant crop for the label.
         counts = {}
         for r, c in comp:
             counts[grid[r][c]] = counts.get(grid[r][c], 0) + 1
         top = max(counts, key=counts.get)
         fields.append({
-            "polygon": poly,
+            "polygon": corners_to_geo(outer),
+            "holes": holes,
             "acres": round(len(comp) * ACRES_PER_PX, 1),
             "crop": CROP_NAMES.get(top, "Cropland"),
         })

@@ -43,6 +43,7 @@ def detect_fields(body: AreaBody):
         cdl = detect_fields_cdl(selection)
         fields = [{
             "polygon": f["polygon"],
+            "holes": f.get("holes", []),   # interior non-crop islands -> keepouts
             "acres": f["acres"],
             "tags": {"source": "usda-cdl", "crop": f["crop"], "year": cdl["year"]},
         } for f in cdl["fields"]]

@@ -55,8 +55,9 @@ const CMD_COLOR = {
   TAKEOFF: '#00e676', WAYPOINT: '#00e5ff', LOITER: '#ff9100', LAND: '#ff1744', RTL: '#b388ff',
 };
 
-// No-spray zone tints: water blue, trees green, buildings orange.
-const ZONE_COLOR = { water: '#3b82f6', trees: '#00e676', buildings: '#ff9100' };
+// No-spray zone tints: water blue, trees green, buildings orange, and
+// detected in-field holes (farmsteads/ponds) red.
+const ZONE_COLOR = { water: '#3b82f6', trees: '#00e676', buildings: '#ff9100', holes: '#ff5c5c' };
 
 // Whole-job flight legs: spray-on solid, in-field hops faint, inter-field
 // transit orange, home legs purple — the operator sees the ENTIRE flight.
@@ -174,7 +175,8 @@ function FitJob({ fields, area, drawing }) {
   useEffect(() => {
     const count = fields.length;
     if (count !== prevCount.current && !drawing) {
-      const pts = [...fields.flat(), ...area].map((p) => [p.lat, p.lon]);
+      const pts = [...fields.flatMap((f) => f.polygon || f), ...area]
+        .map((p) => [p.lat, p.lon]);
       if (pts.length >= 3) map.fitBounds(pts, { padding: [60, 60] });
     }
     prevCount.current = count;
@@ -246,7 +248,7 @@ function MapView({
         <FitJob fields={sprayFields} area={sprayArea} drawing={sprayDrawing} />
 
         {/* No-spray zones (semi-transparent tints under everything else) */}
-        {zones && ['water', 'trees', 'buildings'].map((kind) =>
+        {zones && ['water', 'trees', 'buildings', 'holes'].map((kind) =>
           (zones[kind] || []).map((z, i) => (
             <Polygon
               key={`${kind}-${i}`}
@@ -288,18 +290,21 @@ function MapView({
           />
         )}
 
-        {/* Committed job fields — numbered */}
-        {sprayFields.map((poly, i) => poly.length >= 3 && (
+        {/* Committed job fields — numbered; holes render as true cut-outs */}
+        {sprayFields.map((f, i) => f.polygon.length >= 3 && (
           <React.Fragment key={`jf-${i}`}>
             <Polygon
-              positions={poly.map((p) => [p.lat, p.lon])}
+              positions={[
+                f.polygon.map((p) => [p.lat, p.lon]),
+                ...(f.holes || []).map((h) => h.map((p) => [p.lat, p.lon])),
+              ]}
               pathOptions={{ color: '#00e676', weight: 2,
                 fillColor: '#00e676', fillOpacity: 0.08 }}
             />
             <Marker
               position={[
-                poly.reduce((s, p) => s + p.lat, 0) / poly.length,
-                poly.reduce((s, p) => s + p.lon, 0) / poly.length,
+                f.polygon.reduce((s, p) => s + p.lat, 0) / f.polygon.length,
+                f.polygon.reduce((s, p) => s + p.lon, 0) / f.polygon.length,
               ]}
               icon={fieldBadge(i + 1)}
             />
