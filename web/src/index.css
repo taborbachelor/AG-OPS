@@ -1,0 +1,552 @@
+/* PrairieSpray customer site.
+ *
+ * Deliberately NOT the dark operator GCS theme: customers get a light, warm,
+ * trustworthy look — agriculture green on warm neutrals, Inter, generous
+ * spacing, and everything usable one-handed on a phone in a truck cab.
+ */
+
+:root {
+  --green-900: #0f5223;
+  --green-700: #1a7f37; /* brand */
+  --green-600: #23913f;
+  --green-100: #e2f2e5;
+  --green-50: #f0f8f1;
+
+  --ink: #26251f; /* warm near-black */
+  --ink-soft: #6d6a5e; /* warm gray */
+  --paper: #faf9f5; /* warm off-white page */
+  --card: #ffffff;
+  --line: #e7e4da;
+  --amber-bg: #fdf3e0;
+  --amber-ink: #8a5b00;
+  --red-bg: #fdeceb;
+  --red-ink: #9c2b23;
+
+  --radius: 12px;
+  --shadow: 0 1px 2px rgba(38, 37, 31, 0.06), 0 8px 24px rgba(38, 37, 31, 0.07);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- page chrome ---------- */
+
+.shell {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px clamp(16px, 5vw, 48px);
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+
+.logo-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--green-700);
+  color: #fff;
+  font-size: 17px;
+}
+
+.logo-word {
+  font-weight: 800;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+}
+
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: clamp(20px, 4vw, 40px) clamp(16px, 4vw, 24px) 56px;
+}
+
+.site-footer {
+  padding: 20px;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 13px;
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- landing hero ---------- */
+
+.hero {
+  padding-top: clamp(16px, 5vw, 56px);
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--green-700);
+}
+
+.hero h1 {
+  margin: 0 0 14px;
+  font-size: clamp(34px, 7vw, 52px);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  font-weight: 800;
+}
+
+.lede {
+  margin: 0 0 26px;
+  font-size: clamp(16px, 2.5vw, 19px);
+  color: var(--ink-soft);
+  max-width: 34em;
+}
+
+.benefits {
+  list-style: none;
+  margin: 0 0 28px;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.benefits li {
+  position: relative;
+  padding: 14px 16px 14px 46px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-soft);
+}
+
+.benefits li strong {
+  color: var(--ink);
+}
+
+.benefits li::before {
+  content: '✓';
+  position: absolute;
+  left: 14px;
+  top: 13px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--green-100);
+  color: var(--green-700);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.price-line {
+  margin: 0 0 22px;
+  color: var(--ink-soft);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.price-big {
+  font-size: clamp(26px, 5vw, 34px);
+  font-weight: 800;
+  color: var(--green-700);
+  letter-spacing: -0.02em;
+}
+
+.price-note {
+  font-size: 13px;
+}
+
+/* ---------- buttons ---------- */
+
+.btn {
+  font: inherit;
+  font-weight: 600;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  padding: 11px 20px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--green-700);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--green-900);
+}
+
+.btn-secondary {
+  background: var(--green-100);
+  color: var(--green-900);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #d2ead7;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--ink-soft);
+  border-color: var(--line);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--ink-soft);
+}
+
+.btn-lg {
+  padding: 14px 28px;
+  font-size: 17px;
+}
+
+/* ---------- progress indicator ---------- */
+
+.progress {
+  list-style: none;
+  display: flex;
+  gap: 4px;
+  margin: 0 0 22px;
+  padding: 0;
+}
+
+.progress li {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.prog-dot {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  font-size: 13px;
+}
+
+.prog-current .prog-dot {
+  border-color: var(--green-700);
+  color: var(--green-700);
+}
+
+.prog-current {
+  color: var(--ink);
+}
+
+.prog-done .prog-dot {
+  background: var(--green-700);
+  border-color: var(--green-700);
+  color: #fff;
+}
+
+/* ---------- cards & forms ---------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: clamp(20px, 4vw, 32px);
+}
+
+.card h2 {
+  margin: 0 0 16px;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+
+.field {
+  display: block;
+  margin-bottom: 16px;
+}
+
+.field > span {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.optional {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+.field input {
+  width: 100%;
+  font: inherit;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.field input:focus {
+  outline: 2px solid var(--green-600);
+  outline-offset: 1px;
+  background: #fff;
+}
+
+.actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+/* ---------- banners ---------- */
+
+.banner {
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  font-size: 14.5px;
+}
+
+.banner-warn {
+  background: var(--amber-bg);
+  color: var(--amber-ink);
+}
+
+.banner-offline {
+  background: var(--red-bg);
+  color: var(--red-ink);
+}
+
+/* ---------- field map step ---------- */
+
+.card-map .muted {
+  margin-top: -6px;
+}
+
+.field-map {
+  width: 100%;
+  height: min(58vh, 460px);
+  min-height: 300px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  margin: 14px 0 12px;
+  /* Leaflet panes stack above page chrome without this. */
+  isolation: isolate;
+  cursor: crosshair;
+}
+
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.acres-readout {
+  font-size: 15px;
+}
+
+.acres-readout strong {
+  font-size: 22px;
+  color: var(--green-700);
+}
+
+.map-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- schedule step ---------- */
+
+.slot-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.slot-btn {
+  flex: 1;
+  font: inherit;
+  font-weight: 600;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1.5px solid var(--line);
+  background: var(--card);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.slot-btn-active {
+  border-color: var(--green-700);
+  background: var(--green-50);
+  color: var(--green-900);
+}
+
+/* ---------- review step ---------- */
+
+.review {
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+
+.review > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.review dt {
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.review dd {
+  margin: 0;
+  text-align: right;
+}
+
+.review-total dd {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--green-700);
+}
+
+.estimate-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--green-100);
+  color: var(--green-900);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.fine-print {
+  font-size: 13px;
+  color: var(--ink-soft);
+  margin: 14px 0 0;
+}
+
+/* ---------- confirmation ---------- */
+
+.confirm-card {
+  text-align: center;
+  max-width: 560px;
+  margin: clamp(8px, 4vw, 40px) auto 0;
+}
+
+.confirm-badge {
+  width: 56px;
+  height: 56px;
+  margin: 4px auto 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--green-100);
+  color: var(--green-700);
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.order-id-box {
+  margin: 20px 0 8px;
+  padding: 14px;
+  border: 1px dashed var(--green-600);
+  border-radius: 10px;
+  background: var(--green-50);
+}
+
+.order-id-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--green-900);
+  margin-bottom: 4px;
+}
+
+.order-id {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  word-break: break-all;
+}
+
+.save-note {
+  font-size: 14px;
+  margin: 8px 0 16px;
+}
+
+.status-chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--green-100);
+  color: var(--green-900);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ---------- small screens ---------- */
+
+@media (max-width: 520px) {
+  .actions {
+    flex-direction: column-reverse;
+  }
+
+  .actions .btn {
+    width: 100%;
+  }
+
+  .prog-label {
+    display: none;
+  }
+}

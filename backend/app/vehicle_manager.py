@@ -68,6 +68,10 @@ class VehicleManager:
         # is considered lost and we mark ourselves disconnected.
         self._last_heartbeat = 0.0
         self._link_timeout = 5.0
+        # We must also SEND heartbeats at 1Hz: ArduPilot's GCS-loss failsafe
+        # (FS_GCS_ENABL) triggers RTL if the ground station goes silent —
+        # discovered live when a spray mission kept snapping back to RTL.
+        self._last_hb_sent = 0.0
         # Flight logging: one file per flight (opened on arm, closed on disarm).
         self._log_fh = None
         self._log_start = 0.0
@@ -136,6 +140,16 @@ class VehicleManager:
             if time.time() - self._last_heartbeat > self._link_timeout:
                 self._on_link_lost()
                 break
+            # Announce ourselves at 1Hz so the vehicle's GCS-loss failsafe
+            # never fires because of us.
+            if time.time() - self._last_hb_sent > 1.0:
+                try:
+                    self.connection.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+                    self._last_hb_sent = time.time()
+                except Exception:
+                    pass
             try:
                 with self._link_lock:
                     msg = self.connection.recv_match(blocking=False)

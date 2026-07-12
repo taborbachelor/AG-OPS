@@ -11,6 +11,11 @@ build/
 # Recorded flight logs
 backend/logs/
 
+# Orders database + customer site build artifacts
+backend/data/
+web/node_modules/
+web/dist/
+
 # SITL binaries (large; re-fetch with sitl/download_sitl.sh)
 sitl/*.exe
 sitl/*.elf

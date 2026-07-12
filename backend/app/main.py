@@ -2,7 +2,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import telemetry, mission, connection, vehicle, safety, logs
+from app.routers import telemetry, mission, connection, vehicle, safety, logs, coverage, zones, orders
 
 logger = logging.getLogger("gcs")
 
@@ -18,7 +18,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,6 +30,9 @@ app.include_router(mission.router, prefix="/api/mission", tags=["mission"])
 app.include_router(vehicle.router, prefix="/api/vehicle", tags=["vehicle"])
 app.include_router(safety.router, prefix="/api/safety", tags=["safety"])
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
+app.include_router(coverage.router, prefix="/api/coverage", tags=["coverage"])
+app.include_router(zones.router, prefix="/api/zones", tags=["zones"])
+app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
 
 
 @app.get("/api/health")
