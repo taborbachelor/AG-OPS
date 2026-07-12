@@ -2,6 +2,7 @@ import math
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from app.cdl import detect_fields_cdl
 from app.field_boundaries import fetch_fields, fields_in_area, ring_acres, snap_to_field
 
 router = APIRouter()
@@ -28,17 +29,36 @@ def _clean_ring(coords):
 
 @router.post("/detect")
 def detect_fields(body: AreaBody):
-    """Auto-detect mapped ag parcels inside a selection area. found=0 is a
-    normal outcome in sparsely-mapped country — operators add fields by hand."""
+    """Auto-detect the fields inside a selection area.
+
+    Primary: USDA Cropland Data Layer — satellite-derived 30m land-cover for
+    the whole US. The software traces polygons around actual cropland pixels
+    and skips water/trees/developed cover by classification. Fallback when
+    CropScape is unreachable (or outside the US): OSM mapped parcels."""
     selection = [{"lat": p.lat, "lon": p.lon} for p in body.polygon]
     if not all(math.isfinite(p["lat"]) and math.isfinite(p["lon"]) for p in selection):
         raise HTTPException(422, "selection coordinates must be finite")
+
+    try:
+        cdl = detect_fields_cdl(selection)
+        fields = [{
+            "polygon": f["polygon"],
+            "acres": f["acres"],
+            "tags": {"source": "usda-cdl", "crop": f["crop"], "year": cdl["year"]},
+        } for f in cdl["fields"]]
+        return {"found": len(fields), "fields": fields,
+                "source": "usda-cdl", "year": cdl["year"]}
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError:
+        pass  # CropScape unavailable — fall back to mapped parcels
+
     try:
         parcels = fields_in_area(selection)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except RuntimeError as e:
-        raise HTTPException(502, str(e))
+        raise HTTPException(502, f"Both CDL and OSM lookups failed: {e}")
     fields = []
     for f in parcels:
         ring = _clean_ring(f["coords"])
@@ -47,9 +67,9 @@ def detect_fields(body: AreaBody):
         fields.append({
             "polygon": ring,
             "acres": round(ring_acres(f["coords"]), 2),
-            "tags": f.get("tags", {}),
+            "tags": {**f.get("tags", {}), "source": "osm"},
         })
-    return {"found": len(fields), "fields": fields}
+    return {"found": len(fields), "fields": fields, "source": "osm"}
 
 
 @router.get("/")

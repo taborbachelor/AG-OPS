@@ -114,7 +114,12 @@ function SprayPanel({
       } else {
         setFields((f) => [
           ...f,
-          ...d.fields.map((fd) => ({ polygon: fd.polygon, acres: fd.acres, source: 'auto' })),
+          ...d.fields.map((fd) => ({
+            polygon: fd.polygon,
+            acres: fd.acres,
+            // Field list rows read "356.7 ac · Corn" when USDA supplied a crop.
+            source: (fd.tags && fd.tags.crop) || 'auto',
+          })),
         ]);
         resetResults();
         flash(`${d.found} field${d.found === 1 ? '' : 's'} detected ✓`);
