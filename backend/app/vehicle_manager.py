@@ -91,11 +91,36 @@ class VehicleManager:
         # other's messages. Held briefly per telemetry read, and for the whole
         # duration of a mission transaction.
         self._link_lock = threading.Lock()
+        # Serializes MAVLink *sends*: pymavlink's packer (pack seq -> write ->
+        # seq += 1) is not thread-safe, and the telemetry thread's heartbeat,
+        # the reconnect thread and API/WS handlers all send concurrently.
+        # Lock ordering: _send_lock may be taken while holding _link_lock,
+        # never the other way around.
+        self._send_lock = threading.Lock()
+        # Bumped on every operator disconnect() so an in-flight connect()
+        # (e.g. from the auto-reconnect thread) can detect that the operator
+        # pulled the plug while it was dialing and must NOT bring the link up.
+        self._disconnect_gen = 0
 
     def connect(self, connection_string: str, baud: int = 57600) -> bool:
+        # Snapshot the disconnect generation so we can tell if the operator
+        # called disconnect() while we were dialing / waiting for a heartbeat.
+        gen = self._disconnect_gen
+        conn = None
         try:
-            self.connection = mavutil.mavlink_connection(connection_string, baud=baud)
-            self.connection.wait_heartbeat(timeout=30)
+            conn = mavutil.mavlink_connection(connection_string, baud=baud)
+            # Publish immediately so an operator disconnect() can close the
+            # port and interrupt the heartbeat wait below.
+            self.connection = conn
+            hb = conn.wait_heartbeat(timeout=30)
+            if hb is None:
+                # wait_heartbeat returns None on timeout (it does NOT raise) —
+                # a silent link must never be treated as a live vehicle.
+                raise ConnectionError("no heartbeat from vehicle")
+            if gen != self._disconnect_gen:
+                # Operator disconnected while we were connecting — honor it:
+                # do not bring the link up or re-arm auto-reconnect.
+                raise ConnectionError("cancelled by operator disconnect")
             # Fresh vehicle: clear any telemetry/home left over from a previous
             # connection so we never show a different vehicle's stale data.
             self.telemetry = TelemetryData()
@@ -106,31 +131,46 @@ class VehicleManager:
             self._conn_params = (connection_string, baud)
             self._auto_reconnect = True
             self.reconnecting = False
-            self._mode_mapping = self.connection.mode_mapping()
+            self._mode_mapping = conn.mode_mapping()
             self._request_data_streams()
             # Ask for the home position (used by the landing flow).
-            self.connection.mav.command_long_send(
-                self.connection.target_system, self.connection.target_component,
-                mavutil.mavlink.MAV_CMD_GET_HOME_POSITION, 0, 0, 0, 0, 0, 0, 0, 0)
+            with self._send_lock:
+                conn.mav.command_long_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_CMD_GET_HOME_POSITION, 0, 0, 0, 0, 0, 0, 0, 0)
             self._start_telemetry_loop()
             return True
         except Exception as e:
             self.connected = False
+            # Never leak a half-open port: on serial, a leaked handle keeps the
+            # COM port busy and blocks every future (re)connect attempt until
+            # the backend is restarted.
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if self.connection is conn:
+                    self.connection = None
             raise ConnectionError(f"Failed to connect: {e}")
 
     def _request_data_streams(self, rate_hz: int = 10):
         """Ask the autopilot to stream telemetry. Without this, ArduPilot only
         sends heartbeats and we get no attitude/position/battery data."""
-        self.connection.mav.request_data_stream_send(
-            self.connection.target_system,
-            self.connection.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_ALL,
-            rate_hz,
-            1,  # start streaming
-        )
+        with self._send_lock:
+            self.connection.mav.request_data_stream_send(
+                self.connection.target_system,
+                self.connection.target_component,
+                mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                rate_hz,
+                1,  # start streaming
+            )
 
     def disconnect(self):
-        # Operator asked for this — never auto-reconnect afterwards.
+        # Operator asked for this — never auto-reconnect afterwards. Bump the
+        # generation FIRST so any connect() currently in flight (reconnect
+        # thread mid-dial) aborts instead of silently re-linking.
+        self._disconnect_gen += 1
         self._auto_reconnect = False
         self.reconnecting = False
         self._running = False
@@ -144,9 +184,58 @@ class VehicleManager:
         self.connection_string = None
 
     def _start_telemetry_loop(self):
+        # Never run two telemetry loops at once (they would split messages and
+        # fight over _running/_last_heartbeat): stop any previous loop first.
+        old = self._telemetry_thread
+        if old is not None and old.is_alive() and old is not threading.current_thread():
+            self._running = False
+            old.join(timeout=2)
         self._running = True
         self._telemetry_thread = threading.Thread(target=self._update_telemetry, daemon=True)
         self._telemetry_thread.start()
+
+    def _send_gcs_heartbeat(self, conn):
+        """Send our 1Hz GCS heartbeat if one is due. ArduPilot's GCS-loss
+        failsafe (FS_GCS_ENABL) triggers RTL if the ground station goes silent,
+        so every long-running link transaction must keep calling this."""
+        if time.time() - self._last_hb_sent > 1.0:
+            try:
+                with self._send_lock:
+                    conn.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+                self._last_hb_sent = time.time()
+            except Exception:
+                pass
+
+    def _recv_blocking(self, conn, types, timeout: float):
+        """Wait up to `timeout` seconds for a message whose type is in `types`.
+
+        Replacement for recv_match(type=..., blocking=True) inside lock-held
+        transactions: recv_match with a type filter silently consumes and
+        DISCARDS every other message — including HEARTBEATs — so any long
+        transaction (mission transfer on a slow radio, param reads, ack waits)
+        would starve the link watchdog and tear down a perfectly healthy link
+        the moment the lock is released. Here we read unfiltered, bump the
+        watchdog on every HEARTBEAT that passes by, and keep sending our own
+        1Hz GCS heartbeat so the vehicle's GCS failsafe never fires either."""
+        if isinstance(types, str):
+            types = [types]
+        deadline = time.time() + timeout
+        while conn is not None:
+            self._send_gcs_heartbeat(conn)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            msg = conn.recv_match(blocking=True, timeout=min(remaining, 1.0))
+            if msg is None:
+                continue
+            msg_type = msg.get_type()
+            if msg_type == "HEARTBEAT":
+                self._last_heartbeat = time.time()
+            if msg_type in types:
+                return msg
+        return None
 
     def _update_telemetry(self):
         while self._running and self.connection:
@@ -158,14 +247,9 @@ class VehicleManager:
                 break
             # Announce ourselves at 1Hz so the vehicle's GCS-loss failsafe
             # never fires because of us.
-            if time.time() - self._last_hb_sent > 1.0:
-                try:
-                    self.connection.mav.heartbeat_send(
-                        mavutil.mavlink.MAV_TYPE_GCS,
-                        mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
-                    self._last_hb_sent = time.time()
-                except Exception:
-                    pass
+            conn = self.connection
+            if conn is not None:
+                self._send_gcs_heartbeat(conn)
             try:
                 with self._link_lock:
                     msg = self.connection.recv_match(blocking=False)
@@ -336,25 +420,42 @@ class VehicleManager:
             self._log_fh = None
 
     def set_mode(self, mode: str) -> bool:
-        if not self.connection:
+        """Command a flight-mode change and wait for the vehicle's COMMAND_ACK.
+        Returns True only if the vehicle ACCEPTED the change — a mode the
+        vehicle doesn't know or refuses (e.g. mode-change denied) returns
+        False so callers never report a mode switch that didn't happen."""
+        conn = self.connection
+        if not conn:
             return False
-        mode_id = self.connection.mode_mapping().get(mode)
+        mapping = conn.mode_mapping() or {}
+        mode_id = mapping.get(mode)
         if mode_id is None:
             return False
-        self.connection.set_mode(mode_id)
-        return True
+        # Same wire message mavutil.set_mode sends (COMMAND_LONG DO_SET_MODE),
+        # but we hold the link lock so the telemetry thread can't steal the ack.
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.command_long_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id,
+                    0, 0, 0, 0, 0)
+            ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_DO_SET_MODE)
+        return ack is not None and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
 
     def _wait_command_ack(self, command: int, timeout: float = 5.0):
         """Read COMMAND_ACK for a specific command. Must be called while holding
         _link_lock, otherwise the telemetry thread will consume (and drop) the ack."""
-        start = time.time()
-        while time.time() - start < timeout:
-            ack = self.connection.recv_match(type="COMMAND_ACK", blocking=True, timeout=timeout)
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            ack = self._recv_blocking(self.connection, "COMMAND_ACK", remaining)
             if ack is None:
                 return None
             if ack.command == command:
                 return ack
-        return None
 
     def arm(self, force: bool = False) -> dict:
         """Arm the vehicle. `force` bypasses pre-arm safety checks (21196 magic).
@@ -363,10 +464,11 @@ class VehicleManager:
             return {"ok": False, "error": "not connected"}
         conn = self.connection
         with self._link_lock:
-            conn.mav.command_long_send(
-                conn.target_system, conn.target_component,
-                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
-                1, (21196 if force else 0), 0, 0, 0, 0, 0)
+            with self._send_lock:
+                conn.mav.command_long_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+                    1, (21196 if force else 0), 0, 0, 0, 0, 0)
             ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
         if ack is None:
             return {"ok": False, "error": "no acknowledgement from vehicle"}
@@ -379,13 +481,19 @@ class VehicleManager:
             return {"ok": False, "error": "not connected"}
         conn = self.connection
         with self._link_lock:
-            conn.mav.command_long_send(
-                conn.target_system, conn.target_component,
-                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
-                0, (21196 if force else 0), 0, 0, 0, 0, 0)
+            with self._send_lock:
+                conn.mav.command_long_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+                    0, (21196 if force else 0), 0, 0, 0, 0, 0)
             ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
         ok = ack is not None and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
-        return {"ok": ok}
+        if ok:
+            return {"ok": True, "result": ack.result, "error": None}
+        return {"ok": False,
+                "result": (ack.result if ack else None),
+                "error": ("no acknowledgement from vehicle" if ack is None
+                          else "vehicle rejected disarm (in flight? use force)")}
 
     def takeoff(self, alt: float = 100.0, force: bool = False) -> dict:
         """Auto-takeoff for a fixed-wing: load a minimal takeoff+loiter mission at
@@ -408,7 +516,8 @@ class VehicleManager:
         if not up.get("ok"):
             return {"ok": False, "error": f"could not load takeoff mission: {up.get('error')}"}
 
-        self.set_mode("AUTO")
+        if not self.set_mode("AUTO"):
+            return {"ok": False, "error": "vehicle refused AUTO mode"}
         time.sleep(0.5)
         armed = self.arm(force=force)
         if not armed.get("ok"):
@@ -440,29 +549,37 @@ class VehicleManager:
             return {"ok": False, "error": f"could not load landing mission: {up.get('error')}"}
 
         # Start from the approach leg (seq 1) rather than continuing an old index.
-        self.connection.mav.mission_set_current_send(
-            self.connection.target_system, self.connection.target_component, 1)
-        self.set_mode("AUTO")
+        with self._send_lock:
+            self.connection.mav.mission_set_current_send(
+                self.connection.target_system, self.connection.target_component, 1)
+        if not self.set_mode("AUTO"):
+            return {"ok": False, "error": "vehicle refused AUTO mode"}
         return {"ok": True}
 
     def get_available_modes(self) -> list[str]:
+        # NOTE: no "LAND" here — ArduPlane has no LAND mode (only quadplanes
+        # have QLAND); advertising it made the UI offer a mode the vehicle
+        # silently rejected. Landing is done via the /land mission flow.
         return [
             "MANUAL", "STABILIZE", "FBWA", "FBWB", "AUTO",
-            "RTL", "LOITER", "GUIDED", "CIRCLE", "LAND"
+            "RTL", "LOITER", "GUIDED", "CIRCLE"
         ]
 
     def get_param(self, name: str):
-        if not self.connection:
+        conn = self.connection
+        if not conn:
             return None
         with self._link_lock:
-            self.connection.param_fetch_one(name)
-            msg = self.connection.recv_match(type="PARAM_VALUE", blocking=True, timeout=5)
+            with self._send_lock:
+                conn.param_fetch_one(name)
+            msg = self._recv_blocking(conn, "PARAM_VALUE", 5)
         return msg.param_value if msg else None
 
     def set_param(self, name: str, value: float) -> bool:
         if not self.connection:
             return False
-        self.connection.param_set_send(name, value)
+        with self._send_lock:
+            self.connection.param_set_send(name, value)
         return True
 
     def get_all_params(self, timeout: float = 25.0) -> dict:
@@ -476,19 +593,14 @@ class VehicleManager:
         params = {}
         total = None
         with self._link_lock:
-            conn.mav.param_request_list_send(conn.target_system, conn.target_component)
+            with self._send_lock:
+                conn.mav.param_request_list_send(conn.target_system, conn.target_component)
             start = time.time()
             last_rx = start
             while time.time() - start < timeout:
-                if time.time() - self._last_hb_sent > 1.0:
-                    try:
-                        conn.mav.heartbeat_send(
-                            mavutil.mavlink.MAV_TYPE_GCS,
-                            mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
-                        self._last_hb_sent = time.time()
-                    except Exception:
-                        pass
-                msg = conn.recv_match(type="PARAM_VALUE", blocking=True, timeout=2)
+                # _recv_blocking keeps our 1Hz GCS heartbeat going and bumps
+                # the link watchdog on any HEARTBEAT that passes by.
+                msg = self._recv_blocking(conn, "PARAM_VALUE", 2)
                 if msg is None:
                     if time.time() - last_rx > 4:
                         break  # stream dried up — return what we have
@@ -513,11 +625,12 @@ class VehicleManager:
         result = {}
         with self._link_lock:
             for name in names:
-                conn.mav.param_request_read_send(
-                    conn.target_system, conn.target_component, name.encode(), -1)
+                with self._send_lock:
+                    conn.mav.param_request_read_send(
+                        conn.target_system, conn.target_component, name.encode(), -1)
                 start = time.time()
                 while time.time() - start < 1.5:
-                    msg = conn.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.5)
+                    msg = self._recv_blocking(conn, "PARAM_VALUE", 1.5)
                     if msg is None:
                         break
                     pid = msg.param_id
@@ -533,9 +646,10 @@ class VehicleManager:
         if not self.connection:
             return {"ok": False, "error": "not connected"}
         for name, value in params.items():
-            self.connection.mav.param_set_send(
-                self.connection.target_system, self.connection.target_component,
-                name.encode(), float(value), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+            with self._send_lock:
+                self.connection.mav.param_set_send(
+                    self.connection.target_system, self.connection.target_component,
+                    name.encode(), float(value), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
             time.sleep(0.05)
         return {"ok": True, "count": len(params)}
 
@@ -544,7 +658,14 @@ class VehicleManager:
         — used to fly from a laptop-connected transmitter/gamepad. 0 on a channel
         releases it back to the real RC input. Must be sent continuously (~20Hz)
         or ArduPilot times the override out."""
-        if not self.connection:
+        # Capture locally: the telemetry thread can null self.connection at any
+        # moment (link loss) and this is called from other threads.
+        conn = self.connection
+        if not conn:
+            return False
+        # Reject malformed frames outright (e.g. a dict) instead of raising —
+        # a single bad frame must never take down the manual-control stream.
+        if not isinstance(channels, (list, tuple)):
             return False
         ch = []
         for i in range(8):
@@ -554,19 +675,26 @@ class VehicleManager:
             except (TypeError, ValueError):
                 v = 0
             ch.append(0 if v == 0 else max(900, min(2100, v)))
-        self.connection.mav.rc_channels_override_send(
-            self.connection.target_system, self.connection.target_component, *ch)
+        try:
+            with self._send_lock:
+                conn.mav.rc_channels_override_send(
+                    conn.target_system, conn.target_component, *ch)
+        except Exception:
+            # Port died mid-send (link loss race) — report failure, don't raise.
+            return False
         return True
 
     def release_rc_override(self):
         """Release all RC overrides (send zeros) so the plane isn't left with the
         last stick positions after manual control stops."""
-        if not self.connection:
+        conn = self.connection
+        if not conn:
             return
         try:
-            self.connection.mav.rc_channels_override_send(
-                self.connection.target_system, self.connection.target_component,
-                0, 0, 0, 0, 0, 0, 0, 0)
+            with self._send_lock:
+                conn.mav.rc_channels_override_send(
+                    conn.target_system, conn.target_component,
+                    0, 0, 0, 0, 0, 0, 0, 0)
         except Exception:
             pass
 
@@ -585,17 +713,13 @@ class VehicleManager:
         full = [{"command": "WAYPOINT", "lat": home_lat, "lon": home_lon,
                  "alt": 0.0, "param1": 0.0}] + items
 
-        with self._link_lock:
-            conn.mav.mission_count_send(conn.target_system, conn.target_component, len(full))
-            for i, it in enumerate(full):
-                req = conn.recv_match(type=["MISSION_REQUEST", "MISSION_REQUEST_INT"],
-                                      blocking=True, timeout=5)
-                if req is None:
-                    return {"ok": False, "error": f"no MISSION_REQUEST for seq {i}"}
-                cmd = _CMD_TO_MAV.get(it.get("command", "WAYPOINT"),
-                                      mavutil.mavlink.MAV_CMD_NAV_WAYPOINT)
+        def _send_item(seq: int):
+            it = full[seq]
+            cmd = _CMD_TO_MAV.get(it.get("command", "WAYPOINT"),
+                                  mavutil.mavlink.MAV_CMD_NAV_WAYPOINT)
+            with self._send_lock:
                 conn.mav.mission_item_int_send(
-                    conn.target_system, conn.target_component, i,
+                    conn.target_system, conn.target_component, seq,
                     mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
                     cmd, 0, 1,
                     # param1 = hold time / command-specific; param3 = loiter
@@ -603,12 +727,49 @@ class VehicleManager:
                     float(it.get("param1", 0.0)), 0.0, float(it.get("radius", 0.0)), 0.0,
                     int(float(it["lat"]) * 1e7), int(float(it["lon"]) * 1e7), float(it["alt"]),
                 )
-            ack = conn.recv_match(type=["MISSION_ACK"], blocking=True, timeout=5)
+
+        ack = None
+        error = None
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.mission_count_send(conn.target_system, conn.target_component, len(full))
+            # The VEHICLE drives the transfer: it asks for each seq and — on a
+            # lossy radio — re-asks for the same seq when a reply was lost, so
+            # always answer with the exact seq requested (never a local
+            # counter, which desyncs the whole transfer on one retransmit).
+            # Bounded iterations so a misbehaving vehicle can't loop us forever.
+            for _ in range(10 * len(full) + 20):
+                msg = self._recv_blocking(
+                    conn, ["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"], 5)
+                if msg is None:
+                    error = "mission transfer timed out (no request/ack from vehicle)"
+                    break
+                if msg.get_type() == "MISSION_ACK":
+                    ack = msg
+                    break
+                if 0 <= msg.seq < len(full):
+                    _send_item(msg.seq)
+                # requests out of range: stale/corrupt frame — ignore
+            else:
+                error = "mission transfer did not complete (vehicle kept re-requesting)"
+            if ack is None:
+                # Close the half-open transaction so the vehicle doesn't sit
+                # mid-transfer holding a partially-replaced mission.
+                try:
+                    with self._send_lock:
+                        conn.mav.mission_ack_send(
+                            conn.target_system, conn.target_component,
+                            mavutil.mavlink.MAV_MISSION_OPERATION_CANCELLED)
+                except Exception:
+                    pass
 
         ok = ack is not None and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED
         if ok:
             self.telemetry.mission_count = len(items)
-        return {"ok": ok, "ack": (ack.type if ack else None), "count": len(items)}
+        result = {"ok": ok, "ack": (ack.type if ack else None), "count": len(items)}
+        if not ok:
+            result["error"] = error or f"vehicle rejected mission (MISSION_ACK type {ack.type})"
+        return result
 
     def download_mission(self) -> list[dict]:
         """Download the mission from the vehicle. Returns the editable items
@@ -619,14 +780,15 @@ class VehicleManager:
         result = []
 
         with self._link_lock:
-            conn.mav.mission_request_list_send(conn.target_system, conn.target_component)
-            count_msg = conn.recv_match(type=["MISSION_COUNT"], blocking=True, timeout=5)
+            with self._send_lock:
+                conn.mav.mission_request_list_send(conn.target_system, conn.target_component)
+            count_msg = self._recv_blocking(conn, "MISSION_COUNT", 5)
             if not count_msg:
                 return []
             for i in range(count_msg.count):
-                conn.mav.mission_request_int_send(conn.target_system, conn.target_component, i)
-                item = conn.recv_match(type=["MISSION_ITEM_INT", "MISSION_ITEM"],
-                                       blocking=True, timeout=5)
+                with self._send_lock:
+                    conn.mav.mission_request_int_send(conn.target_system, conn.target_component, i)
+                item = self._recv_blocking(conn, ["MISSION_ITEM_INT", "MISSION_ITEM"], 5)
                 if item is None:
                     continue
                 cmd_name = _MAV_TO_CMD.get(item.command)
@@ -639,8 +801,9 @@ class VehicleManager:
                 result.append({"seq": item.seq, "command": cmd_name,
                                "lat": lat, "lon": lon, "alt": item.z})
             # Close the transaction so the vehicle stops expecting more requests.
-            conn.mav.mission_ack_send(conn.target_system, conn.target_component,
-                                      mavutil.mavlink.MAV_MISSION_ACCEPTED)
+            with self._send_lock:
+                conn.mav.mission_ack_send(conn.target_system, conn.target_component,
+                                          mavutil.mavlink.MAV_MISSION_ACCEPTED)
 
         items = [w for w in result if w["seq"] != 0]
         self.telemetry.mission_count = len(items)

@@ -245,6 +245,78 @@ class TestValidation(unittest.TestCase):
             plan_coverage(poly_ll(RECT_XY), swath_m=-5.0, alt_m=100.0)
 
 
+class TestSpeedValidation(unittest.TestCase):
+    """NaN/Infinity/out-of-range speed must map to a clean client error on
+    BOTH coverage endpoints.
+
+    Regression: speed=NaN used to pass the bare-float model, defeat
+    plan_coverage's `speed_ms <= 0` guard (NaN <= 0 is False), poison
+    est_time_s and crash response serialization — an unauthenticated HTTP
+    500 (speed=Infinity returned a silently bogus est_time_s of 0.0).
+
+    The check deliberately lives in the handlers (_check_speed), NOT as a
+    pydantic Field(gt/le): this FastAPI/starlette stack echoes a rejected
+    input inside the 422 body, so rejecting NaN via pydantic just moves the
+    same JSON-serialization 500 into the validation-error handler.
+    """
+
+    BAD = (float("nan"), float("inf"), float("-inf"), 0.0, -5.0, 1.0, 80.5)
+
+    def test_plan_rejects_bad_speed_with_serializable_422(self):
+        import json
+
+        from fastapi import HTTPException
+
+        from app.routers.coverage import CoverageRequest, plan
+
+        for bad in self.BAD:
+            req = CoverageRequest(polygon=poly_ll(RECT_XY), swath=20.0,
+                                  alt=100.0, speed=bad)
+            with self.assertRaises(HTTPException,
+                                   msg=f"speed={bad!r} not rejected") as ctx:
+                plan(req)
+            self.assertEqual(ctx.exception.status_code, 422)
+            # The rejection itself must be JSON-serializable (the original
+            # bug was a 500 born from an unserializable response body).
+            json.dumps({"detail": ctx.exception.detail})
+
+    def test_plan_auto_rejects_bad_speed_before_zone_fetch(self):
+        from fastapi import HTTPException
+
+        from app.routers import coverage as coverage_router
+
+        def must_not_be_called(*a, **k):  # pragma: no cover
+            raise AssertionError("fetch_zones called despite bad speed")
+
+        from unittest import mock
+        with mock.patch.object(coverage_router, "fetch_zones",
+                               must_not_be_called):
+            for bad in self.BAD:
+                req = coverage_router.AutoCoverageRequest(
+                    polygon=poly_ll(RECT_XY), swath=20.0, alt=100.0,
+                    speed=bad)
+                with self.assertRaises(
+                        HTTPException,
+                        msg=f"speed={bad!r} not rejected") as ctx:
+                    coverage_router.plan_auto(req)
+                self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_legal_speeds_still_plan(self):
+        from app.routers.coverage import CoverageRequest, plan
+
+        for ok in (1.5, 18.0, 80.0):
+            resp = plan(CoverageRequest(polygon=poly_ll(RECT_XY), swath=20.0,
+                                        alt=100.0, speed=ok))
+            self.assertTrue(math.isfinite(resp["stats"]["est_time_s"]))
+
+    def test_plan_coverage_rejects_non_finite_speed(self):
+        # Defense in depth at the geometry layer for non-router callers.
+        for bad in (float("nan"), float("inf"), float("-inf"), 0.0):
+            with self.assertRaises(ValueError, msg=f"speed_ms={bad!r}"):
+                plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=100.0,
+                              speed_ms=bad)
+
+
 class TestRouterErrorMapping(unittest.TestCase):
     def test_zero_area_polygon_maps_to_400(self):
         # The /plan handler is plain sync, so call it directly: a degenerate

@@ -20,6 +20,11 @@ import FlightSummary from './components/FlightSummary';
 import ParamsPanel from './components/ParamsPanel';
 import './App.css';
 
+// How long the vehicle must report disarmed (while connected) before the UI
+// treats the flight as over. Covers the backend's post-reconnect telemetry
+// reset, which reports armed=false until the next 1Hz HEARTBEAT is parsed.
+const DISARM_CONFIRM_MS = 2000;
+
 const DEFAULT_TELEMETRY = {
   connected: false, armed: false, mode: 'UNKNOWN',
   altitude: 0, airspeed: 0, groundspeed: 0, heading: 0,
@@ -40,6 +45,8 @@ function App() {
   // Post-flight debrief (set on disarm after a real flight).
   const [flightSummary, setFlightSummary] = useState(null);
   const flightRef = useRef(null);
+  // Timestamp of the first consecutive disarmed frame (0 = armed/unknown).
+  const disarmedAt = useRef(0);
 
   // One active view, switched from the left nav rail.
   const [view, setView] = useState('fly'); // fly | plan | spray | safety | rc | controls | logs
@@ -103,10 +110,7 @@ function App() {
 
   // Telemetry WebSocket with auto-reconnect.
   useEffect(() => {
-    if (!connected) {
-      setTelemetry(DEFAULT_TELEMETRY);
-      return;
-    }
+    if (!connected) return;
     let closedByUs = false;
     let ws;
     let retry;
@@ -127,17 +131,51 @@ function App() {
     };
   }, [connected]);
 
-  // Enter supervision mode when actually airborne; leave it on disarm.
+  // Wipe stale telemetry only when the link is definitively down. During the
+  // backend's auto-reconnect window (a transient radio dropout mid-flight) we
+  // hold the last-known frame: resetting to DEFAULT would fake a disarm,
+  // dropping the flight console and popping a false debrief while airborne.
   useEffect(() => {
-    if (!connected || !telemetry.armed) {
+    if (!connected && !reconnecting) setTelemetry(DEFAULT_TELEMETRY);
+  }, [connected, reconnecting]);
+
+  // Debounced disarm detection. Right after the backend auto-reconnects it
+  // resets its TelemetryData, so the first WS frames can report armed=false
+  // for up to ~1s (until the next HEARTBEAT parses) even though the aircraft
+  // is still flying. Only treat the vehicle as disarmed once it has reported
+  // disarmed continuously for DISARM_CONFIRM_MS while connected.
+  // (Declared before the effects below so they see this frame's update.)
+  useEffect(() => {
+    if (!connected || telemetry.armed) {
+      disarmedAt.current = 0;
+    } else if (!disarmedAt.current) {
+      disarmedAt.current = Date.now();
+    }
+  }, [telemetry, connected]);
+
+  // Enter supervision mode when actually airborne; leave it on disarm.
+  // While the backend is auto-reconnecting after a link drop the aircraft is
+  // still flying — hold the supervision console instead of swapping back to
+  // the full-tool launch layout.
+  useEffect(() => {
+    if (reconnecting) return;
+    if (!connected) {
       setFlying(false);
       setToolsPeek(false);
+      return;
+    }
+    if (!telemetry.armed) {
+      // Confirmed disarm only — ignore the transient post-reconnect frames.
+      if (disarmedAt.current && Date.now() - disarmedAt.current > DISARM_CONFIRM_MS) {
+        setFlying(false);
+        setToolsPeek(false);
+      }
       return;
     }
     if (!flying && (telemetry.altitude > 8 || telemetry.groundspeed > 5)) {
       setFlying(true);
     }
-  }, [telemetry, connected, flying]);
+  }, [telemetry, connected, reconnecting, flying]);
 
   // Flight accumulator: stats gathered while armed, debrief card on disarm.
   useEffect(() => {
@@ -160,7 +198,13 @@ function App() {
         f.last = { lat: t.lat, lon: t.lon };
       }
       if (t.battery_level != null) f.battEnd = t.battery_level;
-    } else if (flightRef.current) {
+    } else if (flightRef.current && connected && !t.armed
+        && disarmedAt.current && Date.now() - disarmedAt.current > DISARM_CONFIRM_MS) {
+      // Close out the flight only on a CONFIRMED, observed disarm. A dropped
+      // link (reconnecting or lost) merely pauses the accumulator: flushing
+      // there would show a bogus "Flight Complete" mid-air and split the
+      // stats across the outage. If the link returns with the aircraft still
+      // armed, the same accumulator (and battery baseline) simply continues.
       const f = flightRef.current;
       flightRef.current = null;
       const dur = (Date.now() - f.start) / 1000;

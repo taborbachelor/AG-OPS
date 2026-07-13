@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 
 const API = 'http://localhost:8000/api';
 
@@ -43,15 +43,32 @@ function BatteryBar({ voltage, current, level }) {
 
 function HudRight({ telemetry, connected }) {
   const t = telemetry;
+  const [note, setNote] = useState('');
+  const noteTimer = useRef(null);
 
+  const fail = (m) => {
+    setNote(m);
+    clearTimeout(noteTimer.current);
+    noteTimer.current = setTimeout(() => setNote(''), 8000);
+  };
+
+  // A rejected mode change (4xx/5xx or no backend) must be visible — the
+  // status poll only tracks link state, not command acks.
   const setMode = async (mode) => {
     try {
-      await fetch(`${API}/vehicle/mode`, {
+      const res = await fetch(`${API}/vehicle/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
       });
-    } catch (e) { console.error(e); }
+      if (!res.ok) {
+        let detail = '';
+        try { detail = (await res.json()).detail; } catch { /* no body */ }
+        fail(`${mode} FAILED — ${detail || `HTTP ${res.status}`}`);
+      }
+    } catch (e) {
+      fail(`${mode} FAILED — no response from backend`);
+    }
   };
 
   return (
@@ -94,6 +111,7 @@ function HudRight({ telemetry, connected }) {
         >
           MANUAL
         </button>
+        {note && <div className="vitals-note">{note}</div>}
       </div>
     </div>
   );

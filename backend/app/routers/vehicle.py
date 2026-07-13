@@ -4,6 +4,12 @@ from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
 
+# NOTE: handlers that talk to the vehicle are deliberately plain `def`, not
+# `async def`: FastAPI runs them in its threadpool, so a slow/blocking
+# pymavlink call (serial dial, 30s heartbeat wait, param download, ack waits)
+# can never freeze the event loop — emergency commands (RTL, disarm) and the
+# telemetry WebSocket must stay responsive at all times.
+
 
 @router.websocket("/rc")
 async def rc_override_ws(ws: WebSocket):
@@ -14,8 +20,16 @@ async def rc_override_ws(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_json()
-            if vehicle_manager.connected:
-                vehicle_manager.send_rc_override(data.get("channels", []))
+            # One malformed frame (or the link dropping mid-send) must NEVER
+            # kill this handler: the pilot's stick input would silently stop
+            # working while the socket still looks open. Skip bad frames and
+            # keep reading.
+            try:
+                channels = data.get("channels") if isinstance(data, dict) else None
+                if isinstance(channels, (list, tuple)) and vehicle_manager.connected:
+                    vehicle_manager.send_rc_override(list(channels))
+            except Exception:
+                continue
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -34,10 +48,14 @@ async def get_modes():
 
 
 @router.post("/mode")
-async def set_mode(req: ModeRequest):
+def set_mode(req: ModeRequest):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    vehicle_manager.set_mode(req.mode)
+    # set_mode() is ack-checked: False means the vehicle doesn't know the mode
+    # or refused the change. Never tell the operator "ok" for a mode change
+    # that didn't happen (e.g. they think the plane is landing and it isn't).
+    if not vehicle_manager.set_mode(req.mode):
+        raise HTTPException(400, f"Vehicle rejected mode change to {req.mode}")
     return {"status": "ok", "mode": req.mode}
 
 
@@ -51,7 +69,7 @@ class TakeoffRequest(BaseModel):
 
 
 @router.post("/arm")
-async def arm(req: ArmRequest = ArmRequest()):
+def arm(req: ArmRequest = ArmRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     result = vehicle_manager.arm(force=req.force)
@@ -61,15 +79,19 @@ async def arm(req: ArmRequest = ArmRequest()):
 
 
 @router.post("/disarm")
-async def disarm(req: ArmRequest = ArmRequest()):
+def disarm(req: ArmRequest = ArmRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    vehicle_manager.disarm(force=req.force)
-    return {"status": "disarmed"}
+    result = vehicle_manager.disarm(force=req.force)
+    if not result.get("ok"):
+        # Never report "disarmed" when the vehicle rejected or didn't ack the
+        # disarm — the prop may still be spinning.
+        raise HTTPException(400, result.get("error") or "disarm failed")
+    return {"status": "disarmed", **result}
 
 
 @router.post("/takeoff")
-async def takeoff(req: TakeoffRequest = TakeoffRequest()):
+def takeoff(req: TakeoffRequest = TakeoffRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     result = vehicle_manager.takeoff(alt=req.alt, force=req.force)
@@ -79,7 +101,7 @@ async def takeoff(req: TakeoffRequest = TakeoffRequest()):
 
 
 @router.post("/land")
-async def land():
+def land():
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     result = vehicle_manager.land()
@@ -89,7 +111,7 @@ async def land():
 
 
 @router.get("/params")
-async def get_all_params():
+def get_all_params():
     """Full parameter table — takes a few seconds; telemetry pauses while the
     link is dedicated to the transfer (ground/config activity)."""
     if not vehicle_manager.connected:
@@ -106,7 +128,7 @@ class ParamUpdate(BaseModel):
 
 
 @router.post("/params")
-async def set_param(req: ParamUpdate):
+def set_param(req: ParamUpdate):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     vehicle_manager.set_param(req.name, req.value)

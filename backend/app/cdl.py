@@ -41,6 +41,8 @@ MIN_FIELD_PX = 10          # ~2.2 acres — ignore slivers
 MIN_HOLE_PX = 2            # interior islands >= ~0.45 ac become keepout holes
 MAX_FIELDS = 40
 SIMPLIFY_TOL_PX = 0.9      # straightens 30m staircases into clean diagonals
+                           # (outer boundaries only — holes are keepouts and
+                           # stay exact; see detect_fields_cdl)
 
 # CDL land-cover codes. Cropland = 1..61 (row crops, grains, hay, fallow),
 # 66..77 (orchards/fruit), 196..255 (double-crops & misc crops). Explicitly
@@ -321,7 +323,14 @@ def detect_fields_cdl(selection, include_pasture=False, year=None):
         for hl in loops[1:]:
             if _loop_area_px(hl) < MIN_HOLE_PX:
                 continue
-            hp = _simplify(_collapse_collinear(hl), SIMPLIFY_TOL_PX)
+            # Holes become NO-SPRAY keepouts, so they are never
+            # Douglas-Peucker simplified: DP moves the traced boundary up to
+            # SIMPLIFY_TOL_PX (0.9 px = 27 m) in EITHER direction, and an
+            # inward move re-labels real pond/farmstead area as sprayable —
+            # more than the default 15 m water buffer, i.e. spray in the
+            # pond. _collapse_collinear is lossless (drops midpoints of
+            # straight runs only), so the exact pixel-edge ring stays small.
+            hp = _collapse_collinear(hl)
             if len(hp) >= 3:
                 holes.append(corners_to_geo(hp))
 

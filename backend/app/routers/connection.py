@@ -11,16 +11,25 @@ class ConnectRequest(BaseModel):
     baud: int = 57600
 
 
+# NOTE: blocking handlers are plain `def` (FastAPI runs them in a threadpool)
+# so a slow serial dial or 30s heartbeat wait can never freeze the event loop
+# and with it the whole GCS API (RTL/disarm/telemetry).
+
+
 @router.get("/ports")
-async def list_serial_ports():
+def list_serial_ports():
     ports = serial.tools.list_ports.comports()
     return [{"device": p.device, "description": p.description} for p in ports]
 
 
 @router.post("/connect")
-async def connect_vehicle(req: ConnectRequest):
+def connect_vehicle(req: ConnectRequest):
     if vehicle_manager.connected:
         raise HTTPException(400, "Already connected. Disconnect first.")
+    if vehicle_manager.reconnecting:
+        # A manual connect racing the auto-reconnect thread's own connect()
+        # would clobber the connection and spawn duplicate telemetry loops.
+        raise HTTPException(409, "Auto-reconnect in progress. Disconnect first to cancel it.")
     try:
         vehicle_manager.connect(req.connection_string, req.baud)
         return {"status": "connected", "connection": req.connection_string}
@@ -29,7 +38,7 @@ async def connect_vehicle(req: ConnectRequest):
 
 
 @router.post("/disconnect")
-async def disconnect_vehicle():
+def disconnect_vehicle():
     vehicle_manager.disconnect()
     return {"status": "disconnected"}
 

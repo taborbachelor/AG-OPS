@@ -22,8 +22,12 @@ class MissionUpload(BaseModel):
     items: list[MissionItem]
 
 
+# NOTE: plain `def` handlers run in FastAPI's threadpool so long mission
+# transfers never freeze the event loop (RTL/disarm/telemetry stay live).
+
+
 @router.get("/download")
-async def download_mission():
+def download_mission():
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     items = vehicle_manager.download_mission()
@@ -31,7 +35,7 @@ async def download_mission():
 
 
 @router.post("/upload")
-async def upload_mission(mission: MissionUpload):
+def upload_mission(mission: MissionUpload):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     items = [i.model_dump() for i in mission.items]
@@ -42,8 +46,10 @@ async def upload_mission(mission: MissionUpload):
 
 
 @router.post("/start")
-async def start_mission():
+def start_mission():
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    vehicle_manager.set_mode("AUTO")
+    # Ack-checked: never report "mission started" if the vehicle refused AUTO.
+    if not vehicle_manager.set_mode("AUTO"):
+        raise HTTPException(400, "Vehicle rejected switch to AUTO — mission NOT started")
     return {"status": "mission started"}

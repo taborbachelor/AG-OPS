@@ -55,8 +55,20 @@ function RCPanel({ telemetry, connected }) {
   // While manual control is on, stream gamepad axes -> RC override WebSocket at ~25Hz.
   useEffect(() => {
     if (!manual) return;
+    let closedByUs = false;
     const ws = new WebSocket('ws://localhost:8000/api/vehicle/rc');
     wsRef.current = ws;
+    // A dropped (or never-established) socket must not keep showing LIVE
+    // while stick inputs silently stop reaching the vehicle. The backend
+    // releases the RC override on disconnect; reflect that here and tell
+    // the operator. (onerror is always followed by onclose, so one handler
+    // covers both.)
+    ws.onclose = () => {
+      if (closedByUs) return;
+      setManual(false);
+      setNote('⚠ Manual control link lost — RC override stopped');
+      setTimeout(() => setNote(''), 6000);
+    };
     let raf, last = 0;
     const loop = (ts) => {
       const pads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -73,7 +85,7 @@ function RCPanel({ telemetry, connected }) {
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
-    return () => { cancelAnimationFrame(raf); ws.close(); };
+    return () => { closedByUs = true; cancelAnimationFrame(raf); ws.close(); };
   }, [manual]);
 
   const post = (path, body) => fetch(`${API}${path}`, {

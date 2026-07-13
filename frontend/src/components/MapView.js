@@ -128,6 +128,21 @@ function ClickHandler({ enabled, onAddWaypoint }) {
   return null;
 }
 
+// react-leaflet v5 freezes MapContainer's className/style props at first
+// render (they're captured in a useState), so the layer tint class and the
+// draw-mode crosshair cursor must be kept in sync on the live container
+// element instead.
+function ContainerSync({ layer, crosshair }) {
+  const map = useMap();
+  useEffect(() => {
+    const el = map.getContainer();
+    Object.keys(LAYERS).forEach((k) => el.classList.remove(`layer-${k}`));
+    el.classList.add(`layer-${layer}`);
+    el.style.cursor = crosshair ? 'crosshair' : 'grab';
+  }, [map, layer, crosshair]);
+  return null;
+}
+
 // Frame a newly set spray field (e.g. loaded from an order) once per change.
 // While drawing, the array changes on every click — skip those so the map
 // stays put under the operator's cursor.
@@ -196,11 +211,23 @@ function MapView({
   const mapRef = useRef(null);
 
   const hasFix = telemetry.lat !== 0 && telemetry.lon !== 0;
+  const playback = !!playbackPath;
 
-  // Capture the launch point the first time we get a position.
-  if (hasFix && !homeRef.current) {
+  // Launch-point fallback: latch the first LIVE fix only — log-playback
+  // telemetry must never become "home" for a later live session — and clear
+  // the latch when live telemetry ends so the next session re-latches fresh.
+  if (hasFix && !playback && !homeRef.current) {
     homeRef.current = [telemetry.lat, telemetry.lon];
   }
+  if (!hasFix && !playback && homeRef.current) {
+    homeRef.current = null;
+  }
+
+  // Prefer the autopilot's real home position whenever telemetry carries one;
+  // the first-fix latch is only a fallback until HOME_POSITION arrives.
+  const homePos = (telemetry.home_lat || telemetry.home_lon)
+    ? [telemetry.home_lat, telemetry.home_lon]
+    : homeRef.current;
 
   // Append to the travelled trail (live only — during playback we draw the
   // full recorded path instead).
@@ -237,6 +264,7 @@ function MapView({
         <TileLayer key={layer} url={active.url} attribution={active.attribution} maxZoom={19} />
         {active.overlay && <TileLayer key={`${layer}-ov`} url={active.overlay} maxZoom={19} />}
 
+        <ContainerSync layer={layer} crosshair={!!(planning || sprayDrawing)} />
         <InitialCenter lat={telemetry.lat} lon={telemetry.lon} />
         <Follow lat={telemetry.lat} lon={telemetry.lon}
           enabled={follow && !planning && !sprayDrawing} />
@@ -332,9 +360,9 @@ function MapView({
         ))}
 
         {/* Geofence (circular) centered on home */}
-        {fence && fence.enable && fence.radius > 0 && homeRef.current && (
+        {fence && fence.enable && fence.radius > 0 && homePos && (
           <Circle
-            center={homeRef.current}
+            center={homePos}
             radius={fence.radius}
             pathOptions={{ color: '#ff9100', weight: 2, opacity: 0.8,
               fillColor: '#ff9100', fillOpacity: 0.06, dashArray: '4 6' }}
@@ -342,7 +370,7 @@ function MapView({
         )}
 
         {/* Home / launch point */}
-        {homeRef.current && <Marker position={homeRef.current} icon={homeIcon} />}
+        {homePos && <Marker position={homePos} icon={homeIcon} />}
 
         {/* Recorded flight path during playback */}
         {playbackPath && playbackPath.length > 1 && (

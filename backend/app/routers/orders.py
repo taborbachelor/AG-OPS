@@ -49,6 +49,21 @@ _STATUS_CHAIN = {
 _EARTH_RADIUS_M = 6371000.0
 _SQ_M_PER_ACRE = 4046.8564224
 
+# The service area is northeast Kansas, so a "spray day" is a US Central
+# calendar day. Date validation must use this zone — not the server's local
+# zone (UTC in prod) — or an evening Central-time customer gets "tomorrow"
+# rejected because the server's date has already rolled over. The website
+# (web/src/geometry.js tomorrowISO) computes its earliest offered date in the
+# same zone so client and server always agree.
+try:
+    from zoneinfo import ZoneInfo
+    _BUSINESS_TZ = ZoneInfo("America/Chicago")
+except Exception:
+    # No IANA tz database (e.g. Windows without the tzdata package): fall back
+    # to fixed CST (UTC-6). During daylight saving this puts the day boundary
+    # at 1 AM Central — never rejects a valid "tomorrow", only briefly lenient.
+    _BUSINESS_TZ = timezone(timedelta(hours=-6))
+
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -167,6 +182,79 @@ def _price_cents(acres: float) -> int:
     return max(round(acres * PRICE_PER_ACRE_CENTS), MIN_PRICE_CENTS)
 
 
+def _cross(o, a, b) -> float:
+    """2D cross product of vectors o->a and o->b (orientation sign)."""
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _on_segment(a, b, p) -> bool:
+    """True if collinear point p lies within segment ab's bounding box."""
+    return (min(a[0], b[0]) <= p[0] <= max(a[0], b[0])
+            and min(a[1], b[1]) <= p[1] <= max(a[1], b[1]))
+
+
+def _segments_intersect(p, q, r, s) -> bool:
+    """True if closed segments pq and rs share any point."""
+    d1 = _cross(r, s, p)
+    d2 = _cross(r, s, q)
+    d3 = _cross(p, q, r)
+    d4 = _cross(p, q, s)
+    if (((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0))
+            and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))):
+        return True
+    if d1 == 0 and _on_segment(r, s, p):
+        return True
+    if d2 == 0 and _on_segment(r, s, q):
+        return True
+    if d3 == 0 and _on_segment(p, q, r):
+        return True
+    if d4 == 0 and _on_segment(p, q, s):
+        return True
+    return False
+
+
+def _ring_self_intersects(polygon: list[LatLon]) -> bool:
+    """True if the closed ring through the points crosses or touches itself.
+
+    The shoelace in _polygon_acres silently *understates* a self-intersecting
+    ring (a bow-tie's lobes cancel to ~0 acres -> the $150 floor), and the ring
+    would be persisted as invalid GeoJSON for the future spray-mission
+    pipeline — so such boundaries must be rejected outright. Non-adjacent edge
+    pairs are checked pairwise; O(n^2) is fine for hand-clicked fields.
+    Intersection is tested on raw (lon, lat) coordinates: the map projection
+    only rescales the axes, which cannot create or remove a crossing.
+
+    Exact consecutive duplicate points (e.g. a double-clicked corner in the
+    map UI) are collapsed first: a zero-length edge shifts edge adjacency so
+    the exemptions below would misread two genuinely-adjacent edges as
+    non-adjacent and falsely flag a valid ring. Dropping such an edge cannot
+    create or remove a real crossing — the traced path is unchanged.
+    """
+    pts = [(p.lon, p.lat) for p in polygon]
+    dedup: list[tuple[float, float]] = []
+    for pt in pts:
+        if dedup and dedup[-1] == pt:
+            continue
+        dedup.append(pt)
+    # The ring is implicitly closed, so a last point repeating the first is
+    # the same degenerate zero-length (wrap) edge — drop it too.
+    while len(dedup) > 1 and dedup[0] == dedup[-1]:
+        dedup.pop()
+    pts = dedup
+    n = len(pts)
+    if n < 4:
+        return False  # a triangle cannot self-intersect
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        for j in range(i + 1, n):
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue  # adjacent edges legitimately share an endpoint
+            c, d = pts[j], pts[(j + 1) % n]
+            if _segments_intersect(a, b, c, d):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -181,6 +269,9 @@ def _validate_new_order(body: OrderCreate) -> None:
     for p in body.field.polygon:
         if not (math.isfinite(p.lat) and math.isfinite(p.lon)):
             raise HTTPException(400, "Field coordinates must be finite numbers")
+    if _ring_self_intersects(body.field.polygon):
+        raise HTTPException(
+            400, "Field boundary must not cross itself — please redraw it")
     if "@" not in body.email:
         raise HTTPException(400, "A valid email address is required")
     if body.slot not in ("AM", "PM"):
@@ -195,8 +286,11 @@ def _validate_new_order(body: OrderCreate) -> None:
     # sortable and parseable by strict consumers downstream.
     if requested.isoformat() != body.date:
         raise HTTPException(400, "Date must be a real date in YYYY-MM-DD format")
-    # Same-day dispatch isn't offered — the earliest bookable day is tomorrow.
-    if requested < date.today() + timedelta(days=1):
+    # Same-day dispatch isn't offered — the earliest bookable day is tomorrow,
+    # measured in the service area's timezone (see _BUSINESS_TZ above), so a
+    # Central-time customer's "tomorrow" is never rejected by a UTC server.
+    business_today = datetime.now(_BUSINESS_TZ).date()
+    if requested < business_today + timedelta(days=1):
         raise HTTPException(400, "Date must be tomorrow or later")
 
 
@@ -289,13 +383,19 @@ def pay_order(order_id: str) -> dict:
     """
     conn = _connect()
     try:
-        order = _fetch_order(conn, order_id)
-        if order["status"] != "pending_payment":
+        order = _fetch_order(conn, order_id)  # 404 if unknown
+        # Atomic guard: the status predicate makes check-and-transition a
+        # single statement, so concurrent /pay calls can't all pass a separate
+        # read-then-write check (and a delayed writer can't clobber a later
+        # status) — exactly one request flips the row.
+        cur = conn.execute(
+            "UPDATE orders SET status = ? WHERE id = ? AND status = ?",
+            ("paid", order_id, "pending_payment"))
+        conn.commit()
+        if cur.rowcount != 1:
+            order = _fetch_order(conn, order_id)
             raise HTTPException(
                 409, f"Order is '{order['status']}', not awaiting payment")
-        conn.execute(
-            "UPDATE orders SET status = ? WHERE id = ?", ("paid", order_id))
-        conn.commit()
         order["status"] = "paid"
         return order
     finally:
@@ -317,9 +417,18 @@ def update_status(order_id: str, body: StatusUpdate) -> dict:
             raise HTTPException(
                 409,
                 f"Cannot move order from '{order['status']}' to '{body.status}'")
-        conn.execute(
-            "UPDATE orders SET status = ? WHERE id = ?", (body.status, order_id))
+        # Atomic guard (same as pay_order): only transition if the row still
+        # holds the status we validated against, so racing callers can't each
+        # apply the same step or overwrite a newer state.
+        cur = conn.execute(
+            "UPDATE orders SET status = ? WHERE id = ? AND status = ?",
+            (body.status, order_id, order["status"]))
         conn.commit()
+        if cur.rowcount != 1:
+            order = _fetch_order(conn, order_id)
+            raise HTTPException(
+                409,
+                f"Cannot move order from '{order['status']}' to '{body.status}'")
         order["status"] = body.status
         return order
     finally:

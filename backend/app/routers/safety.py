@@ -27,13 +27,15 @@ class FailsafeConfig(BaseModel):
     rc_long_action: int = 1     # FS_LONG_ACTN: 0 continue, 1 RTL
 
 
+# NOTE: plain `def` handlers run in FastAPI's threadpool so the multi-second
+# param reads here never freeze the event loop (RTL/disarm/telemetry stay live).
 def _require_connected():
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
 
 
 @router.get("/geofence")
-async def get_geofence():
+def get_geofence():
     _require_connected()
     p = vehicle_manager.get_params(
         ["FENCE_ENABLE", "FENCE_RADIUS", "FENCE_ALT_MAX", "FENCE_ACTION", "FENCE_TYPE"])
@@ -48,7 +50,7 @@ async def get_geofence():
 
 
 @router.post("/geofence")
-async def set_geofence(cfg: GeofenceConfig):
+def set_geofence(cfg: GeofenceConfig):
     _require_connected()
     vehicle_manager.set_params({
         "FENCE_TYPE": FENCE_TYPE_CIRCLE_ALT,
@@ -61,7 +63,7 @@ async def set_geofence(cfg: GeofenceConfig):
 
 
 @router.get("/failsafe")
-async def get_failsafe():
+def get_failsafe():
     _require_connected()
     p = vehicle_manager.get_params([
         "BATT_LOW_VOLT", "BATT_FS_LOW_ACT", "BATT_CRT_VOLT", "BATT_FS_CRT_ACT",
@@ -79,7 +81,7 @@ async def get_failsafe():
 
 
 @router.post("/failsafe")
-async def set_failsafe(cfg: FailsafeConfig):
+def set_failsafe(cfg: FailsafeConfig):
     _require_connected()
     vehicle_manager.set_params({
         "BATT_LOW_VOLT": cfg.batt_low_volt,

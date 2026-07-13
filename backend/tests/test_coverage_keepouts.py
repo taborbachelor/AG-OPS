@@ -14,6 +14,7 @@ import math
 import unittest
 from unittest import mock
 
+from app import coverage as coverage_module
 from app.coverage import EARTH_RADIUS_M, plan_coverage
 from app.routers import coverage as coverage_router
 
@@ -223,6 +224,64 @@ class TestKeepoutValidation(unittest.TestCase):
         plan = plan_rect(keepouts=[most])
         self.assertEqual(plan["stats"]["n_segments"], 10)
         self.assertAlmostEqual(sprayed_length(plan), 30.0, delta=0.5)
+
+
+class TestClipWorkCap(unittest.TestCase):
+    """CPU-DoS guard on clipping (passes x keepout edges is otherwise
+    unbounded because the routers cap vertex COUNTS but not the field's
+    geographic extent): work beyond _MAX_CLIP_WORK must fail fast as a
+    ValueError (-> 400), never burn minutes of GIL-bound CPU on the
+    process that also serves flight telemetry."""
+
+    def test_cap_exceeded_raises_value_error(self):
+        # The pond overlaps two pass lines (y=90 and y=110) at buffer 0 and
+        # has 4 vertices, so the real work is 8 edge visits; a patched cap
+        # of 5 must trip on the second overlapping pass.
+        with mock.patch.object(coverage_module, "_MAX_CLIP_WORK", 5):
+            with self.assertRaisesRegex(ValueError,
+                                        "keepout clipping too complex"):
+                plan_rect(keepouts=[poly_ll(POND_XY)])
+
+    def test_router_maps_cap_to_400(self):
+        from fastapi import HTTPException
+
+        req = coverage_router.CoverageRequest(
+            polygon=poly_ll(RECT_XY), swath=20.0, alt=100.0, angle=0.0,
+            keepouts=[poly_ll(POND_XY)])
+        with mock.patch.object(coverage_module, "_MAX_CLIP_WORK", 5):
+            with self.assertRaises(HTTPException) as ctx:
+                coverage_router.plan(req)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_far_keepouts_cost_no_work(self):
+        # A keepout 10 km north of the field can never block a pass; the
+        # y-band prefilter must skip it entirely, so planning succeeds even
+        # with a near-zero work cap — real jobs with localized keepouts are
+        # only ever charged for rings a pass can actually hit.
+        far = poly_ll([(0.0, 10000.0), (40.0, 10000.0),
+                       (40.0, 10040.0), (0.0, 10040.0)])
+        with mock.patch.object(coverage_module, "_MAX_CLIP_WORK", 1):
+            plan = plan_rect(keepouts=[far])
+        self.assertEqual(plan["stats"]["keepouts_applied"], 0)
+        self.assertEqual(plan["stats"]["n_segments"],
+                         plan["stats"]["n_passes"])
+
+    def test_prefilter_honors_buffer_reach(self):
+        # A ring just outside a pass line's y-band at buffer 0 must still
+        # block it once the buffer reaches it — the prefilter may only skip
+        # rings PROVABLY out of reach, never shave the standoff.
+        # Pond interior spans y in (80, 120); the y=70 pass is 10 m below.
+        plan = plan_rect(keepouts=[poly_ll(POND_XY)], keepout_buffer_m=12.0)
+        clipped_lines = {round(sy) for (sx, sy), _ in segments_xy(plan)
+                         if round(sy) in (70, 130)}
+        # Both the y=70 and y=130 passes must have been split (2 segments
+        # each), proving the buffered ring was NOT prefiltered away.
+        counts: dict = {}
+        for (sx, sy), _ in segments_xy(plan):
+            counts[round(sy)] = counts.get(round(sy), 0) + 1
+        self.assertEqual(counts.get(70), 2)
+        self.assertEqual(counts.get(130), 2)
+        self.assertEqual(clipped_lines, {70, 130})
 
 
 class TestLegacyRegression(unittest.TestCase):

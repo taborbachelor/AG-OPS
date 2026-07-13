@@ -142,18 +142,53 @@ class OrdersApiTest(unittest.TestCase):
     # -- validation ---------------------------------------------------------
 
     def test_past_date_rejected(self):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        # Validation measures "tomorrow" in the service-area timezone
+        # (_BUSINESS_TZ), so anchor the test to the same clock — otherwise a
+        # server whose local date is a day ahead of Central sees "today" as
+        # already valid.
+        from datetime import datetime
+        biz_today = datetime.now(orders._BUSINESS_TZ).date()
+        yesterday = (biz_today - timedelta(days=1)).isoformat()
         with self.assertRaises(HTTPException) as ctx:
             orders.create_order(_order_body(date=yesterday))
         self.assertEqual(ctx.exception.status_code, 400)
         # Today is also too soon — the earliest bookable day is tomorrow.
         with self.assertRaises(HTTPException):
-            orders.create_order(_order_body(date=date.today().isoformat()))
+            orders.create_order(_order_body(date=biz_today.isoformat()))
 
     def test_two_point_polygon_rejected(self):
         with self.assertRaises(HTTPException) as ctx:
             orders.create_order(_order_body(polygon=TINY_TRIANGLE[:2]))
         self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_bowtie_polygon_rejected(self):
+        # A genuine self-crossing (Z-order corners) must still be caught.
+        a, b, c, d = TWENTY_ACRE_SQUARE
+        with self.assertRaises(HTTPException) as ctx:
+            orders.create_order(_order_body(polygon=[a, b, d, c]))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("cross itself", ctx.exception.detail)
+
+    def test_duplicate_consecutive_vertex_is_not_self_intersection(self):
+        # Regression: a double-clicked corner in the map UI appends an exact
+        # duplicate vertex. The resulting zero-length edge used to shift edge
+        # adjacency inside _ring_self_intersects, so a plain valid square was
+        # rejected with "must not cross itself". It must be accepted, with
+        # the same acreage/price as the clean ring.
+        a, b, c, d = TWENTY_ACRE_SQUARE
+        for dup in ([a, b, b, c, d],       # interior corner double-clicked
+                    [a, a, b, c, d],       # first corner double-clicked
+                    [a, b, c, d, d],       # last corner double-clicked
+                    [a, b, c, d, a]):      # ring explicitly closed
+            with self.subTest(polygon=dup):
+                self.assertFalse(orders._ring_self_intersects(dup))
+        clean = orders.create_order(_order_body(polygon=TWENTY_ACRE_SQUARE))
+        order = orders.create_order(_order_body(polygon=[a, b, b, c, d]))
+        self.assertEqual(order["status"], "pending_payment")
+        # The duplicate shifts the mean-latitude projection centre by a hair,
+        # so allow a tiny tolerance on acres; price rounds to the same cents.
+        self.assertAlmostEqual(order["acres"], clean["acres"], delta=0.001)
+        self.assertEqual(order["price_cents"], clean["price_cents"])
 
 
 if __name__ == "__main__":

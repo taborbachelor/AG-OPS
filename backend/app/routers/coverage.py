@@ -29,7 +29,12 @@ class CoverageRequest(BaseModel):
     swath: float = Field(20.0, gt=0.5, lt=200)   # m between passes
     alt: float = Field(100.0, gt=0, le=500)      # m AGL for every waypoint
     angle: Optional[float] = None                # deg CCW from east; None = auto
-    speed: float = 18.0                          # m/s, for the time estimate only
+    # m/s, for the time estimate only. Deliberately NOT a Field(gt/le)
+    # constraint: on this FastAPI/starlette stack a pydantic rejection echoes
+    # the offending input inside the 422 body, and strict json.dumps then
+    # 500s when that input is NaN/Infinity — the very bug being fixed. Both
+    # handlers call _check_speed() instead (always-serializable rejection).
+    speed: float = 18.0
     # No-spray keepouts: optional so pre-keepout clients are untouched (their
     # responses stay byte-for-byte identical). Vertex-count and shape checks
     # live in plan_coverage (single source of truth) and surface as 400s,
@@ -49,12 +54,30 @@ class AutoCoverageRequest(BaseModel):
     swath: float = Field(20.0, gt=0.5, lt=200)
     alt: float = Field(100.0, gt=0, le=500)
     angle: Optional[float] = None
-    speed: float = 18.0
+    speed: float = 18.0     # checked by _check_speed (see CoverageRequest)
     # Per-kind standoffs (m). Water defaults widest: drift into a pond is the
     # costliest mistake (chemical runoff), trees/buildings mostly block spray.
     water_buffer: float = Field(15.0, ge=0)
     tree_buffer: float = Field(10.0, ge=0)
     building_buffer: float = Field(10.0, ge=0)
+
+
+# Same bounds as the multi router's speed field, enforced in the handlers:
+# a NaN speed passes a bare float and defeats plan_coverage's
+# `speed_ms <= 0` guard (NaN <= 0 is False), poisoning est_time_s and
+# crashing response serialization — an unauthenticated 500. It can't be a
+# pydantic Field(gt/le) either, because this stack echoes the rejected NaN
+# into the 422 body, which strict JSON serialization also turns into a 500.
+_SPEED_MIN_MS, _SPEED_MAX_MS = 1.0, 80.0
+
+
+def _check_speed(speed: float) -> None:
+    """Reject non-finite or out-of-range speeds with a serializable 422."""
+    if not (math.isfinite(speed)
+            and _SPEED_MIN_MS < speed <= _SPEED_MAX_MS):
+        raise HTTPException(
+            422, "speed must be a finite value in "
+                 f"({_SPEED_MIN_MS:g}, {_SPEED_MAX_MS:g}] m/s")
 
 
 @router.post("/plan")
@@ -64,6 +87,7 @@ def plan(req: CoverageRequest):
     Optional keepouts (with keepout_buffer standoff) clip the spray passes;
     requests without them behave exactly as before keepouts existed.
     """
+    _check_speed(req.speed)
     try:
         return plan_coverage(
             [p.model_dump() for p in req.polygon],
@@ -100,6 +124,7 @@ def plan_auto(req: AutoCoverageRequest):
     zones_unavailable=true so the operator can still fly and judge
     keepouts visually.
     """
+    _check_speed(req.speed)  # before fetch_zones: fail fast, no network
     poly = [p.model_dump() for p in req.polygon]
     lats = [p["lat"] for p in poly]
     lons = [p["lon"] for p in poly]

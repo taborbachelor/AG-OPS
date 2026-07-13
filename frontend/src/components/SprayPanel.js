@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 
 const API = 'http://localhost:8000/api';
 
@@ -65,9 +65,16 @@ function SprayPanel({
   const [zonesNote, setZonesNote] = useState('');
   const [upStatus, setUpStatus] = useState(null);
 
+  // Bumped on every job mutation (field added/removed/cleared). An in-flight
+  // plan request captures the value at launch and discards its response if
+  // the job changed underneath it — otherwise a stale plan for fields that no
+  // longer exist would render and be uploadable.
+  const planReq = useRef(0);
+
   const flash = (m) => { setStatus(m); setTimeout(() => setStatus(''), 5000); };
 
   const resetResults = () => {
+    planReq.current += 1;
     setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
   };
 
@@ -179,6 +186,7 @@ function SprayPanel({
     if (jobFields.length === 0) { flash('Add at least one field first'); return; }
     setBusy(true);
     resetResults();
+    const req = planReq.current; // staleness token for this request
     // Detected in-field holes (farmsteads/ponds/tree stands) ride along as
     // keepouts so the passes clip around them automatically.
     const holeKeepouts = jobFields.flatMap((f) => f.holes || []);
@@ -195,6 +203,12 @@ function SprayPanel({
         }),
       });
       const data = await res.json();
+      if (req !== planReq.current) {
+        // Job was edited (field removed / cleared) while planning — this
+        // response no longer matches the shown fields. Drop it.
+        setBusy(false);
+        return;
+      }
       if (!res.ok) {
         flash(`Plan failed: ${data.detail || res.status}`);
         setBusy(false);
@@ -219,7 +233,7 @@ function SprayPanel({
         flash(`${data.skipped.length} field(s) skipped: ${data.skipped[0].error}`);
       }
     } catch (e) {
-      flash('Plan error — is the backend running?');
+      if (req === planReq.current) flash('Plan error — is the backend running?');
     }
     setBusy(false);
   };
@@ -338,7 +352,8 @@ function SprayPanel({
                   <span className="sfield-meta">
                     {(f.acres != null ? f.acres : polyAcres(f.polygon)).toFixed(1)} ac · {f.source}
                   </span>
-                  <button className="wp-del" onClick={() => removeField(i)} title="Remove">×</button>
+                  <button className="wp-del" onClick={() => removeField(i)}
+                    disabled={busy} title="Remove">×</button>
                 </div>
               ))}
             </div>
@@ -367,7 +382,8 @@ function SprayPanel({
           )}
 
           {(fields.length > 0 || area.length > 0 || draft.length > 0) && (
-            <button className="control-btn danger" onClick={clearJob} style={{ width: '100%' }}>
+            <button className="control-btn danger" onClick={clearJob}
+              disabled={busy} style={{ width: '100%' }}>
               Clear job
             </button>
           )}

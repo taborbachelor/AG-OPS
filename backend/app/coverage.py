@@ -72,16 +72,21 @@ def plan_coverage(
     Raises:
         ValueError: fewer than 3 vertices, zero-area (degenerate) polygon,
             non-positive swath/speed, a malformed keepout (< 3 vertices or
-            non-{lat, lon} entries), a negative buffer, or when clipping
+            non-{lat, lon} entries), a negative buffer, when clipping
             removes every spray segment ("field fully blocked by keepout
-            zones").
+            zones"), or when the passes x keepout-edges clipping work would
+            exceed _MAX_CLIP_WORK (CPU-DoS guard: giant field + tiny swath
+            + dense keepouts).
     """
     if len(polygon) < 3:
         raise ValueError("polygon needs at least 3 vertices")
     if swath_m <= 0:
         raise ValueError("swath_m must be > 0")
-    if speed_ms <= 0:
-        raise ValueError("speed_ms must be > 0")
+    # A plain `<= 0` check lets NaN through (NaN <= 0 is False), which would
+    # poison est_time_s; +/-inf gives a silently bogus estimate. Require a
+    # finite positive speed, same pattern as keepout_buffer_m below.
+    if not (math.isfinite(speed_ms) and speed_ms > 0):
+        raise ValueError("speed_ms must be a finite value > 0")
     # NaN would silently disable every comparison below, so reject it too.
     if not (math.isfinite(keepout_buffer_m) and keepout_buffer_m >= 0.0):
         raise ValueError("keepout_buffer_m must be >= 0")
@@ -288,6 +293,17 @@ def _boustrophedon_passes(
 # too short for the sprayer to cycle on/off and only add turn overhead.
 _MIN_SEGMENT_M = 2.0
 
+# Hard ceiling on clipping work, counted in keepout-edge visits actually
+# performed (after the y-band prefilter). The routers cap vertex and ring
+# COUNTS, but not the field's geographic extent, so n_passes — and with it
+# the passes x keepout-edges product — is otherwise unbounded: one legal
+# request (huge field, 0.51 m swath, max keepouts) could pin this GIL-bound
+# CPU for minutes and starve the rest of the GCS backend, telemetry
+# included. 2e6 visits is ~2 s of worst-case CPU, yet far above real jobs
+# (a 2 km field at 3 m swath with dozens of pond-sized keepouts does ~1e5:
+# the prefilter only charges a ring to the passes it can actually block).
+_MAX_CLIP_WORK = 2_000_000
+
 
 def _clip_passes_to_keepouts(
     passes: list[tuple[tuple[float, float], tuple[float, float]]],
@@ -309,9 +325,14 @@ def _clip_passes_to_keepouts(
     and the count of keepout polygons that removed spray length from at
     least one pre-clip pass — an order-independent definition, so overlap
     between keepouts can't hide one behind another.
+
+    Raises ValueError when the work performed (edge visits on rings that
+    survive the y-band prefilter) exceeds _MAX_CLIP_WORK, so a single
+    request can never burn more than a couple seconds of CPU here.
     """
     lat0, lon0, m_per_deg, cos_lat = proj
     kp_rot = []
+    kp_ybounds = []  # per-ring (min y, max y) for the prefilter below
     for kp in keepouts:
         pts = []
         for p in kp:
@@ -319,13 +340,28 @@ def _clip_passes_to_keepouts(
             y = (p["lat"] - lat0) * m_per_deg
             pts.append((x * cos_t + y * sin_t, -x * sin_t + y * cos_t))
         kp_rot.append(pts)
+        ys = [y for _, y in pts]
+        kp_ybounds.append((min(ys), max(ys)))
 
     applied: set[int] = set()
     segments = []
+    work = 0  # keepout-edge visits performed; bounded by _MAX_CLIP_WORK
     for (sx, sy), (ex, _ey) in passes:  # sy == _ey: passes are horizontal
         lo, hi = (sx, ex) if sx <= ex else (ex, sx)
         blocked: list[tuple[float, float]] = []
         for k, ring in enumerate(kp_rot):
+            # Exact skip, not a heuristic: every blocked interval (interior
+            # crossing, vertex disc, or edge strip) requires the pass line to
+            # lie within buffer_m of the ring's y-extent.
+            y_lo, y_hi = kp_ybounds[k]
+            if sy < y_lo - buffer_m or sy > y_hi + buffer_m:
+                continue
+            work += len(ring)
+            if work > _MAX_CLIP_WORK:
+                raise ValueError(
+                    "keepout clipping too complex for this request: "
+                    "increase the swath, shrink the field, or simplify "
+                    "the keepouts")
             ivs = _merge_intervals(_blocked_intervals(ring, sy, buffer_m))
             for blo, bhi in ivs:
                 if min(bhi, hi) - max(blo, lo) > 1e-9:

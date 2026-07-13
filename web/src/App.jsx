@@ -6,6 +6,7 @@ import {
   polygonAcres,
   estimateCents,
   formatUSD,
+  ringSelfIntersects,
   tomorrowISO,
 } from './geometry.js'
 
@@ -65,6 +66,14 @@ function App() {
     if (!closed || vertices.length < 3) {
       return setFormError('Trace your field and close the boundary first.')
     }
+    // A self-crossing ring (e.g. corners clicked in a Z order) breaks the
+    // acreage math and the server rejects it — catch it here with a hint.
+    if (ringSelfIntersects(vertices)) {
+      return setFormError(
+        'Your field boundary crosses itself — press Clear and place the ' +
+          'corners in order around the field.'
+      )
+    }
     go(2)
   }
 
@@ -81,6 +90,7 @@ function App() {
   async function confirmAndPay() {
     setSubmitting(true)
     setOffline(false)
+    setFormError('')
     try {
       const res = await fetch(`${API_BASE}/`, {
         method: 'POST',
@@ -94,7 +104,25 @@ function App() {
           slot,
         }),
       })
-      if (!res.ok) throw new Error(`orders API returned ${res.status}`)
+      if (!res.ok) {
+        // A 4xx is a validation verdict from a *reachable* server — surface
+        // its message instead of the misleading "offline" banner.
+        if (res.status >= 400 && res.status < 500) {
+          let detail = ''
+          try {
+            detail = (await res.json()).detail
+          } catch {
+            /* non-JSON error body — use the generic message below */
+          }
+          setFormError(
+            typeof detail === 'string' && detail
+              ? detail
+              : 'We couldn’t book that order — please check your details and try again.'
+          )
+          return
+        }
+        throw new Error(`orders API returned ${res.status}`)
+      }
       let placed = await res.json()
 
       // Dev-mode simulated payment; a failure here still leaves a valid

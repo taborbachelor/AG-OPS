@@ -124,5 +124,89 @@ class TestDetect(unittest.TestCase):
             cdl.detect_fields_cdl(sel, year=2025)
 
 
+def dist_outside_poly(px, py, poly):
+    """0.0 if (px, py) is inside `poly` (even-odd), else min distance to its
+    boundary. Independent of app code so it can't share a geometry bug."""
+    import math
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > py) != (yj > py):
+            if px < (xj - xi) * (py - yi) / (yj - yi) + xi:
+                inside = not inside
+        j = i
+    if inside:
+        return 0.0
+    best = math.inf
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len2 = dx * dx + dy * dy
+        t = 0.0 if len2 == 0 else max(
+            0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / len2))
+        best = min(best, math.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+    return best
+
+
+class TestHolesAreExact(unittest.TestCase):
+    """Detected holes are NO-SPRAY keepouts: the returned hole polygon must
+    contain every point of the true classified boundary.
+
+    Regression: holes used to go through Douglas-Peucker (tol 0.9 px = 27 m),
+    which cut a diamond pond's sharp corners INWARD by up to ~21 m —
+    re-labeling real pond as sprayable and eating the entire default 15 m
+    water buffer."""
+
+    def test_diamond_pond_hole_is_never_shrunk(self):
+        W = H = 40
+        g = [[141] * W for _ in range(H)]            # forest border
+        for r in range(2, 38):
+            for c in range(2, 38):
+                g[r][c] = 1                          # corn field
+        rc, cc, rad = 20, 20, 6
+        pond = [(r, c) for r in range(H) for c in range(W)
+                if abs(r - rc) + abs(c - cc) <= rad]
+        for r, c in pond:
+            g[r][c] = 111                            # diamond pond, 85 px
+
+        ulx, uly = to_albers(39.92, -95.82)
+        gt = (ulx, uly, 30.0, 30.0)
+        sel = [{"lat": 39.92, "lon": -95.82}, {"lat": 39.92, "lon": -95.80},
+               {"lat": 39.90, "lon": -95.80}, {"lat": 39.90, "lon": -95.82}]
+        with mock.patch.object(cdl, "_fetch_clip", return_value=(g, gt)):
+            cdl._cache.clear()
+            out = cdl.detect_fields_cdl(sel, year=2025)
+
+        self.assertEqual(len(out["fields"]), 1)
+        field = out["fields"][0]
+        self.assertEqual(len(field["holes"]), 1)
+        hole_xy = [to_albers(p["lat"], p["lon"]) for p in field["holes"][0]]
+
+        # True pixel-edge pond boundary (traced independently from the pond
+        # cell set), densified and mapped with the same geotransform.
+        (true_loop,) = cdl._edge_loops(pond)
+        samples = []
+        n = len(true_loop)
+        for i in range(n):
+            ax, ay = true_loop[i]
+            bx, by = true_loop[(i + 1) % n]
+            for k in range(4):
+                t = k / 4.0
+                cx, cy = ax + t * (bx - ax), ay + t * (by - ay)
+                samples.append((ulx + cx * 30.0, uly - cy * 30.0))
+
+        # 0.5 m tolerance covers Albers round-trip + 1e-7 deg rounding noise;
+        # the old DP bug pushed boundary points ~21 m outside the hole.
+        worst = max(dist_outside_poly(px, py, hole_xy) for px, py in samples)
+        self.assertLessEqual(
+            worst, 0.5,
+            f"true pond boundary sticks {worst:.2f} m outside the keepout "
+            "hole — the hole was shrunk")
+
+
 if __name__ == "__main__":
     unittest.main()

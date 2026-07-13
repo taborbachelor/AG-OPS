@@ -1852,6 +1852,21 @@ body {
   gap: 10px;
 }
 
+/* Command rejection callout: an RTL/LAND/DISARM/mode change the backend
+   refused must be visible, never silent. Shared by FlightVitals + HudRight. */
+.vitals-note {
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: rgba(255, 23, 68, 0.16);
+  border: 1px solid rgba(255, 23, 68, 0.55);
+  color: var(--accent-red);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: center;
+  max-width: 320px;
+}
+
 .vitals-pill {
   display: flex;
   align-items: center;

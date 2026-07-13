@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 
 const API = 'http://localhost:8000/api';
 
@@ -12,17 +12,35 @@ const fmtEta = (sec) => {
 function FlightVitals({ telemetry }) {
   const [drawer, setDrawer] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+  const noteTimer = useRef(null);
   const t = telemetry;
 
-  const post = async (path, body) => {
+  const fail = (m) => {
+    setNote(m);
+    clearTimeout(noteTimer.current);
+    noteTimer.current = setTimeout(() => setNote(''), 8000);
+  };
+
+  // In-flight commands must never fail silently: the status poll only tracks
+  // link state, not command acks, so a rejected RTL/LAND/DISARM has to be
+  // surfaced right here where the operator clicked it.
+  const post = async (path, body, label) => {
     setBusy(true);
     try {
-      await fetch(`${API}${path}`, {
+      const res = await fetch(`${API}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: body ? JSON.stringify(body) : undefined,
       });
-    } catch { /* surfaced by status polling */ }
+      if (!res.ok) {
+        let detail = '';
+        try { detail = (await res.json()).detail; } catch { /* no body */ }
+        fail(`${label} FAILED — ${detail || `HTTP ${res.status}`}`);
+      }
+    } catch {
+      fail(`${label} FAILED — no response from backend`);
+    }
     setBusy(false);
   };
 
@@ -56,7 +74,7 @@ function FlightVitals({ telemetry }) {
           <div className="vd-item"><span className="vd-label">CURR</span><span className="vd-value">{t.battery_current.toFixed(1)}A</span></div>
           <button
             className="control-btn danger vd-disarm"
-            onClick={() => post('/vehicle/disarm', { force: true })}
+            onClick={() => post('/vehicle/disarm', { force: true }, 'DISARM')}
             disabled={busy}
             title="Cuts the motor immediately"
           >
@@ -106,13 +124,15 @@ function FlightVitals({ telemetry }) {
           <div className="vital vital-mode">{t.mode}</div>
         </div>
 
-        <button className="vitals-btn rtl" onClick={() => post('/vehicle/mode', { mode: 'RTL' })} disabled={busy}>
+        <button className="vitals-btn rtl" onClick={() => post('/vehicle/mode', { mode: 'RTL' }, 'RTL')} disabled={busy}>
           RTL
         </button>
-        <button className="vitals-btn land" onClick={() => post('/vehicle/land')} disabled={busy}>
+        <button className="vitals-btn land" onClick={() => post('/vehicle/land', null, 'LAND')} disabled={busy}>
           LAND
         </button>
       </div>
+
+      {note && <div className="vitals-note">{note}</div>}
     </div>
   );
 }
