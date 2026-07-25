@@ -1,14 +1,43 @@
 import threading
 import time
 import json
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional
 from pymavlink import mavutil
 
+from app.eventlog import log_event
+
 # Flight logs live next to the app package.
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+
+# EKF_STATUS_REPORT flags (ardupilotmega EKF_STATUS_FLAGS enum); literal
+# fallbacks in case a dialect build lacks the names.
+_EKF_ATTITUDE = getattr(mavutil.mavlink, "EKF_ATTITUDE", 1)
+_EKF_POS_HORIZ_REL = getattr(mavutil.mavlink, "EKF_POS_HORIZ_REL", 8)
+_EKF_POS_HORIZ_ABS = getattr(mavutil.mavlink, "EKF_POS_HORIZ_ABS", 16)
+_EKF_CONST_POS_MODE = getattr(mavutil.mavlink, "EKF_CONST_POS_MODE", 128)
+_EKF_UNINITIALIZED = getattr(mavutil.mavlink, "EKF_UNINITIALIZED", 1024)
+
+# SYS_STATUS sensor bits we surface by name when a sensor is enabled but
+# reporting unhealthy (MAV_SYS_STATUS_SENSOR_* / MAV_SYS_STATUS_* enums).
+_SENSOR_BITS = {
+    "gyro": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_3D_GYRO", 1),
+    "accel": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_3D_ACCEL", 2),
+    "mag": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_3D_MAG", 4),
+    "baro": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_ABSOLUTE_PRESSURE", 8),
+    "gps": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_GPS", 32),
+    "rc": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_RC_RECEIVER", 65536),
+    "ahrs": getattr(mavutil.mavlink, "MAV_SYS_STATUS_AHRS", 0x200000),
+    "terrain": getattr(mavutil.mavlink, "MAV_SYS_STATUS_TERRAIN", 0x400000),
+    "battery": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_BATTERY", 0x1000000),
+}
+
+# MAV_SEVERITY names, indexed by the STATUSTEXT severity value (0..7).
+_MAV_SEVERITY = ["EMERGENCY", "ALERT", "CRITICAL", "ERROR",
+                 "WARNING", "NOTICE", "INFO", "DEBUG"]
 
 # Mission command types we support, mapped to their MAVLink NAV commands.
 _CMD_TO_MAV = {
@@ -53,6 +82,13 @@ class TelemetryData:
     # distance-to-home (RTL margin) without extra endpoints.
     home_lat: float = 0.0
     home_lon: float = 0.0
+    # EKF health (EKF_STATUS_REPORT): raw flags bitmask + a conservative
+    # "safe to navigate" verdict (attitude + a horizontal position solution,
+    # not in constant-position fallback, not uninitialized).
+    ekf_flags: int = 0
+    ekf_healthy: bool = False
+    # Sensors SYS_STATUS reports as enabled-but-unhealthy, by name.
+    sensor_errors: list = field(default_factory=list)
 
 
 class VehicleManager:
@@ -72,6 +108,16 @@ class VehicleManager:
         # is considered lost and we mark ourselves disconnected.
         self._last_heartbeat = 0.0
         self._link_timeout = 5.0
+        # Vehicle-heartbeat arrival times (ring) for link-quality estimation,
+        # and when this connection came up so early quality isn't penalized.
+        self._hb_times = deque(maxlen=30)
+        self._connected_at = 0.0
+        # Recent STATUSTEXT from the vehicle (prearm failures, failsafe
+        # announcements) — the messages Mission Planner shows in its HUD.
+        self._statustext = deque(maxlen=50)
+        # Guards telemetry state across threads: the telemetry thread writes,
+        # API/WS workers read via snapshot() — never a torn multi-field view.
+        self._telem_lock = threading.Lock()
         # We must also SEND heartbeats at 1Hz: ArduPilot's GCS-loss failsafe
         # (FS_GCS_ENABL) triggers RTL if the ground station goes silent —
         # discovered live when a spray mission kept snapping back to RTL.
@@ -123,11 +169,15 @@ class VehicleManager:
                 raise ConnectionError("cancelled by operator disconnect")
             # Fresh vehicle: clear any telemetry/home left over from a previous
             # connection so we never show a different vehicle's stale data.
-            self.telemetry = TelemetryData()
+            with self._telem_lock:
+                self.telemetry = TelemetryData()
+                self._statustext.clear()
+            self._hb_times.clear()
             self.home_lat = self.home_lon = self.home_alt = 0.0
             self.connected = True
             self.connection_string = connection_string
             self._last_heartbeat = time.time()
+            self._connected_at = self._last_heartbeat
             self._conn_params = (connection_string, baud)
             self._auto_reconnect = True
             self.reconnecting = False
@@ -139,9 +189,13 @@ class VehicleManager:
                     conn.target_system, conn.target_component,
                     mavutil.mavlink.MAV_CMD_GET_HOME_POSITION, 0, 0, 0, 0, 0, 0, 0, 0)
             self._start_telemetry_loop()
+            log_event("link", "connected", connection=connection_string, baud=baud,
+                      vehicle_sysid=conn.target_system)
             return True
         except Exception as e:
             self.connected = False
+            log_event("link", "connect_failed", level="ERROR",
+                      connection=connection_string, error=str(e))
             # Never leak a half-open port: on serial, a leaked handle keeps the
             # COM port busy and blocks every future (re)connect attempt until
             # the backend is restarted.
@@ -182,6 +236,7 @@ class VehicleManager:
         self.connection = None
         self.connected = False
         self.connection_string = None
+        log_event("link", "disconnected_by_operator")
 
     def _start_telemetry_loop(self):
         # Never run two telemetry loops at once (they would split messages and
@@ -233,6 +288,7 @@ class VehicleManager:
             msg_type = msg.get_type()
             if msg_type == "HEARTBEAT":
                 self._last_heartbeat = time.time()
+                self._hb_times.append(self._last_heartbeat)
             if msg_type in types:
                 return msg
         return None
@@ -256,84 +312,167 @@ class VehicleManager:
                 if msg is None:
                     time.sleep(0.01)
                     continue
-
-                msg_type = msg.get_type()
-
-                if msg_type == "HEARTBEAT":
-                    self._last_heartbeat = time.time()
-                    mode = mavutil.mode_string_v10(msg)
-                    self.telemetry.mode = mode
-                    self.telemetry.armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
-                    self._maybe_log()
-
-                elif msg_type == "GLOBAL_POSITION_INT":
-                    self.telemetry.lat = msg.lat / 1e7
-                    self.telemetry.lon = msg.lon / 1e7
-                    # relative_alt is height above home/launch -- what a pilot wants.
-                    # (VFR_HUD.alt is AMSL, so we deliberately don't use it for altitude.)
-                    self.telemetry.altitude = msg.relative_alt / 1000.0
-                    self.telemetry.heading = msg.hdg // 100
-
-                elif msg_type == "VFR_HUD":
-                    self.telemetry.airspeed = msg.airspeed
-                    self.telemetry.groundspeed = msg.groundspeed
-                    self.telemetry.heading = msg.heading
-
-                elif msg_type == "ATTITUDE":
-                    self.telemetry.pitch = msg.pitch
-                    self.telemetry.roll = msg.roll
-                    self.telemetry.yaw = msg.yaw
-
-                elif msg_type == "SYS_STATUS":
-                    self.telemetry.battery_voltage = msg.voltage_battery / 1000.0
-                    self.telemetry.battery_current = msg.current_battery / 100.0
-                    self.telemetry.battery_level = msg.battery_remaining
-
-                elif msg_type == "GPS_RAW_INT":
-                    self.telemetry.gps_fix = msg.fix_type
-                    self.telemetry.gps_satellites = msg.satellites_visible
-
-                elif msg_type in ("RC_CHANNELS", "RC_CHANNELS_RAW"):
-                    count = getattr(msg, "chancount", 8) or 8
-                    chans = []
-                    for i in range(1, min(count, 16) + 1):
-                        v = getattr(msg, f"chan{i}_raw", 0)
-                        # 65535 = "not present" in the MAVLink spec; treat as 0.
-                        chans.append(0 if v in (65535, None) else v)
-                    self.telemetry.rc_channels = chans
-                    rssi = getattr(msg, "rssi", 0)
-                    self.telemetry.rc_rssi = 0 if rssi in (255, None) else rssi
-
-                elif msg_type == "SERVO_OUTPUT_RAW":
-                    self.telemetry.servo_outputs = [
-                        getattr(msg, f"servo{i}_raw", 0) or 0 for i in range(1, 9)
-                    ]
-
-                elif msg_type == "MISSION_CURRENT":
-                    # Note: we deliberately ignore msg.total — its semantics vary
-                    # across firmware versions. mission_count comes from our own
-                    # upload/download, which we know is home-exclusive.
-                    self.telemetry.mission_seq = msg.seq
-
-                elif msg_type == "NAV_CONTROLLER_OUTPUT":
-                    self.telemetry.wp_dist = float(msg.wp_dist)
-
-                elif msg_type == "HOME_POSITION":
-                    self.home_lat = msg.latitude / 1e7
-                    self.home_lon = msg.longitude / 1e7
-                    self.home_alt = msg.altitude / 1000.0
-                    self.telemetry.home_lat = self.home_lat
-                    self.telemetry.home_lon = self.home_lon
-
+                self._handle_msg(msg)
             except Exception:
                 # Socket error / decode error: don't spin hot; the watchdog
                 # below will mark us disconnected if heartbeats stop.
                 time.sleep(0.05)
 
+    def _handle_msg(self, msg):
+        """Apply one MAVLink message to the telemetry state. Split out of the
+        loop so tests can drive it with fake messages. Telemetry writes happen
+        under _telem_lock so snapshot() never sees a torn multi-field update."""
+        msg_type = msg.get_type()
+
+        if msg_type == "HEARTBEAT":
+            now = time.time()
+            self._last_heartbeat = now
+            self._hb_times.append(now)
+            mode = mavutil.mode_string_v10(msg)
+            armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+            with self._telem_lock:
+                prev_mode, prev_armed = self.telemetry.mode, self.telemetry.armed
+                self.telemetry.mode = mode
+                self.telemetry.armed = armed
+            # Vehicle-truth transitions (mode change, arm state) are flight
+            # events regardless of who commanded them — log from here.
+            if mode != prev_mode:
+                log_event("vehicle", "mode_changed", mode=mode, prev=prev_mode)
+            if armed != prev_armed:
+                log_event("vehicle", "armed" if armed else "disarmed",
+                          level="WARN" if armed else "INFO", mode=mode)
+            self._maybe_log()
+            return
+
+        if msg_type == "STATUSTEXT":
+            # ArduPilot's own words: prearm failures, failsafe announcements,
+            # errors. Dropping these blinds the operator (and cost us a live
+            # debugging session once) — ring-buffer + ops log, like the
+            # messages panel in Mission Planner.
+            text = msg.text
+            if isinstance(text, bytes):
+                text = text.decode(errors="ignore")
+            text = text.rstrip("\x00").strip()
+            sev = getattr(msg, "severity", 6)
+            sev_name = _MAV_SEVERITY[sev] if 0 <= sev < len(_MAV_SEVERITY) else str(sev)
+            with self._telem_lock:
+                self._statustext.append(
+                    {"t": round(time.time(), 2), "severity": sev, "severity_name": sev_name,
+                     "text": text})
+            log_event("vehicle", "statustext",
+                      level=("ERROR" if sev <= 3 else "WARN" if sev == 4 else "INFO"),
+                      severity=sev_name, text=text)
+            return
+
+        with self._telem_lock:
+            if msg_type == "GLOBAL_POSITION_INT":
+                self.telemetry.lat = msg.lat / 1e7
+                self.telemetry.lon = msg.lon / 1e7
+                # relative_alt is height above home/launch -- what a pilot wants.
+                # (VFR_HUD.alt is AMSL, so we deliberately don't use it for altitude.)
+                self.telemetry.altitude = msg.relative_alt / 1000.0
+                self.telemetry.heading = msg.hdg // 100
+
+            elif msg_type == "VFR_HUD":
+                self.telemetry.airspeed = msg.airspeed
+                self.telemetry.groundspeed = msg.groundspeed
+                self.telemetry.heading = msg.heading
+
+            elif msg_type == "ATTITUDE":
+                self.telemetry.pitch = msg.pitch
+                self.telemetry.roll = msg.roll
+                self.telemetry.yaw = msg.yaw
+
+            elif msg_type == "SYS_STATUS":
+                self.telemetry.battery_voltage = msg.voltage_battery / 1000.0
+                self.telemetry.battery_current = msg.current_battery / 100.0
+                self.telemetry.battery_level = msg.battery_remaining
+                # A sensor that is enabled but not reporting healthy is a
+                # prearm-grade problem — surface it by name.
+                enabled = getattr(msg, "onboard_control_sensors_enabled", 0)
+                health = getattr(msg, "onboard_control_sensors_health", 0)
+                errors = [name for name, bit in _SENSOR_BITS.items()
+                          if enabled & bit and not (health & bit)]
+                if errors != self.telemetry.sensor_errors:
+                    log_event("vehicle", "sensor_health", level="WARN" if errors else "INFO",
+                              unhealthy=errors)
+                self.telemetry.sensor_errors = errors
+
+            elif msg_type == "EKF_STATUS_REPORT":
+                flags = msg.flags
+                self.telemetry.ekf_flags = flags
+                self.telemetry.ekf_healthy = bool(
+                    flags & _EKF_ATTITUDE
+                    and flags & (_EKF_POS_HORIZ_REL | _EKF_POS_HORIZ_ABS)
+                    and not flags & _EKF_CONST_POS_MODE
+                    and not flags & _EKF_UNINITIALIZED)
+
+            elif msg_type == "GPS_RAW_INT":
+                self.telemetry.gps_fix = msg.fix_type
+                self.telemetry.gps_satellites = msg.satellites_visible
+
+            elif msg_type in ("RC_CHANNELS", "RC_CHANNELS_RAW"):
+                count = getattr(msg, "chancount", 8) or 8
+                chans = []
+                for i in range(1, min(count, 16) + 1):
+                    v = getattr(msg, f"chan{i}_raw", 0)
+                    # 65535 = "not present" in the MAVLink spec; treat as 0.
+                    chans.append(0 if v in (65535, None) else v)
+                self.telemetry.rc_channels = chans
+                rssi = getattr(msg, "rssi", 0)
+                self.telemetry.rc_rssi = 0 if rssi in (255, None) else rssi
+
+            elif msg_type == "SERVO_OUTPUT_RAW":
+                self.telemetry.servo_outputs = [
+                    getattr(msg, f"servo{i}_raw", 0) or 0 for i in range(1, 9)
+                ]
+
+            elif msg_type == "MISSION_CURRENT":
+                # Note: we deliberately ignore msg.total — its semantics vary
+                # across firmware versions. mission_count comes from our own
+                # upload/download, which we know is home-exclusive.
+                self.telemetry.mission_seq = msg.seq
+
+            elif msg_type == "NAV_CONTROLLER_OUTPUT":
+                self.telemetry.wp_dist = float(msg.wp_dist)
+
+            elif msg_type == "HOME_POSITION":
+                self.home_lat = msg.latitude / 1e7
+                self.home_lon = msg.longitude / 1e7
+                self.home_alt = msg.altitude / 1000.0
+                self.telemetry.home_lat = self.home_lat
+                self.telemetry.home_lon = self.home_lon
+
+    def snapshot(self) -> dict:
+        """Thread-safe copy of the vehicle state plus link-health fields.
+        This is the single source the API serves — routers must not read
+        .telemetry directly (torn multi-field reads across threads)."""
+        with self._telem_lock:
+            d = asdict(self.telemetry)
+            d["statustext"] = list(self._statustext)[-5:]
+        d["connected"] = self.connected
+        d["reconnecting"] = self.reconnecting
+        now = time.time()
+        d["last_heartbeat_age"] = (round(now - self._last_heartbeat, 2)
+                                   if self.connected and self._last_heartbeat else None)
+        # Link quality: fraction of expected 1Hz vehicle heartbeats actually
+        # received over the last 10 s (window shrinks right after connect so a
+        # fresh link isn't reported as degraded).
+        if self.connected and self._connected_at:
+            window = min(10.0, max(1.0, now - self._connected_at))
+            got = sum(1 for t in self._hb_times if now - t <= window)
+            d["link_quality"] = min(100, int(round(100.0 * got / window)))
+        else:
+            d["link_quality"] = None
+        return d
+
     def _on_link_lost(self):
         """Called when no heartbeat has arrived within the timeout. Mark the
         vehicle disconnected and tear the link down so the UI reflects it and a
         clean reconnect is possible."""
+        log_event("link", "link_lost", level="ERROR",
+                  last_heartbeat_age=round(time.time() - self._last_heartbeat, 2),
+                  will_reconnect=bool(self._auto_reconnect and self._conn_params))
         self._running = False
         self.connected = False
         self._close_log()
@@ -352,6 +491,8 @@ class VehicleManager:
         back in range). Gives up after max_attempts; a user disconnect()
         aborts it immediately via the _auto_reconnect flag."""
         self.reconnecting = True
+        log_event("link", "reconnecting", level="WARN",
+                  max_attempts=max_attempts, delay_s=delay_s)
         try:
             for _ in range(max_attempts):
                 if not self._auto_reconnect or self.connected:
@@ -362,6 +503,7 @@ class VehicleManager:
                     return  # success — telemetry loop is running again
                 except Exception:
                     time.sleep(delay_s)
+            log_event("link", "reconnect_gave_up", level="ERROR", attempts=max_attempts)
         finally:
             self.reconnecting = False
 
@@ -430,6 +572,8 @@ class VehicleManager:
         mapping = conn.mode_mapping() or {}
         mode_id = mapping.get(mode)
         if mode_id is None:
+            log_event("command", "set_mode", level="WARN", mode=mode, ok=False,
+                      error="unknown mode for this vehicle")
             return False
         # Same wire message mavutil.set_mode sends (COMMAND_LONG DO_SET_MODE),
         # but we hold the link lock so the telemetry thread can't steal the ack.
@@ -441,7 +585,10 @@ class VehicleManager:
                     mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id,
                     0, 0, 0, 0, 0)
             ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_DO_SET_MODE)
-        return ack is not None and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+        ok = ack is not None and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+        log_event("command", "set_mode", level="INFO" if ok else "WARN",
+                  mode=mode, ok=ok, ack_result=(ack.result if ack else None))
+        return ok
 
     def _wait_command_ack(self, command: int, timeout: float = 5.0):
         """Read COMMAND_ACK for a specific command. Must be called while holding
@@ -471,8 +618,12 @@ class VehicleManager:
                     1, (21196 if force else 0), 0, 0, 0, 0, 0)
             ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
         if ack is None:
+            log_event("command", "arm", level="ERROR", force=force, ok=False,
+                      error="no acknowledgement from vehicle")
             return {"ok": False, "error": "no acknowledgement from vehicle"}
         ok = ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+        log_event("command", "arm", level="INFO" if ok else "WARN",
+                  force=force, ok=ok, ack_result=ack.result)
         return {"ok": ok, "result": ack.result,
                 "error": None if ok else "vehicle rejected arming (pre-arm checks?)"}
 
@@ -488,6 +639,8 @@ class VehicleManager:
                     0, (21196 if force else 0), 0, 0, 0, 0, 0)
             ack = self._wait_command_ack(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
         ok = ack is not None and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED
+        log_event("command", "disarm", level="INFO" if ok else "WARN",
+                  force=force, ok=ok, ack_result=(ack.result if ack else None))
         if ok:
             return {"ok": True, "result": ack.result, "error": None}
         return {"ok": False,
@@ -506,6 +659,8 @@ class VehicleManager:
             return {"ok": False, "error": "already armed / airborne"}
         if self.telemetry.gps_fix < 3:
             return {"ok": False, "error": "waiting for GPS 3D fix"}
+        # The composing steps (upload/set_mode/arm) each log their own result.
+        log_event("command", "takeoff_requested", alt=alt, force=force)
 
         lat, lon = self.telemetry.lat, self.telemetry.lon
         mission = [
@@ -536,6 +691,7 @@ class VehicleManager:
         home_lon = self.home_lon or self.telemetry.lon
         if not home_lat or not home_lon:
             return {"ok": False, "error": "home/position not known yet"}
+        log_event("command", "land_requested", home_lat=home_lat, home_lon=home_lon)
 
         # Approach fix ~600 m north of home at 80 m; the plane descends along the
         # line from this fix down to the touchdown point.
@@ -575,12 +731,137 @@ class VehicleManager:
             msg = self._recv_blocking(conn, "PARAM_VALUE", 5)
         return msg.param_value if msg else None
 
-    def set_param(self, name: str, value: float) -> bool:
-        if not self.connection:
+    # Seconds to wait for a PARAM_VALUE (the type read, the set echo, and the
+    # read-back fallback). ArduPilot echoes a PARAM_SET almost immediately, so
+    # 1s is generous even on a lossy telemetry radio. Class attr so tests can
+    # shrink it. Bounds the worst case (unknown/rejected param) to
+    #   _PARAM_TIMEOUT * (1 + 2*_PARAM_SET_ATTEMPTS)  ≈ 5s.
+    _PARAM_TIMEOUT = 1.0
+    # How many times set-then-verify is attempted before giving up (initial try
+    # plus retries) — covers a dropped PARAM_SET or echo on a lossy radio.
+    _PARAM_SET_ATTEMPTS = 2
+
+    # MAV_PARAM_TYPE codes that store an integer (value transported as a float
+    # per ArduPilot's cast convention, but must compare as ints, not floats).
+    _INT_PARAM_TYPES = frozenset({
+        mavutil.mavlink.MAV_PARAM_TYPE_UINT8, mavutil.mavlink.MAV_PARAM_TYPE_INT8,
+        mavutil.mavlink.MAV_PARAM_TYPE_UINT16, mavutil.mavlink.MAV_PARAM_TYPE_INT16,
+        mavutil.mavlink.MAV_PARAM_TYPE_UINT32, mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+        mavutil.mavlink.MAV_PARAM_TYPE_UINT64, mavutil.mavlink.MAV_PARAM_TYPE_INT64,
+    })
+
+    @staticmethod
+    def _param_name(msg) -> str:
+        """Decode a PARAM_VALUE's param_id (bytes or str, NUL-padded)."""
+        pid = msg.param_id
+        if isinstance(pid, bytes):
+            pid = pid.decode(errors="ignore")
+        return pid.rstrip("\x00")
+
+    @classmethod
+    def _param_close(cls, accepted, requested: float, param_type: int) -> bool:
+        """Did the vehicle store the value we asked for? Integer params must
+        match exactly (after rounding — they ride the wire as float32); float
+        params only need to match within float32 precision, since the FC
+        round-trips a float64 request through a 32-bit store."""
+        if accepted is None:
             return False
+        if param_type in cls._INT_PARAM_TYPES:
+            return round(accepted) == round(requested)
+        return abs(accepted - requested) <= max(1e-4, abs(requested) * 1e-4)
+
+    def _match_param_value(self, conn, name: str, deadline: float):
+        """Wait (without sending anything) for a PARAM_VALUE whose id is `name`,
+        skipping unrelated PARAM_VALUEs, until `deadline`. Returns the msg or None.
+        Must be called holding _link_lock."""
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            msg = self._recv_blocking(conn, "PARAM_VALUE", remaining)
+            if msg is None:
+                return None
+            if self._param_name(msg) == name:
+                return msg
+
+    def _request_param(self, conn, name: str, timeout: float = None):
+        """Request one parameter and return its PARAM_VALUE msg (value + type),
+        matched by id. Must be called holding _link_lock."""
+        if timeout is None:
+            timeout = self._PARAM_TIMEOUT
         with self._send_lock:
-            self.connection.param_set_send(name, value)
-        return True
+            conn.mav.param_request_read_send(
+                conn.target_system, conn.target_component, name.encode(), -1)
+        return self._match_param_value(conn, name, time.time() + timeout)
+
+    def _set_param_locked(self, conn, name: str, value: float, attempts: int = None) -> dict:
+        """Write one parameter and confirm the vehicle accepted it. Assumes
+        _link_lock is held (so the telemetry thread can't steal the echo).
+
+        M1b flow: read the param's real storage type -> PARAM_SET with that type
+        -> wait for the PARAM_VALUE echo the FC sends back -> compare. `verified`
+        is True only when the echoed value matches what we asked for; the caller
+        (and the operator) get the *actual accepted value*, not an assumption."""
+        if attempts is None:
+            attempts = self._PARAM_SET_ATTEMPTS
+        value = float(value)
+        # 1. Learn the real MAV_PARAM_TYPE (and previous value). ArduPilot uses
+        #    the cast convention, so sending the correct type is what keeps this
+        #    honest for INTx params and any future PX4-convention airframe.
+        cur = self._request_param(conn, name)
+        if cur is not None:
+            param_type = int(cur.param_type)
+            previous = cur.param_value
+        else:
+            param_type = mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+            previous = None
+
+        accepted = None
+        for _ in range(max(1, attempts)):
+            with self._send_lock:
+                conn.mav.param_set_send(
+                    conn.target_system, conn.target_component,
+                    name.encode(), value, param_type)
+            # ArduPilot echoes a PARAM_VALUE for every PARAM_SET it applies.
+            echo = self._match_param_value(conn, name, time.time() + self._PARAM_TIMEOUT)
+            if echo is None:
+                # Echo dropped (lossy radio) — read the stored value back instead.
+                echo = self._request_param(conn, name)
+            if echo is not None:
+                accepted = echo.param_value
+                if self._param_close(accepted, value, param_type):
+                    break
+
+        verified = self._param_close(accepted, value, param_type)
+        result = {
+            "ok": verified,
+            "name": name,
+            "requested": value,
+            "accepted": accepted,
+            "previous": previous,
+            "param_type": param_type,
+            "verified": verified,
+        }
+        if not verified:
+            result["error"] = (
+                "no PARAM_VALUE echo from vehicle" if accepted is None
+                else f"vehicle stored {accepted}, not the requested {value}")
+        return result
+
+    def set_param(self, name: str, value: float) -> dict:
+        """Write a single parameter with echo verification. Returns a result
+        dict whose `verified`/`accepted` fields report what the FC actually did
+        — never a blind success."""
+        if not self.connection:
+            return {"ok": False, "name": name, "requested": float(value),
+                    "accepted": None, "verified": False, "error": "not connected"}
+        conn = self.connection
+        with self._link_lock:
+            result = self._set_param_locked(conn, name, value)
+        log_event("param", "set", name=result["name"], requested=result["requested"],
+                  accepted=result["accepted"], verified=result["verified"],
+                  error=result.get("error"))
+        return result
 
     def get_all_params(self, timeout: float = 25.0) -> dict:
         """Fetch the vehicle's full parameter table (several hundred entries).
@@ -642,16 +923,29 @@ class VehicleManager:
         return result
 
     def set_params(self, params: dict) -> dict:
-        """Set several parameters (fire-and-forget; caller re-reads to confirm)."""
+        """Set several parameters, each echo-verified against the vehicle. One
+        link-lock transaction for the whole batch. Returns per-param results and
+        an overall `ok` that is True only when every write was confirmed — so
+        SafetyPanel can no longer claim a fence/failsafe took when it didn't."""
         if not self.connection:
-            return {"ok": False, "error": "not connected"}
-        for name, value in params.items():
-            with self._send_lock:
-                self.connection.mav.param_set_send(
-                    self.connection.target_system, self.connection.target_component,
-                    name.encode(), float(value), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-            time.sleep(0.05)
-        return {"ok": True, "count": len(params)}
+            return {"ok": False, "error": "not connected", "results": {}}
+        conn = self.connection
+        results = {}
+        with self._link_lock:
+            for name, value in params.items():
+                results[name] = self._set_param_locked(conn, name, value)
+        failed = [n for n, r in results.items() if not r["verified"]]
+        log_event("param", "set_batch",
+                  requested={k: float(v) for k, v in params.items()},
+                  accepted={n: r["accepted"] for n, r in results.items()},
+                  failed=failed)
+        return {
+            "ok": not failed,
+            "count": len(params),
+            "verified": len(params) - len(failed),
+            "failed": failed,
+            "results": results,
+        }
 
     def send_rc_override(self, channels: list) -> bool:
         """Push RC channel values (PWM µs) into the vehicle as RC_CHANNELS_OVERRIDE
@@ -769,6 +1063,9 @@ class VehicleManager:
         result = {"ok": ok, "ack": (ack.type if ack else None), "count": len(items)}
         if not ok:
             result["error"] = error or f"vehicle rejected mission (MISSION_ACK type {ack.type})"
+        log_event("mission", "upload", level="INFO" if ok else "ERROR",
+                  ok=ok, count=len(items), ack=result["ack"],
+                  error=result.get("error"))
         return result
 
     def download_mission(self) -> list[dict]:
@@ -807,6 +1104,7 @@ class VehicleManager:
 
         items = [w for w in result if w["seq"] != 0]
         self.telemetry.mission_count = len(items)
+        log_event("mission", "download", count=len(items))
         return items
 
 

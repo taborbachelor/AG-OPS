@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API, WS_BASE } from '../api';
 
 // Typical AETR-ish channel roles on a plane (RadioMaster default). CH5+ vary.
 const ROLES = {
@@ -56,7 +56,7 @@ function RCPanel({ telemetry, connected }) {
   useEffect(() => {
     if (!manual) return;
     let closedByUs = false;
-    const ws = new WebSocket('ws://localhost:8000/api/vehicle/rc');
+    const ws = new WebSocket(`${WS_BASE}/vehicle/rc`);
     wsRef.current = ws;
     // A dropped (or never-established) socket must not keep showing LIVE
     // while stick inputs silently stop reaching the vehicle. The backend

@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 function Compass({ heading }) {
   return (

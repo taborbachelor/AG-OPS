@@ -18,6 +18,7 @@ import FlightVitals from './components/FlightVitals';
 import AlertCenter from './components/AlertCenter';
 import FlightSummary from './components/FlightSummary';
 import ParamsPanel from './components/ParamsPanel';
+import { API, WS_BASE } from './api';
 import './App.css';
 
 // How long the vehicle must report disarmed (while connected) before the UI
@@ -90,7 +91,7 @@ function App() {
     let alive = true;
     const poll = async () => {
       try {
-        const r = await fetch('http://localhost:8000/api/connection/status');
+        const r = await fetch(`${API}/connection/status`);
         const s = await r.json();
         if (!alive) return;
         setBackendUp(true);
@@ -115,7 +116,7 @@ function App() {
     let ws;
     let retry;
     const open = () => {
-      ws = new WebSocket('ws://localhost:8000/api/telemetry/ws');
+      ws = new WebSocket(`${WS_BASE}/telemetry/ws`);
       ws.onmessage = (event) => {
         try { setTelemetry(JSON.parse(event.data)); } catch { /* ignore bad frame */ }
       };
@@ -267,7 +268,7 @@ function App() {
     setSnapStatus('Looking up field boundary…');
     try {
       const r = await fetch(
-        `http://localhost:8000/api/fields/snap?lat=${latlng.lat}&lon=${latlng.lng}&radius=2000`);
+        `${API}/fields/snap?lat=${latlng.lat}&lon=${latlng.lng}&radius=2000`);
       const d = await r.json();
       if (r.ok && d.found) {
         setSprayFields((f) => [...f, { polygon: d.polygon, acres: null, source: 'snap' }]);

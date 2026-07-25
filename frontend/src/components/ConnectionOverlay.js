@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 function ConnectionOverlay({ connected, setConnected, onClose }) {
   const [ports, setPorts] = useState([]);
@@ -49,6 +49,25 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
     setLoading(false);
   };
 
+  // Simulator quick-connect: ask the backend to spawn the bundled SITL first
+  // (no-op if it's already running or the binary isn't shipped), then link.
+  const connectSimulator = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`${API}/sim/start`, { method: 'POST' });
+      if (!res.ok && res.status !== 404) {
+        const d = await res.json().catch(() => ({}));
+        setError(d.detail || 'Could not start the simulator');
+        setLoading(false);
+        return;
+      }
+    } catch (e) {
+      /* backend unreachable — doConnect will surface that */
+    }
+    await doConnect('tcp:127.0.0.1:5760', 57600);
+  };
+
   const handleDisconnect = async () => {
     try {
       await fetch(`${API}/connection/disconnect`, { method: 'POST' });
@@ -81,9 +100,9 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
               </div>
             )}
             <button className="qc-btn" disabled={loading}
-              onClick={() => doConnect('tcp:127.0.0.1:5760', 57600)}>
+              onClick={connectSimulator}>
               <span>🖥 Simulator (SITL)</span>
-              <span className="qc-sub">TCP 5760 · 57600</span>
+              <span className="qc-sub">AUTO-STARTS · TCP 5760</span>
             </button>
           </div>
         )}

@@ -1,6 +1,7 @@
 import json
 import re
 from fastapi import APIRouter, HTTPException
+from app.eventlog import recent_events
 from app.vehicle_manager import LOG_DIR
 
 router = APIRouter()
@@ -46,6 +47,15 @@ async def list_logs():
         except Exception:
             continue
     return {"logs": out}
+
+
+# NOTE: must be declared before /{name} or it would be captured as a log name.
+@router.get("/events")
+async def get_events(limit: int = 100):
+    """Recent structured ops events (connection, commands+ACKs, params,
+    mode/arm changes, STATUSTEXT) — newest first. Full history is on disk in
+    logs/events/events_YYYYMMDD.jsonl."""
+    return {"events": recent_events(min(max(limit, 1), 500))}
 
 
 @router.get("/{name}")

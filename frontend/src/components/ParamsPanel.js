@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 // Full flight-controller parameter table: download on demand (it's a few
 // hundred entries and pauses telemetry for a few seconds), filter, edit
@@ -39,10 +39,19 @@ function ParamsPanel({ connected }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, value: v }),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setParams((p) => ({ ...p, [name]: v }));
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        // M1b: the FC didn't confirm the write. Reflect the value it actually
+        // holds (if it echoed one) and don't pretend the requested value stuck.
+        const accepted = body?.detail?.accepted;
+        if (accepted != null) setParams((p) => ({ ...p, [name]: accepted }));
+        flash(`${name} NOT set${accepted != null ? ` — vehicle holds ${accepted}` : ''}`);
+        return;
+      }
+      // Show the value the vehicle actually accepted, not the requested one.
+      setParams((p) => ({ ...p, [name]: body.value }));
       setEdits((e) => { const c = { ...e }; delete c[name]; return c; });
-      flash(`${name} = ${v} sent ✓`);
+      flash(`${name} = ${body.value} ✓`);
     } catch {
       flash(`Failed to set ${name}`);
     }

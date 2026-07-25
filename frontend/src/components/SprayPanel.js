@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 const SQ_M_PER_ACRE = 4046.8564224;
 const EARTH_R = 6371000;

@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 const COMMANDS = ['TAKEOFF', 'WAYPOINT', 'LOITER', 'LAND', 'RTL'];
 
 const CMD_COLOR = {

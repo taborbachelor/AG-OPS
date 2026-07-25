@@ -5,3 +5,4 @@ pymavlink==2.4.41
 python-multipart==0.0.9
 pyserial==3.5
 pillow==12.3.0
+httpx  # test-only: fastapi TestClient

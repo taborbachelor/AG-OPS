@@ -1,0 +1,50 @@
+# Gap Analysis vs ARCHITECTURE.md Directive
+
+**Date:** 2026-07-22/23 · **Method:** three parallel line-level code audits (MAVLink/link layer; missions/failsafe/logging/sim; frontend state) against the adopted directive. Evidence cited as `file:line` was verified by the auditors at audit time.
+
+**Airframe decision (owner, 2026-07-22):** ArduPlane stays primary (matches the real aircraft + all SITL validation); new abstractions must be airframe-aware so ArduCopter can be added without redesign. Confirm the eventual spray airframe with Caleb.
+
+---
+
+## Scorecard
+
+| Directive area | Verdict | Summary |
+|---|---|---|
+| Mission transfer protocol | **STRONG** | MISSION_ITEM_INT both directions, answers MISSION_REQUEST & _INT, retransmit-safe seq replies, ACK close-out both paths (`vehicle_manager.py:701-810`) |
+| Command ACK handling | **GOOD, gaps** | arm/disarm/mode wait for COMMAND_ACK and surface real result; GET_HOME, PARAM_SET, MISSION_SET_CURRENT are fire-and-forget |
+| Heartbeat management | **GOOD, gaps** | 1 Hz GCS TX, 5 s RX watchdog, auto-reconnect (20×5 s); no independent TX timer, no graded levels |
+| Connection state | **ABSENT** | Booleans (`connected`, `reconnecting`), no state machine, no transition events; no SYNCHRONIZING/DEGRADED equivalents |
+| Message coverage | **PARTIAL** | Missing entirely: **STATUSTEXT** (vehicle errors silently dropped), **EKF_STATUS_REPORT**, BATTERY_STATUS, AUTOPILOT_VERSION, LOCAL_POSITION_NED |
+| Vehicle state model | **PARTIAL** | Typed dataclass with 24 fields; missing `ekfHealthy`, `linkQuality`, `lastHeartbeat`; `connected` only on WS path; unlocked cross-thread reads (torn snapshots possible) |
+| Multi-GCS / sysid | **ABSENT** | Own sysid defaults to 255 (collides with Mission Planner), no RX sysid filtering, no routing. MP co-connect only safe on a separate SITL/vehicle endpoint |
+| Parameter engine | **WEAK — hardware-blocking** | No cache, no sync-on-connect, no validation, no batch/rollback; writes are fire-and-forget **hardcoded REAL32** with router returning "ok" unconditionally (`vehicle_manager.py:644-654`, `routers/vehicle.py:130-135`) |
+| Structured logging | **ABSENT — hardware-blocking** | Zero application logging; connect/loss/commands/params/exceptions all silent, ~12 bare `except: pass` sites. Only JSONL per-flight telemetry recorder exists (good, but it's a flight recorder, not an ops log) |
+| Failsafe architecture | **PARTIAL by design** | Delegation to ArduPilot via FENCE_*/FS_*/BATT_* params is correct GCS practice, but: single-level link loss only, no HDOP/sat-collapse monitoring, no flight-time estimate, no emergency state machine, failsafe events never recorded (STATUSTEXT dropped) |
+| Mission model | **PARTIAL** | Typed items but no mission entity (id/name/metadata), no backend persistence, no resume-from-seq-N |
+| Coverage planner | **GOOD, gaps** | Polygon/concave, swath, serpentine, keepout clipping with independent-verified buffers, multi-field tour. Missing: headlands, overlap analysis, resume, terrain hooks (constant AGL only) |
+| SITL integration | **PARTIAL** | Bundled SITL + lifecycle API (start/stop/status); zero scenario tooling or fault injection; link-loss logic tested with fakes, never against SITL |
+| Spraying layer | **ABSENT** (known) | No flow/section/rate control, no as-applied verification — Phase 2 per roadmap |
+| Frontend discipline | **GOOD, gaps** | UI never parses MAVLink, all commands via backend REST (+1 RC-override WS). But safety logic lives client-side: pre-flight checklist, throttle interlock, alert thresholds, RTL margin. Param edits effectively unvalidated. RCPanel swallows errors and flashes optimistic success |
+| Config management | **ABSENT** | Hardcoded constants; one env var (`ORDERS_DB`); no settings file |
+
+## Hardware-blocking findings (fix before the Cube bench test)
+
+1. **STATUSTEXT is dropped.** Every ArduPilot prearm failure, failsafe announcement, and error string is invisible to the operator and to logs. We already paid for this once (fence-breach RTL diagnosed by attaching a second GCS). Directive: "Is state clearly observable from telemetry?" — currently no.
+2. **Param writes are unverified fire-and-forget with a hardcoded REAL32 type.** SafetyPanel "applies" failsafes and the router reports success regardless of what the FC accepted. On real hardware that means believing a fence/failsafe is set when it may not be.
+3. **No application logging.** A bench-test anomaly is currently undiagnosable after the fact ("Are errors diagnosable from logs?" — no).
+4. **Sysid 255 + no RX filtering.** The moment Mission Planner shares an endpoint, the two GCSs collide and either can consume the other's ACKs/PARAM_VALUEs.
+
+## Roadmap (safety-first, incremental — 112-test suite green at every step)
+
+- **M1 — Observability & truth**: ~~structured JSON event log (connection/commands+ACKs/params/mode/arm/failsafe/exceptions, JSONL); STATUSTEXT capture → telemetry + alerts + log; EKF_STATUS_REPORT + SYS_STATUS health bits → `ekf_healthy`; `link_quality`/`last_heartbeat_age` in snapshot; thread-safe snapshot reads; `connected` in GET telemetry.~~ **M1a SHIPPED 2026-07-23** — `app/eventlog.py` + instrumented `vehicle_manager`, `/api/logs/events`, `snapshot()`; 133 tests (21 new); SITL-validated live (EKF alignment STATUSTEXT stream captured, `ekf_healthy` False→True across GPS convergence, sensor `gps` unhealthy→recover + persistent `terrain` correctly flagged, full link→mode→arm→disarm audit trail on disk). ~~**M1b:** param write = read-type → PARAM_SET with correct type → verify PARAM_VALUE echo → report actual accepted value.~~ **M1b SHIPPED 2026-07-24** — `set_param`/`set_params` now read the real MAV_PARAM_TYPE, PARAM_SET with it, wait for the echo (read-back fallback for a dropped echo), and return `{verified, accepted, previous}`; POST `/vehicle/params` + `/safety/geofence` + `/safety/failsafe` return **502 with the failed param(s)** instead of a blind `ok`; SafetyPanel/ParamsPanel name the rejected param and show the value the FC actually holds. 147 tests (14 new, `test_m1b_params.py`); **SITL-validated live** (mixed INT8/REAL32 geofence batch verified + read-back-confirmed on the FC, single float/int writes verified, unknown param → 502 `no PARAM_VALUE echo`, full audit trail in the event log; per-param verify timeout tuned to bound a rejected-write to ~5s). **Next: M2 — link & identity** (or rebuild the exe with M1 first).
+- **M2 — Link & identity**: connection state machine (DISCONNECTED→CONNECTING→WAITING_HEARTBEAT→SYNCHRONIZING→READY→DEGRADED→LOST) with logged transition events pushed over WS; graded link levels (1/3/5/10 s); own sysid configurable (default ≠255), RX sysid/compid filtering; AUTOPILOT_VERSION capability fetch on connect; BATTERY_STATUS. Validate Mission Planner co-connect checklist on SITL 5762.
+- **M3 — Parameter engine**: cache + full sync on connect (the SYNCHRONIZING phase), missing-index re-request, ArduPlane param metadata validation (ranges/types), batch set with rollback, change tracking in event log.
+- **M4 — SITL scenario harness**: reproducible scenarios (field-test, link-loss, gps-failure via SIM_GPS_DISABLE, battery-fault via SIM_BATT_VOLTAGE, rtl-recovery) as scripted backend runs + CI-able integration tests; fault injection endpoints in sim router.
+- **M5 — Mission model & resume**: mission entity (id/name/metadata) + backend persistence; resume-after-interruption (MISSION_SET_CURRENT from tracked seq); headlands + overlap analysis in planner; terrain-frame abstraction (airframe/frame-aware, copter-ready).
+- **M6 — Safety logic to backend**: pre-flight checklist evaluated server-side (UI renders verdicts), alert rules + thresholds unified with FS params, RTL margin computed backend-side; param range validation at the API.
+- **M7 — Layer restructure (continuous)**: as each milestone touches `vehicle_manager.py` (815 lines), extract into packages mirroring the directive layout (`mavlink/` transport+ack+heartbeat, `vehicle/` state machine, `telemetry/`, `params/`, `missions/`, `failsafe/`, `sim/`) — strangler moves, never big-bang.
+- **Phase 2+ (hardware-gated)**: spraying layer (DO_SET_SERVO/RELAY, section control, as-applied), companion-computer deployment profile, fleet/sysid-per-vehicle.
+
+## Retained strengths (don't regress)
+
+Link lock discipline + `_recv_blocking` heartbeat preservation; threadpool endpoint policy (no blocking pymavlink on the event loop); mission seq-protocol retransmit handling; telemetry reset on connect; auto-reconnect with operator-disconnect distinction; force-arm/AUTO SITL flow; keepout clipping verified against an independent distance implementation; frontend ErrorBoundary + self-healing WS.

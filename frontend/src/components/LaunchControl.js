@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 function LaunchControl({ telemetry, connected }) {
   const [alt, setAlt] = useState(100);

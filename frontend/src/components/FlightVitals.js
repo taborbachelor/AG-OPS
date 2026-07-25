@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 const fmtEta = (sec) => {
   const s = Math.round(sec);

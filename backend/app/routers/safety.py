@@ -34,6 +34,22 @@ def _require_connected():
         raise HTTPException(400, "Not connected")
 
 
+def _raise_if_unverified(res: dict, what: str):
+    """M1b: set_params echo-verifies every write. If any param the FC didn't
+    confirm, fail loudly with the specifics rather than reporting a fake 'ok' —
+    an operator must never believe a fence/failsafe is set when it isn't."""
+    if not res.get("ok"):
+        failed = res.get("failed") or []
+        results = res.get("results", {})
+        raise HTTPException(502, {
+            "message": f"Vehicle did not confirm {what}: {', '.join(failed) or res.get('error')}",
+            "failed": failed,
+            "results": {n: {"requested": r["requested"], "accepted": r["accepted"],
+                            "error": r.get("error")}
+                        for n, r in results.items() if not r["verified"]},
+        })
+
+
 @router.get("/geofence")
 def get_geofence():
     _require_connected()
@@ -52,14 +68,15 @@ def get_geofence():
 @router.post("/geofence")
 def set_geofence(cfg: GeofenceConfig):
     _require_connected()
-    vehicle_manager.set_params({
+    res = vehicle_manager.set_params({
         "FENCE_TYPE": FENCE_TYPE_CIRCLE_ALT,
         "FENCE_RADIUS": cfg.radius,
         "FENCE_ALT_MAX": cfg.alt_max,
         "FENCE_ACTION": cfg.action,
         "FENCE_ENABLE": 1 if cfg.enable else 0,
     })
-    return {"status": "ok", **cfg.model_dump()}
+    _raise_if_unverified(res, "geofence")
+    return {"status": "ok", "verified": True, **cfg.model_dump()}
 
 
 @router.get("/failsafe")
@@ -83,7 +100,7 @@ def get_failsafe():
 @router.post("/failsafe")
 def set_failsafe(cfg: FailsafeConfig):
     _require_connected()
-    vehicle_manager.set_params({
+    res = vehicle_manager.set_params({
         "BATT_LOW_VOLT": cfg.batt_low_volt,
         "BATT_FS_LOW_ACT": cfg.batt_low_action,
         "BATT_CRT_VOLT": cfg.batt_crit_volt,
@@ -92,4 +109,5 @@ def set_failsafe(cfg: FailsafeConfig):
         "THR_FAILSAFE": 1 if cfg.rc_enable else 0,
         "FS_LONG_ACTN": cfg.rc_long_action,
     })
-    return {"status": "ok", **cfg.model_dump()}
+    _raise_if_unverified(res, "failsafe")
+    return {"status": "ok", "verified": True, **cfg.model_dump()}

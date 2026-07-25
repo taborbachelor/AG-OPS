@@ -131,5 +131,21 @@ class ParamUpdate(BaseModel):
 def set_param(req: ParamUpdate):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
-    vehicle_manager.set_param(req.name, req.value)
-    return {"status": "ok", "param": req.name, "value": req.value}
+    result = vehicle_manager.set_param(req.name, req.value)
+    # Echo-verified (M1b): surface what the FC actually stored, and fail loudly
+    # if it didn't take — never report a blind success.
+    if not result["verified"]:
+        raise HTTPException(502, {
+            "message": f"Vehicle did not confirm {req.name}",
+            "param": req.name,
+            "requested": result["requested"],
+            "accepted": result["accepted"],
+            "error": result.get("error"),
+        })
+    return {
+        "status": "ok",
+        "param": req.name,
+        "requested": result["requested"],
+        "value": result["accepted"],
+        "verified": True,
+    }

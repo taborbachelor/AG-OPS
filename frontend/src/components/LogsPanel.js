@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 const SPEEDS = [1, 2, 4, 10];
 
 const toTelem = (s) => ({

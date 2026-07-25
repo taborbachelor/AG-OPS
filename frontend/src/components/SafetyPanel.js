@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 const FENCE_ACTIONS = { 0: 'Report only', 1: 'RTL' };
 const BATT_ACTIONS = { 0: 'None', 1: 'RTL', 2: 'Land' };
@@ -61,29 +61,32 @@ function SafetyPanel({ connected, fence, setFence }) {
   // Auto-read once when the panel opens while connected.
   useEffect(() => { readAll(); }, [readAll]);
 
-  const applyFence = async () => {
+  // Backend echo-verifies every param write (M1b): a 502 means the FC did not
+  // confirm one or more values. Name them so the operator knows the fence/
+  // failsafe is NOT set, instead of trusting a stale reading.
+  const applyVerified = async (path, payload, label) => {
     setBusy(true);
     try {
-      const res = await fetch(`${API}/safety/geofence`, {
+      const res = await fetch(`${API}${path}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fence),
+        body: JSON.stringify(payload),
       });
-      flash(res.ok ? 'Geofence applied ✓' : 'Geofence apply failed');
-    } catch (e) { flash('Geofence error'); }
+      if (res.ok) {
+        flash(`${label} applied ✓`);
+      } else {
+        let failed = [];
+        try { failed = (await res.json())?.detail?.failed || []; } catch (e) { /* no body */ }
+        flash(failed.length
+          ? `${label} NOT set — vehicle rejected ${failed.join(', ')}`
+          : `${label} apply failed`);
+      }
+      await readAll();  // re-read so the UI shows what the FC actually holds
+    } catch (e) { flash(`${label} error`); }
     setBusy(false);
   };
 
-  const applyFailsafe = async () => {
-    setBusy(true);
-    try {
-      const res = await fetch(`${API}/safety/failsafe`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fs),
-      });
-      flash(res.ok ? 'Failsafes applied ✓' : 'Failsafe apply failed');
-    } catch (e) { flash('Failsafe error'); }
-    setBusy(false);
-  };
+  const applyFence = () => applyVerified('/safety/geofence', fence, 'Geofence');
+  const applyFailsafe = () => applyVerified('/safety/failsafe', fs, 'Failsafes');
 
   const setF = (patch) => setFence({ ...fence, ...patch });
 

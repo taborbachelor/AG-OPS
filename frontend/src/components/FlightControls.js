@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-const API = 'http://localhost:8000/api';
+import { API } from '../api';
 
 const MODES = ['MANUAL', 'STABILIZE', 'FBWA', 'FBWB', 'AUTO', 'RTL', 'LOITER', 'GUIDED', 'CIRCLE', 'LAND'];
 
