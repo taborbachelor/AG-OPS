@@ -7,15 +7,38 @@ function TopBar({ telemetry, connected, backendUp, playback, onConnectClick }) {
   const batteryColor = (t.battery_level ?? 100) < 20 ? 'var(--accent-red)' :
     (t.battery_level ?? 100) < 50 ? 'var(--accent-orange)' : 'var(--accent-green)';
 
-  const linkLabel = !backendUp ? 'NO BACKEND' : connected ? 'LINKED' : 'OFFLINE';
-  const linkDot = !backendUp ? 'orange' : connected ? 'green' : 'red';
+  // M2: reflect the connection state machine + graded link level in the chip.
+  const STATE_LABEL = {
+    READY: 'LINKED', DEGRADED: 'DEGRADED', SYNCHRONIZING: 'SYNCING',
+    WAITING_HEARTBEAT: 'WAITING', CONNECTING: 'CONNECTING', LOST: 'LINK LOST',
+    DISCONNECTED: 'OFFLINE',
+  };
+  const LEVEL_DOT = { good: 'green', nominal: 'green', degraded: 'orange',
+    poor: 'red', critical: 'red' };
+  let linkLabel, linkDot;
+  if (!backendUp) {
+    linkLabel = 'NO BACKEND'; linkDot = 'orange';
+  } else if (connected) {
+    linkLabel = STATE_LABEL[t.link_state] || 'LINKED';
+    linkDot = LEVEL_DOT[t.link_level] || 'green';
+  } else {
+    linkLabel = t.reconnecting ? 'RECONNECTING' : (STATE_LABEL[t.link_state] || 'OFFLINE');
+    linkDot = t.reconnecting ? 'orange' : 'red';
+  }
+  const fw = t.capabilities?.fw_version;
+  const linkTitle = connected
+    ? `Connection settings\nstate: ${t.link_state}  ·  link: ${t.link_level}`
+      + `\nGCS sysid ${t.gcs_sysid} → vehicle sysid ${t.vehicle_sysid ?? '?'}`
+      + (fw ? `\nArduPilot ${fw}` : '')
+      + (t.msgs_filtered ? `\nfiltered ${t.msgs_filtered} off-vehicle msgs` : '')
+    : 'Connection settings';
 
   return (
     <div className="top-bar">
       <div className="top-bar-left">
         <span className="brand-title">GCS</span>
         <div className="status-chip" onClick={onConnectClick} style={{ cursor: 'pointer' }}
-          title="Connection settings">
+          title={linkTitle}>
           <span className={`dot ${linkDot}`}></span>
           <span>{linkLabel}</span>
         </div>

@@ -9,6 +9,7 @@ from typing import Optional
 from pymavlink import mavutil
 
 from app.eventlog import log_event
+from app import config
 
 # Flight logs live next to the app package.
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -50,6 +51,42 @@ _CMD_TO_MAV = {
 _MAV_TO_CMD = {v: k for k, v in _CMD_TO_MAV.items()}
 
 
+class LinkState:
+    """The connection's lifecycle (directive M2). Plain string constants so they
+    serialize straight into telemetry/WS and read cleanly in the event log.
+
+    DISCONNECTED -> CONNECTING -> WAITING_HEARTBEAT -> SYNCHRONIZING -> READY,
+    with READY <-> DEGRADED as heartbeats thin out, and -> LOST when the
+    watchdog fires (auto-reconnect then drives CONNECTING again)."""
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTING = "CONNECTING"
+    WAITING_HEARTBEAT = "WAITING_HEARTBEAT"
+    SYNCHRONIZING = "SYNCHRONIZING"
+    READY = "READY"
+    DEGRADED = "DEGRADED"
+    LOST = "LOST"
+
+
+# MAV_PROTOCOL_CAPABILITY_* bits we decode from AUTOPILOT_VERSION, with literal
+# fallbacks in case a dialect build lacks a name.
+_CAP_BITS = {
+    "mission_int": getattr(mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_MISSION_INT", 4),
+    "command_int": getattr(mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_COMMAND_INT", 2),
+    "param_float": getattr(mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_PARAM_FLOAT", 1),
+    "ftp": getattr(mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_FTP", 8),
+    "set_attitude_target": getattr(
+        mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_SET_ATTITUDE_TARGET", 16),
+    "set_position_target_global": getattr(
+        mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_SET_POSITION_TARGET_GLOBAL_INT", 32),
+    "flight_termination": getattr(
+        mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_FLIGHT_TERMINATION", 1024),
+    "mission_fence": getattr(
+        mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_MISSION_FENCE", 4096),
+    "mission_rally": getattr(
+        mavutil.mavlink, "MAV_PROTOCOL_CAPABILITY_MISSION_RALLY", 8192),
+}
+
+
 @dataclass
 class TelemetryData:
     armed: bool = False
@@ -63,6 +100,8 @@ class TelemetryData:
     battery_voltage: float = 0.0
     battery_current: float = 0.0
     battery_level: Optional[int] = None
+    # Charge drawn this flight (mAh), from BATTERY_STATUS when the vehicle sends it.
+    battery_consumed_mah: Optional[float] = None
     pitch: float = 0.0
     roll: float = 0.0
     yaw: float = 0.0
@@ -147,6 +186,63 @@ class VehicleManager:
         # (e.g. from the auto-reconnect thread) can detect that the operator
         # pulled the plug while it was dialing and must NOT bring the link up.
         self._disconnect_gen = 0
+        # --- M2: link identity & state machine ---
+        # Our own MAVLink identity. Default != 255 so we don't collide with
+        # Mission Planner on a shared endpoint (see app/config.py).
+        self._sysid = config.GCS_SYSID
+        self._compid = config.GCS_COMPID
+        # The vehicle's sysid/compid, locked from its first heartbeat. Once set,
+        # we drop RX traffic from any other system (a 2nd GCS, another vehicle).
+        self._vehicle_sysid = None
+        self._vehicle_compid = None
+        self._msgs_filtered = 0  # count of RX messages dropped by the sysid filter
+        # Connection lifecycle state + when we entered it.
+        self._link_state = LinkState.DISCONNECTED
+        self._state_since = 0.0
+        # READY -> DEGRADED once no heartbeat for this long (still < loss timeout).
+        self._link_degraded_after = 3.0
+        # AUTOPILOT_VERSION-derived capabilities (fetched on connect), or None.
+        self._capabilities = None
+
+    def _set_state(self, new_state: str, level: str = "INFO", **details):
+        """Transition the connection state machine and log the transition.
+        Idempotent: re-entering the same state is a no-op (no log spam)."""
+        old = self._link_state
+        if old == new_state:
+            return
+        self._link_state = new_state
+        self._state_since = time.time()
+        log_event("link", "state", level=level,
+                  **{"from_state": old, "to_state": new_state, **details})
+
+    @staticmethod
+    def _link_level(age):
+        """Graded link health from the last-heartbeat age (directive's 1/3/5/10s
+        levels). None when disconnected."""
+        if age is None:
+            return None
+        if age <= 1.0:
+            return "good"
+        if age <= 3.0:
+            return "nominal"
+        if age <= 5.0:
+            return "degraded"
+        if age <= 10.0:
+            return "poor"
+        return "critical"
+
+    def _from_vehicle(self, msg) -> bool:
+        """True if the message came from the connected vehicle's sysid. Before
+        the vehicle sysid is locked (initial handshake) everything is accepted;
+        afterwards, traffic from any other system — a second GCS sharing the
+        endpoint, another vehicle — is rejected so it can't consume our ACKs,
+        PARAM_VALUEs, or falsely feed the heartbeat watchdog."""
+        if self._vehicle_sysid is None:
+            return True
+        try:
+            return msg.get_srcSystem() == self._vehicle_sysid
+        except Exception:
+            return True
 
     def connect(self, connection_string: str, baud: int = 57600) -> bool:
         # Snapshot the disconnect generation so we can tell if the operator
@@ -154,10 +250,16 @@ class VehicleManager:
         gen = self._disconnect_gen
         conn = None
         try:
-            conn = mavutil.mavlink_connection(connection_string, baud=baud)
+            self._set_state(LinkState.CONNECTING, connection=connection_string)
+            # We announce ourselves as GCS sysid 252 (not pymavlink's default
+            # 255) so we don't collide with Mission Planner on a shared endpoint.
+            conn = mavutil.mavlink_connection(
+                connection_string, baud=baud,
+                source_system=self._sysid, source_component=self._compid)
             # Publish immediately so an operator disconnect() can close the
             # port and interrupt the heartbeat wait below.
             self.connection = conn
+            self._set_state(LinkState.WAITING_HEARTBEAT)
             hb = conn.wait_heartbeat(timeout=30)
             if hb is None:
                 # wait_heartbeat returns None on timeout (it does NOT raise) —
@@ -167,12 +269,18 @@ class VehicleManager:
                 # Operator disconnected while we were connecting — honor it:
                 # do not bring the link up or re-arm auto-reconnect.
                 raise ConnectionError("cancelled by operator disconnect")
+            self._set_state(LinkState.SYNCHRONIZING, vehicle_sysid=conn.target_system)
+            # Lock onto this vehicle's identity — from here, RX filtering drops
+            # everything that isn't from it.
+            self._vehicle_sysid = conn.target_system
+            self._vehicle_compid = conn.target_component
             # Fresh vehicle: clear any telemetry/home left over from a previous
             # connection so we never show a different vehicle's stale data.
             with self._telem_lock:
                 self.telemetry = TelemetryData()
                 self._statustext.clear()
             self._hb_times.clear()
+            self._capabilities = None
             self.home_lat = self.home_lon = self.home_alt = 0.0
             self.connected = True
             self.connection_string = connection_string
@@ -188,12 +296,24 @@ class VehicleManager:
                 conn.mav.command_long_send(
                     conn.target_system, conn.target_component,
                     mavutil.mavlink.MAV_CMD_GET_HOME_POSITION, 0, 0, 0, 0, 0, 0, 0, 0)
+            # Make ourselves the recognized GCS BEFORE the telemetry loop starts,
+            # so this lock-held param read/write has the link to itself.
+            self._align_gcs_sysid()
             self._start_telemetry_loop()
+            # Request capabilities AFTER the loop is running so the AUTOPILOT_
+            # VERSION reply is routed to _handle_msg — not swallowed by the
+            # align's recv loop (which discards non-PARAM_VALUE messages).
+            self._request_capabilities(conn)
+            self._set_state(LinkState.READY, vehicle_sysid=conn.target_system,
+                            gcs_sysid=self._sysid)
             log_event("link", "connected", connection=connection_string, baud=baud,
-                      vehicle_sysid=conn.target_system)
+                      vehicle_sysid=conn.target_system, gcs_sysid=self._sysid)
             return True
         except Exception as e:
             self.connected = False
+            self._vehicle_sysid = None
+            self._vehicle_compid = None
+            self._set_state(LinkState.DISCONNECTED, level="ERROR", error=str(e))
             log_event("link", "connect_failed", level="ERROR",
                       connection=connection_string, error=str(e))
             # Never leak a half-open port: on serial, a leaked handle keeps the
@@ -220,6 +340,53 @@ class VehicleManager:
                 1,  # start streaming
             )
 
+    def _request_capabilities(self, conn):
+        """Ask the autopilot for AUTOPILOT_VERSION (its protocol capabilities +
+        firmware version). Fire-and-request: the reply is handled by the
+        telemetry loop and lands in snapshot()['capabilities']. Best-effort —
+        a vehicle that doesn't answer just leaves capabilities None."""
+        try:
+            with self._send_lock:
+                conn.mav.command_long_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES,
+                    0, 1, 0, 0, 0, 0, 0, 0)
+        except Exception as e:
+            log_event("link", "capabilities_request_failed", level="WARN", error=str(e))
+
+    def _align_gcs_sysid(self):
+        """Point the vehicle's "commanding GCS" param at our GCS sysid (verified
+        M1b write) so its GCS-loss failsafe counts our heartbeats. Since we moved
+        off the default 255, skipping this would make ArduPilot ignore our
+        heartbeats and RTL on FS_GCS — the exact failure from the project
+        history. The param was renamed across firmware versions, so we align
+        whichever candidate the vehicle actually has. No-op if disabled."""
+        if not config.MANAGE_SYSID_MYGCS or not self.connection:
+            return
+        try:
+            # Find which candidate this firmware exposes (a read that echoes).
+            name, cur_val = None, None
+            with self._link_lock:
+                for cand in config.GCS_SYSID_PARAM_CANDIDATES:
+                    cur = self._request_param(self.connection, cand)
+                    if cur is not None:
+                        name, cur_val = cand, round(cur.param_value)
+                        break
+            if name is None:
+                log_event("link", "sysid_mygcs_param_not_found", level="WARN",
+                          tried=list(config.GCS_SYSID_PARAM_CANDIDATES))
+                return
+            if cur_val == self._sysid:
+                log_event("link", "sysid_mygcs_ok", param=name, sysid=self._sysid)
+                return
+            res = self.set_param(name, self._sysid)
+            log_event("link", "sysid_mygcs_aligned",
+                      level="INFO" if res["verified"] else "WARN",
+                      param=name, previous=cur_val, requested=self._sysid,
+                      accepted=res["accepted"], verified=res["verified"])
+        except Exception as e:
+            log_event("link", "sysid_mygcs_align_failed", level="WARN", error=str(e))
+
     def disconnect(self):
         # Operator asked for this — never auto-reconnect afterwards. Bump the
         # generation FIRST so any connect() currently in flight (reconnect
@@ -236,6 +403,9 @@ class VehicleManager:
         self.connection = None
         self.connected = False
         self.connection_string = None
+        self._vehicle_sysid = None
+        self._vehicle_compid = None
+        self._set_state(LinkState.DISCONNECTED)
         log_event("link", "disconnected_by_operator")
 
     def _start_telemetry_loop(self):
@@ -285,6 +455,12 @@ class VehicleManager:
             msg = conn.recv_match(blocking=True, timeout=min(remaining, 1.0))
             if msg is None:
                 continue
+            # Same RX sysid filter as the telemetry loop: a co-connected GCS's
+            # HEARTBEAT must not bump our watchdog, and its PARAM_VALUE/
+            # COMMAND_ACK must not be mistaken for our transaction's reply.
+            if not self._from_vehicle(msg):
+                self._msgs_filtered += 1
+                continue
             msg_type = msg.get_type()
             if msg_type == "HEARTBEAT":
                 self._last_heartbeat = time.time()
@@ -298,9 +474,17 @@ class VehicleManager:
             # Link watchdog, checked every iteration up front so it fires whether
             # the read returns no data OR raises (a reset socket raises, which is
             # exactly what happens when the vehicle/SITL goes away).
-            if time.time() - self._last_heartbeat > self._link_timeout:
+            age = time.time() - self._last_heartbeat
+            if age > self._link_timeout:
                 self._on_link_lost()
                 break
+            # Graded state: warn (DEGRADED) once heartbeats thin out but before
+            # the link is declared lost, and recover to READY when they return.
+            if self._link_state == LinkState.READY and age > self._link_degraded_after:
+                self._set_state(LinkState.DEGRADED, level="WARN",
+                                last_heartbeat_age=round(age, 2))
+            elif self._link_state == LinkState.DEGRADED and age <= self._link_degraded_after:
+                self._set_state(LinkState.READY)
             # Announce ourselves at 1Hz so the vehicle's GCS-loss failsafe
             # never fires because of us.
             conn = self.connection
@@ -311,6 +495,12 @@ class VehicleManager:
                     msg = self.connection.recv_match(blocking=False)
                 if msg is None:
                     time.sleep(0.01)
+                    continue
+                # RX sysid filter: ignore traffic from any system that isn't the
+                # connected vehicle (a co-connected Mission Planner, another
+                # vehicle) so it can't feed our watchdog or corrupt telemetry.
+                if not self._from_vehicle(msg):
+                    self._msgs_filtered += 1
                     continue
                 self._handle_msg(msg)
             except Exception:
@@ -364,6 +554,26 @@ class VehicleManager:
                       severity=sev_name, text=text)
             return
 
+        if msg_type == "AUTOPILOT_VERSION":
+            # Protocol capabilities + firmware version, fetched once on connect.
+            # Lets us verify MISSION_INT/COMMAND_INT support instead of assuming.
+            caps = int(getattr(msg, "capabilities", 0))
+            v = int(getattr(msg, "flight_sw_version", 0))
+            self._capabilities = {
+                name: bool(caps & bit) for name, bit in _CAP_BITS.items()
+            }
+            self._capabilities.update({
+                "raw": caps,
+                # flight_sw_version packs major<<24 | minor<<16 | patch<<8 | type.
+                "fw_version": f"{(v >> 24) & 0xFF}.{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}",
+                "vendor_id": int(getattr(msg, "vendor_id", 0)),
+                "product_id": int(getattr(msg, "product_id", 0)),
+            })
+            log_event("link", "capabilities", fw_version=self._capabilities["fw_version"],
+                      mission_int=self._capabilities.get("mission_int"),
+                      command_int=self._capabilities.get("command_int"))
+            return
+
         with self._telem_lock:
             if msg_type == "GLOBAL_POSITION_INT":
                 self.telemetry.lat = msg.lat / 1e7
@@ -397,6 +607,16 @@ class VehicleManager:
                     log_event("vehicle", "sensor_health", level="WARN" if errors else "INFO",
                               unhealthy=errors)
                 self.telemetry.sensor_errors = errors
+
+            elif msg_type == "BATTERY_STATUS":
+                # Richer battery data than SYS_STATUS: charge consumed this flight
+                # and a (often better) remaining estimate. -1 means "unknown".
+                consumed = getattr(msg, "current_consumed", -1)
+                if consumed is not None and consumed >= 0:
+                    self.telemetry.battery_consumed_mah = float(consumed)
+                rem = getattr(msg, "battery_remaining", -1)
+                if rem is not None and rem >= 0:
+                    self.telemetry.battery_level = rem
 
             elif msg_type == "EKF_STATUS_REPORT":
                 flags = msg.flags
@@ -455,6 +675,13 @@ class VehicleManager:
         now = time.time()
         d["last_heartbeat_age"] = (round(now - self._last_heartbeat, 2)
                                    if self.connected and self._last_heartbeat else None)
+        # M2: connection state machine + link identity + capabilities.
+        d["link_state"] = self._link_state
+        d["link_level"] = self._link_level(d["last_heartbeat_age"])
+        d["gcs_sysid"] = self._sysid
+        d["vehicle_sysid"] = self._vehicle_sysid
+        d["capabilities"] = self._capabilities
+        d["msgs_filtered"] = self._msgs_filtered
         # Link quality: fraction of expected 1Hz vehicle heartbeats actually
         # received over the last 10 s (window shrinks right after connect so a
         # fresh link isn't reported as degraded).
@@ -473,8 +700,13 @@ class VehicleManager:
         log_event("link", "link_lost", level="ERROR",
                   last_heartbeat_age=round(time.time() - self._last_heartbeat, 2),
                   will_reconnect=bool(self._auto_reconnect and self._conn_params))
+        self._set_state(LinkState.LOST, level="ERROR")
         self._running = False
         self.connected = False
+        # Drop the vehicle identity lock — a reconnect re-acquires it from the
+        # next heartbeat (which may be a different vehicle on the same string).
+        self._vehicle_sysid = None
+        self._vehicle_compid = None
         self._close_log()
         try:
             if self.connection:

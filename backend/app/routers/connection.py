@@ -49,4 +49,9 @@ async def connection_status():
         "connected": vehicle_manager.connected,
         "connection_string": vehicle_manager.connection_string,
         "reconnecting": vehicle_manager.reconnecting,
+        # M2: connection state machine + link identity.
+        "link_state": vehicle_manager._link_state,
+        "gcs_sysid": vehicle_manager._sysid,
+        "vehicle_sysid": vehicle_manager._vehicle_sysid,
+        "capabilities": vehicle_manager._capabilities,
     }
