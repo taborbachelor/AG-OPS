@@ -34,20 +34,27 @@ def _require_connected():
         raise HTTPException(400, "Not connected")
 
 
-def _raise_if_unverified(res: dict, what: str):
-    """M1b: set_params echo-verifies every write. If any param the FC didn't
-    confirm, fail loudly with the specifics rather than reporting a fake 'ok' —
-    an operator must never believe a fence/failsafe is set when it isn't."""
-    if not res.get("ok"):
-        failed = res.get("failed") or []
-        results = res.get("results", {})
-        raise HTTPException(502, {
-            "message": f"Vehicle did not confirm {what}: {', '.join(failed) or res.get('error')}",
-            "failed": failed,
-            "results": {n: {"requested": r["requested"], "accepted": r["accepted"],
-                            "error": r.get("error")}
-                        for n, r in results.items() if not r["verified"]},
+def _raise_if_not_applied(res: dict, what: str):
+    """M3: the fence/failsafe is applied atomically (set_params_atomic). Anything
+    but a clean all-verified result fails loudly — a validation reject is a 422,
+    a mid-batch write failure (which rolled the batch back) is a 502 — so the
+    operator never believes a fence/failsafe took when it didn't, and never ends
+    up with a half-applied one."""
+    if res.get("ok"):
+        return
+    if res.get("rejected"):
+        raise HTTPException(422, {
+            "message": f"{what} rejected by validation",
+            "param": res.get("rejected"), "error": res.get("error"),
         })
+    raise HTTPException(502, {
+        "message": f"Vehicle did not confirm {what} ({res.get('failed')}); "
+                   f"batch rolled back",
+        "failed": res.get("failed"),
+        "error": res.get("error"),
+        "rolled_back": res.get("rolled_back", []),
+        "rollback_ok": res.get("rollback_ok"),
+    })
 
 
 @router.get("/geofence")
@@ -68,14 +75,14 @@ def get_geofence():
 @router.post("/geofence")
 def set_geofence(cfg: GeofenceConfig):
     _require_connected()
-    res = vehicle_manager.set_params({
+    res = vehicle_manager.set_params_atomic({
         "FENCE_TYPE": FENCE_TYPE_CIRCLE_ALT,
         "FENCE_RADIUS": cfg.radius,
         "FENCE_ALT_MAX": cfg.alt_max,
         "FENCE_ACTION": cfg.action,
         "FENCE_ENABLE": 1 if cfg.enable else 0,
     })
-    _raise_if_unverified(res, "geofence")
+    _raise_if_not_applied(res, "geofence")
     return {"status": "ok", "verified": True, **cfg.model_dump()}
 
 
@@ -100,7 +107,7 @@ def get_failsafe():
 @router.post("/failsafe")
 def set_failsafe(cfg: FailsafeConfig):
     _require_connected()
-    res = vehicle_manager.set_params({
+    res = vehicle_manager.set_params_atomic({
         "BATT_LOW_VOLT": cfg.batt_low_volt,
         "BATT_FS_LOW_ACT": cfg.batt_low_action,
         "BATT_CRT_VOLT": cfg.batt_crit_volt,
@@ -109,5 +116,5 @@ def set_failsafe(cfg: FailsafeConfig):
         "THR_FAILSAFE": 1 if cfg.rc_enable else 0,
         "FS_LONG_ACTN": cfg.rc_long_action,
     })
-    _raise_if_unverified(res, "failsafe")
+    _raise_if_not_applied(res, "failsafe")
     return {"status": "ok", "verified": True, **cfg.model_dump()}

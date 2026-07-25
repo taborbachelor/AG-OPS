@@ -27,11 +27,12 @@ INT32 = mavutil.mavlink.MAV_PARAM_TYPE_INT32
 class PV:
     """Fake PARAM_VALUE message."""
 
-    def __init__(self, name, value, ptype):
+    def __init__(self, name, value, ptype, index=0, count=1):
         self.param_id = name
         self.param_value = float(value)
         self.param_type = ptype
-        self.param_count = 1
+        self.param_index = index
+        self.param_count = count
 
     def get_type(self):
         return "PARAM_VALUE"
@@ -53,8 +54,15 @@ class FakeMav:
 
     def param_request_read_send(self, sysid, comp, name, index):
         n = self._decode(name)
-        self.calls.append(("param_request_read_send", n))
-        self.conn._emit_current(n)
+        self.calls.append(("param_request_read_send", n or index))
+        if n:
+            self.conn._emit_current(n)          # by name
+        else:
+            self.conn._emit_index(index)        # by index (gap-fill)
+
+    def param_request_list_send(self, sysid, comp):
+        self.calls.append(("param_request_list_send", None))
+        self.conn._emit_list()
 
     def param_set_send(self, sysid, comp, name, value, ptype):
         n = self._decode(name)
@@ -68,22 +76,41 @@ class FakeParamConn:
     store: {name: (value, MAV_PARAM_TYPE)}. Unknown params get no reply (ArduPilot
     ignores them). `transform` models a value the FC clamps/coerces on write.
     `drop_echo_for` drops the spontaneous echo N times (lossy radio) to exercise
-    the read-back fallback."""
+    the read-back fallback. `drop_from_list` omits those indices from the bulk
+    PARAM_VALUE list stream (still answerable by index, for gap-fill)."""
 
     target_system = 1
     target_component = 1
 
-    def __init__(self, store, transform=None, drop_echo_for=None):
+    def __init__(self, store, transform=None, drop_echo_for=None, drop_from_list=None):
         self.store = {k: (float(v), t) for k, (v, t) in store.items()}
         self.transform = transform or {}
         self.drop_echo_for = dict(drop_echo_for or {})
+        self.drop_from_list = set(drop_from_list or ())
+        # Stable index assignment (insertion order), like a real param table.
+        self._names = list(self.store.keys())
         self.mav = FakeMav(self)
         self._outbox = []
 
+    def _index_of(self, name):
+        return self._names.index(name)
+
+    def _pv(self, name):
+        v, t = self.store[name]
+        return PV(name, v, t, index=self._index_of(name), count=len(self._names))
+
     def _emit_current(self, name):
         if name in self.store:
-            v, t = self.store[name]
-            self._outbox.append(PV(name, v, t))
+            self._outbox.append(self._pv(name))
+
+    def _emit_index(self, index):
+        if 0 <= index < len(self._names):
+            self._outbox.append(self._pv(self._names[index]))
+
+    def _emit_list(self):
+        for i, name in enumerate(self._names):
+            if i not in self.drop_from_list:
+                self._outbox.append(self._pv(name))
 
     def _apply_set(self, name, value, ptype):
         if name not in self.store:
@@ -95,7 +122,7 @@ class FakeParamConn:
         if drops > 0:
             self.drop_echo_for[name] = drops - 1
             return  # echo lost on the wire this time
-        self._outbox.append(PV(name, float(stored), t))
+        self._outbox.append(self._pv(name))
 
     def recv_match(self, type=None, blocking=False, timeout=None):
         if self._outbox:
@@ -140,11 +167,12 @@ class SingleParamTests(unittest.TestCase):
         self.assertTrue(vm.set_param("FS_GCS_ENABL", 1)["verified"])
 
     def test_clamped_value_is_not_falsely_verified(self):
-        # FC clamps the write to 200 — operator asked for 999999; must NOT verify.
+        # FC stores 200 though we asked for 2500 (an in-range value, so M3
+        # validation lets it through) — the mismatch must NOT verify.
         conn = FakeParamConn({"FENCE_RADIUS": (300.0, REAL32)},
                              transform={"FENCE_RADIUS": 200.0})
         vm = make_vm(conn)
-        r = vm.set_param("FENCE_RADIUS", 999999.0)
+        r = vm.set_param("FENCE_RADIUS", 2500.0)
         self.assertFalse(r["verified"])
         self.assertFalse(r["ok"])
         self.assertAlmostEqual(r["accepted"], 200.0)
@@ -192,7 +220,7 @@ class BatchParamTests(unittest.TestCase):
             {"FENCE_RADIUS": (300.0, REAL32), "FENCE_ENABLE": (0, INT8)},
             transform={"FENCE_RADIUS": 200.0})  # radius clamped -> unverified
         vm = make_vm(conn)
-        res = vm.set_params({"FENCE_RADIUS": 999999.0, "FENCE_ENABLE": 1})
+        res = vm.set_params({"FENCE_RADIUS": 2500.0, "FENCE_ENABLE": 1})
         self.assertFalse(res["ok"])
         self.assertEqual(res["failed"], ["FENCE_RADIUS"])
         self.assertTrue(res["results"]["FENCE_ENABLE"]["verified"])

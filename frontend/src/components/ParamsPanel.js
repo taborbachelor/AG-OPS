@@ -15,15 +15,25 @@ function ParamsPanel({ connected }) {
 
   const flash = (m) => { setNote(m); setTimeout(() => setNote(''), 4000); };
 
+  // M3: the backend syncs the full table into a cache on connect, so try the
+  // instant cached read first; only fall back to a fresh (link-pausing) sync if
+  // the cache is empty (sync still running or not yet done).
   const download = async () => {
     setBusy(true);
-    setNote('Downloading parameter table — telemetry pauses briefly…');
     try {
-      const r = await fetch(`${API}/vehicle/params`);
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
-      setParams(d.params);
-      flash(`${d.count} parameters loaded`);
+      let r = await fetch(`${API}/vehicle/params?cached=true`);
+      let d = await r.json();
+      if (r.ok && d.count > 0) {
+        setParams(d.params);
+        flash(`${d.count} parameters (cached)`);
+      } else {
+        setNote('Downloading parameter table — telemetry pauses briefly…');
+        r = await fetch(`${API}/vehicle/params`);
+        d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        setParams(d.params);
+        flash(`${d.count} parameters loaded`);
+      }
     } catch (e) {
       flash(`Download failed: ${e.message}`);
     }
@@ -40,6 +50,11 @@ function ParamsPanel({ connected }) {
         body: JSON.stringify({ name, value: v }),
       });
       const body = await r.json().catch(() => ({}));
+      if (r.status === 422) {
+        // M3: rejected by validation — never sent. Show why.
+        flash(`${name} rejected: ${body?.detail?.error || 'invalid value'}`);
+        return;
+      }
       if (!r.ok) {
         // M1b: the FC didn't confirm the write. Reflect the value it actually
         // holds (if it echoed one) and don't pretend the requested value stuck.

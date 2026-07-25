@@ -10,6 +10,7 @@ from pymavlink import mavutil
 
 from app.eventlog import log_event
 from app import config
+from app import param_meta
 
 # Flight logs live next to the app package.
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -203,6 +204,17 @@ class VehicleManager:
         self._link_degraded_after = 3.0
         # AUTOPILOT_VERSION-derived capabilities (fetched on connect), or None.
         self._capabilities = None
+        # --- M3: parameter engine ---
+        # Full parameter table cache: name -> {value, type, index}. Populated by
+        # the on-connect sync and kept live by every verified write. Guarded by
+        # its own lock (API reads it while the sync thread fills it).
+        self._param_cache = {}
+        self._param_count = None
+        self._param_lock = threading.Lock()
+        self._param_sync_thread = None
+        # Progress for the UI: {"syncing", "received", "total", "synced"}.
+        self._param_sync = {"syncing": False, "received": 0, "total": None,
+                            "synced": False}
 
     def _set_state(self, new_state: str, level: str = "INFO", **details):
         """Transition the connection state machine and log the transition.
@@ -281,6 +293,11 @@ class VehicleManager:
                 self._statustext.clear()
             self._hb_times.clear()
             self._capabilities = None
+            with self._param_lock:
+                self._param_cache = {}
+                self._param_count = None
+                self._param_sync = {"syncing": False, "received": 0,
+                                    "total": None, "synced": False}
             self.home_lat = self.home_lon = self.home_alt = 0.0
             self.connected = True
             self.connection_string = connection_string
@@ -304,6 +321,10 @@ class VehicleManager:
             # VERSION reply is routed to _handle_msg — not swallowed by the
             # align's recv loop (which discards non-PARAM_VALUE messages).
             self._request_capabilities(conn)
+            # M3: full parameter sync in the background (the SYNCHRONIZING work).
+            # Decoupled from READY so a slow-radio download never delays flight
+            # readiness; progress is reported in snapshot()['param_sync'].
+            self.sync_params()
             self._set_state(LinkState.READY, vehicle_sysid=conn.target_system,
                             gcs_sysid=self._sysid)
             log_event("link", "connected", connection=connection_string, baud=baud,
@@ -682,6 +703,8 @@ class VehicleManager:
         d["vehicle_sysid"] = self._vehicle_sysid
         d["capabilities"] = self._capabilities
         d["msgs_filtered"] = self._msgs_filtered
+        with self._param_lock:
+            d["param_sync"] = dict(self._param_sync)
         # Link quality: fraction of expected 1Hz vehicle heartbeats actually
         # received over the last 10 s (window shrinks right after connect so a
         # fresh link isn't reported as degraded).
@@ -1044,9 +1067,12 @@ class VehicleManager:
         if cur is not None:
             param_type = int(cur.param_type)
             previous = cur.param_value
+            self._cache_put(name, cur.param_value, param_type,
+                            getattr(cur, "param_index", None))
         else:
-            param_type = mavutil.mavlink.MAV_PARAM_TYPE_REAL32
-            previous = None
+            # Fall back to the cached type if the vehicle didn't answer the read.
+            param_type = self.cached_type(name) or mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+            previous = self.cached_value(name)
 
         accepted = None
         for _ in range(max(1, attempts)):
@@ -1065,6 +1091,9 @@ class VehicleManager:
                     break
 
         verified = self._param_close(accepted, value, param_type)
+        if accepted is not None:
+            # Keep the cache truthful with whatever the FC actually stored.
+            self._cache_put(name, accepted, param_type)
         result = {
             "ok": verified,
             "name": name,
@@ -1080,10 +1109,50 @@ class VehicleManager:
                 else f"vehicle stored {accepted}, not the requested {value}")
         return result
 
+    # --- M3: parameter cache & validation ---
+    def _cache_put(self, name, value, ptype=None, index=None):
+        """Insert/update one param in the cache, preserving type/index when a
+        later update (e.g. a set echo) doesn't carry them."""
+        with self._param_lock:
+            entry = self._param_cache.get(name, {})
+            entry["value"] = value
+            if ptype is not None:
+                entry["type"] = int(ptype)
+            if index is not None and index >= 0:
+                entry["index"] = int(index)
+            self._param_cache[name] = entry
+
+    def cached_type(self, name):
+        with self._param_lock:
+            e = self._param_cache.get(name)
+            return e.get("type") if e else None
+
+    def cached_value(self, name):
+        with self._param_lock:
+            e = self._param_cache.get(name)
+            return e.get("value") if e else None
+
+    def get_cached_params(self) -> dict:
+        """The parameter cache as {name: value} — served without touching the
+        link. Empty until the on-connect sync has run."""
+        with self._param_lock:
+            return {k: v.get("value") for k, v in self._param_cache.items()}
+
+    def _validate_write(self, name, value):
+        """(ok, error) for a proposed write, using the cached MAV_PARAM_TYPE when
+        we have it so int/range rules apply. Keeps invalid values off the wire."""
+        return param_meta.validate(name, value, self.cached_type(name))
+
     def set_param(self, name: str, value: float) -> dict:
-        """Write a single parameter with echo verification. Returns a result
-        dict whose `verified`/`accepted` fields report what the FC actually did
-        — never a blind success."""
+        """Write a single parameter with metadata validation + echo verification.
+        Returns a result dict whose `verified`/`accepted` fields report what the
+        FC actually did — never a blind success."""
+        ok, err = self._validate_write(name, value)
+        if not ok:
+            log_event("param", "set_rejected", level="WARN", name=name,
+                      requested=value, error=err)
+            return {"ok": False, "name": name, "requested": float(value),
+                    "accepted": None, "verified": False, "rejected": True, "error": err}
         if not self.connection:
             return {"ok": False, "name": name, "requested": float(value),
                     "accepted": None, "verified": False, "error": "not connected"}
@@ -1092,42 +1161,99 @@ class VehicleManager:
             result = self._set_param_locked(conn, name, value)
         log_event("param", "set", name=result["name"], requested=result["requested"],
                   accepted=result["accepted"], verified=result["verified"],
-                  error=result.get("error"))
+                  previous=result.get("previous"), error=result.get("error"))
         return result
 
+    def _absorb_param_value(self, msg):
+        """Record one PARAM_VALUE into the cache and return (name, index)."""
+        pid = msg.param_id
+        if isinstance(pid, bytes):
+            pid = pid.decode(errors="ignore")
+        name = pid.rstrip("\x00")
+        idx = getattr(msg, "param_index", None)
+        self._cache_put(name, msg.param_value, msg.param_type, idx)
+        return name, idx
+
     def get_all_params(self, timeout: float = 25.0) -> dict:
-        """Fetch the vehicle's full parameter table (several hundred entries).
-        Holds the link lock for the duration, so telemetry pauses briefly —
-        this is a ground/config activity. PARAM_VALUE traffic counts as proof
-        of life (and we keep heartbeating) so neither watchdog fires."""
+        """Full parameter sync into the cache, then return {name: value}.
+
+        Requests the whole table, then RE-REQUESTS any indices the stream missed
+        (a dropped PARAM_VALUE on a lossy radio) individually by index — so the
+        cache ends up complete instead of silently short a few params. Holds the
+        link lock (telemetry pauses briefly); PARAM_VALUE traffic keeps both
+        watchdogs fed."""
         if not self.connection:
             return {}
         conn = self.connection
-        params = {}
+        got = {}          # index -> name, for missing-index detection
         total = None
+        with self._param_lock:
+            self._param_sync = {"syncing": True, "received": 0, "total": None,
+                                "synced": False}
         with self._link_lock:
             with self._send_lock:
                 conn.mav.param_request_list_send(conn.target_system, conn.target_component)
             start = time.time()
             last_rx = start
             while time.time() - start < timeout:
-                # _recv_blocking keeps our 1Hz GCS heartbeat going and bumps
-                # the link watchdog on any HEARTBEAT that passes by.
                 msg = self._recv_blocking(conn, "PARAM_VALUE", 2)
                 if msg is None:
                     if time.time() - last_rx > 4:
-                        break  # stream dried up — return what we have
+                        break  # stream dried up — fall through to gap-fill
                     continue
                 last_rx = time.time()
                 self._last_heartbeat = last_rx  # param traffic = link alive
-                pid = msg.param_id
-                if isinstance(pid, bytes):
-                    pid = pid.decode(errors="ignore")
-                params[pid.rstrip("\x00")] = msg.param_value
+                name, idx = self._absorb_param_value(msg)
                 total = msg.param_count or total
-                if total and len(params) >= total:
+                # Track only real table indices. ArduPilot sends param_index=65535
+                # (the "not part of the list" sentinel) on echoes/individual reads
+                # — those must not inflate the received count past total.
+                if idx is not None and 0 <= idx < (total or idx + 1):
+                    got[idx] = name
+                with self._param_lock:
+                    self._param_sync.update(received=len(got) or len(self._param_cache),
+                                            total=total)
+                if total and len(got) >= total:
                     break
-        return params
+
+            # Gap-fill: re-request any indices [0, total) we never received.
+            if total:
+                for _round in range(3):
+                    missing = [i for i in range(total) if i not in got]
+                    if not missing:
+                        break
+                    log_event("param", "sync_gapfill", level="INFO",
+                              missing=len(missing), round=_round)
+                    for i in missing:
+                        with self._send_lock:
+                            conn.mav.param_request_read_send(
+                                conn.target_system, conn.target_component, b"", i)
+                        msg = self._recv_blocking(conn, "PARAM_VALUE", 1.5)
+                        if msg is None:
+                            continue
+                        self._last_heartbeat = time.time()
+                        name, idx = self._absorb_param_value(msg)
+                        if idx is not None and 0 <= idx < total:
+                            got[idx] = name
+
+        self._param_count = total
+        with self._param_lock:
+            n = len(self._param_cache)
+            self._param_sync = {"syncing": False, "received": n, "total": total,
+                                "synced": bool(total and len(got) >= total)}
+        log_event("param", "sync_complete", received=len(got), total=total,
+                  cached=n)
+        return self.get_cached_params()
+
+    def sync_params(self):
+        """Full param sync in a background thread (used on connect). Safe to call
+        again; a sync already in flight is left to finish."""
+        t = self._param_sync_thread
+        if t is not None and t.is_alive():
+            return
+        self._param_sync_thread = threading.Thread(
+            target=self.get_all_params, daemon=True)
+        self._param_sync_thread.start()
 
     def get_params(self, names: list[str]) -> dict:
         """Fetch several named parameters, matching each reply by param_id so we
@@ -1155,16 +1281,25 @@ class VehicleManager:
         return result
 
     def set_params(self, params: dict) -> dict:
-        """Set several parameters, each echo-verified against the vehicle. One
-        link-lock transaction for the whole batch. Returns per-param results and
-        an overall `ok` that is True only when every write was confirmed — so
-        SafetyPanel can no longer claim a fence/failsafe took when it didn't."""
+        """Set several parameters, each validated + echo-verified against the
+        vehicle. One link-lock transaction for the whole batch. Returns per-param
+        results and an overall `ok` that is True only when every write was
+        confirmed — so SafetyPanel can no longer claim a fence/failsafe took when
+        it didn't."""
         if not self.connection:
             return {"ok": False, "error": "not connected", "results": {}}
+        # Validate everything up front; a value that fails is reported without
+        # being sent (the others still go).
         conn = self.connection
         results = {}
         with self._link_lock:
             for name, value in params.items():
+                ok, err = self._validate_write(name, value)
+                if not ok:
+                    results[name] = {"ok": False, "name": name,
+                                     "requested": float(value), "accepted": None,
+                                     "verified": False, "rejected": True, "error": err}
+                    continue
                 results[name] = self._set_param_locked(conn, name, value)
         failed = [n for n, r in results.items() if not r["verified"]]
         log_event("param", "set_batch",
@@ -1178,6 +1313,57 @@ class VehicleManager:
             "failed": failed,
             "results": results,
         }
+
+    def set_params_atomic(self, params: dict) -> dict:
+        """All-or-nothing batch set. Validate everything first; if any value is
+        invalid, send nothing. Otherwise apply in order, and if any write fails
+        verification, ROLL BACK the ones that already took to their previous
+        values — so a half-applied fence/failsafe never survives. One link-lock
+        transaction end to end."""
+        if not self.connection:
+            return {"ok": False, "error": "not connected", "results": {}}
+        # Pre-flight validation: reject the whole batch if anything is invalid,
+        # before a single PARAM_SET goes out.
+        for name, value in params.items():
+            ok, err = self._validate_write(name, value)
+            if not ok:
+                log_event("param", "atomic_rejected", level="WARN", name=name, error=err)
+                return {"ok": False, "error": f"{name}: {err}", "rejected": name,
+                        "results": {}}
+
+        conn = self.connection
+        results, applied = {}, []
+        with self._link_lock:
+            for name, value in params.items():
+                r = self._set_param_locked(conn, name, value)
+                results[name] = r
+                if r["verified"]:
+                    applied.append((name, r.get("previous")))
+                else:
+                    # One failed — undo the ones already applied (reverse order).
+                    rolled = self._rollback_locked(conn, applied)
+                    log_event("param", "atomic_rollback", level="ERROR",
+                              failed=name, error=r.get("error"),
+                              rolled_back=[n for n, _ in applied], rollback_ok=rolled)
+                    return {"ok": False, "failed": name, "error": r.get("error"),
+                            "rolled_back": [n for n, _ in applied],
+                            "rollback_ok": rolled, "results": results}
+        log_event("param", "atomic_ok", params=list(params))
+        return {"ok": True, "count": len(params), "results": results}
+
+    def _rollback_locked(self, conn, applied):
+        """Restore params to their captured previous values (link lock held).
+        Returns True only if every restore verified. A previous value of None
+        (param wasn't in cache and the FC didn't echo a prior) can't be restored
+        and counts as a failed rollback."""
+        ok = True
+        for name, prev in reversed(applied):
+            if prev is None:
+                ok = False
+                continue
+            r = self._set_param_locked(conn, name, prev)
+            ok = ok and r["verified"]
+        return ok
 
     def send_rc_override(self, channels: list) -> bool:
         """Push RC channel values (PWM µs) into the vehicle as RC_CHANNELS_OVERRIDE

@@ -111,15 +111,30 @@ def land():
 
 
 @router.get("/params")
-def get_all_params():
-    """Full parameter table — takes a few seconds; telemetry pauses while the
-    link is dedicated to the transfer (ground/config activity)."""
+def get_all_params(cached: bool = False):
+    """Full parameter table. `cached=true` returns the M3 cache instantly (from
+    the on-connect sync) without touching the link; otherwise it runs a fresh
+    sync (a few seconds; telemetry pauses while the link is dedicated to it)."""
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
+    if cached:
+        params = vehicle_manager.get_cached_params()
+        return {"params": params, "count": len(params), "cached": True,
+                "sync": vehicle_manager._param_sync}
     params = vehicle_manager.get_all_params()
     if not params:
         raise HTTPException(504, "Parameter download timed out")
-    return {"params": params, "count": len(params)}
+    return {"params": params, "count": len(params), "cached": False}
+
+
+@router.post("/params/sync")
+def sync_params():
+    """Kick off a fresh full parameter sync in the background. Poll progress via
+    telemetry's `param_sync` field."""
+    if not vehicle_manager.connected:
+        raise HTTPException(400, "Not connected")
+    vehicle_manager.sync_params()
+    return {"status": "syncing", "sync": vehicle_manager._param_sync}
 
 
 class ParamUpdate(BaseModel):
@@ -132,6 +147,14 @@ def set_param(req: ParamUpdate):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     result = vehicle_manager.set_param(req.name, req.value)
+    # Metadata validation (M3): an out-of-range / wrong-type value never went to
+    # the vehicle — reject it as a bad request, distinct from a link failure.
+    if result.get("rejected"):
+        raise HTTPException(422, {
+            "message": f"{req.name} rejected by validation",
+            "param": req.name, "requested": result["requested"],
+            "error": result.get("error"),
+        })
     # Echo-verified (M1b): surface what the FC actually stored, and fail loudly
     # if it didn't take — never report a blind success.
     if not result["verified"]:
