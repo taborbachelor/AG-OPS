@@ -26,3 +26,4 @@ sitl/logs/
 sitl/mav.parm
 sitl/*.tlog
 sitl/terrain/
+sitl/_scenario/

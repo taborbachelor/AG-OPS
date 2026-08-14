@@ -55,6 +55,11 @@ PARAM_RANGES = {
     "WP_RADIUS": (1, 32767),
     "MAV_GCS_SYSID": (1, 255),
     "SYSID_MYGCS": (1, 255),
+    # SITL fault injection (sim router, M4) — bounded so a typo'd injection
+    # can't write nonsense to a real vehicle that happens to have SIM_* params.
+    "SIM_GPS_DISABLE": (0, 1),
+    "SIM_GPS1_ENABLE": (0, 1),
+    "SIM_BATT_VOLTAGE": (0, 100),
 }
 
 

@@ -215,6 +215,11 @@ class VehicleManager:
         # Progress for the UI: {"syncing", "received", "total", "synced"}.
         self._param_sync = {"syncing": False, "received": 0, "total": None,
                             "synced": False}
+        # --- M4: scenario-harness fault injection ---
+        # When True we stop sending our 1Hz GCS heartbeat so ArduPilot's
+        # GCS-loss failsafe fires on demand: the vehicle believes the ground
+        # station vanished while our RX side keeps observing the reaction.
+        self._suppress_gcs_hb = False
 
     def _set_state(self, new_state: str, level: str = "INFO", **details):
         """Transition the connection state machine and log the transition.
@@ -299,6 +304,9 @@ class VehicleManager:
                 self._param_sync = {"syncing": False, "received": 0,
                                     "total": None, "synced": False}
             self.home_lat = self.home_lon = self.home_alt = 0.0
+            # A fresh link must never start with a silenced GCS heartbeat left
+            # over from a fault-injection scenario — the vehicle would RTL.
+            self._suppress_gcs_hb = False
             self.connected = True
             self.connection_string = connection_string
             self._last_heartbeat = time.time()
@@ -444,6 +452,8 @@ class VehicleManager:
         """Send our 1Hz GCS heartbeat if one is due. ArduPilot's GCS-loss
         failsafe (FS_GCS_ENABL) triggers RTL if the ground station goes silent,
         so every long-running link transaction must keep calling this."""
+        if self._suppress_gcs_hb:
+            return
         if time.time() - self._last_hb_sent > 1.0:
             try:
                 with self._send_lock:
@@ -453,6 +463,19 @@ class VehicleManager:
                 self._last_hb_sent = time.time()
             except Exception:
                 pass
+
+    def set_gcs_heartbeat_suppressed(self, suppressed: bool):
+        """M4 fault injection: silence/restore our 1Hz GCS heartbeat. With
+        FS_GCS_ENABL set on the vehicle, suppression reproduces a ground-station
+        loss exactly (FS_SHORT/FS_LONG escalate to RTL) while our receive path
+        stays up so the harness can watch the vehicle react. Never persists
+        across connections — connect() clears it."""
+        if self._suppress_gcs_hb == bool(suppressed):
+            return
+        self._suppress_gcs_hb = bool(suppressed)
+        log_event("sim", "gcs_heartbeat_suppressed" if suppressed
+                  else "gcs_heartbeat_restored",
+                  level="WARN" if suppressed else "INFO")
 
     def _recv_blocking(self, conn, types, timeout: float):
         """Wait up to `timeout` seconds for a message whose type is in `types`.
@@ -703,6 +726,9 @@ class VehicleManager:
         d["vehicle_sysid"] = self._vehicle_sysid
         d["capabilities"] = self._capabilities
         d["msgs_filtered"] = self._msgs_filtered
+        # M4: surfaced so the harness/UI can tell an injected GCS-loss from a
+        # real one.
+        d["gcs_hb_suppressed"] = self._suppress_gcs_hb
         with self._param_lock:
             d["param_sync"] = dict(self._param_sync)
         # Link quality: fraction of expected 1Hz vehicle heartbeats actually
@@ -1190,6 +1216,21 @@ class VehicleManager:
         with self._param_lock:
             self._param_sync = {"syncing": True, "received": 0, "total": None,
                                 "synced": False}
+        try:
+            return self._get_all_params_locked(conn, got, timeout)
+        except Exception as e:
+            # Found live by the M4 link-watchdog scenario: the vehicle dying
+            # mid-sync (socket reset) killed this thread with the progress
+            # stuck at syncing=True forever. A failed sync must end visibly.
+            with self._param_lock:
+                self._param_sync = {"syncing": False,
+                                    "received": len(self._param_cache),
+                                    "total": total, "synced": False}
+            log_event("param", "sync_failed", level="WARN", error=str(e))
+            return self.get_cached_params()
+
+    def _get_all_params_locked(self, conn, got: dict, timeout: float) -> dict:
+        total = None
         with self._link_lock:
             with self._send_lock:
                 conn.mav.param_request_list_send(conn.target_system, conn.target_component)

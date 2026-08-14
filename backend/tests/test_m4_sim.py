@@ -1,0 +1,200 @@
+"""M4 unit tests: sim-router fault injection + GCS heartbeat suppression.
+
+Pure-fake coverage of the new surface so `pytest` (no SITL) still proves the
+plumbing; the flight-truth of each fault lives in tests/sitl/ scenarios.
+"""
+import unittest
+from unittest import mock
+
+from fastapi.testclient import TestClient
+
+from app import param_meta
+from app.main import app
+from app.routers import sim
+from app.vehicle_manager import VehicleManager, vehicle_manager
+
+
+class _RecMav:
+    def __init__(self):
+        self.heartbeats = 0
+
+    def heartbeat_send(self, *a, **k):
+        self.heartbeats += 1
+
+
+class _Conn:
+    def __init__(self):
+        self.mav = _RecMav()
+
+
+class TestHeartbeatSuppression(unittest.TestCase):
+    def test_suppression_stops_and_restores_gcs_heartbeat(self):
+        vm = VehicleManager()
+        conn = _Conn()
+        vm._last_hb_sent = 0
+        vm._send_gcs_heartbeat(conn)
+        self.assertEqual(conn.mav.heartbeats, 1)
+
+        vm.set_gcs_heartbeat_suppressed(True)
+        vm._last_hb_sent = 0
+        vm._send_gcs_heartbeat(conn)
+        self.assertEqual(conn.mav.heartbeats, 1, "suppressed heartbeat was sent")
+        self.assertTrue(vm.snapshot()["gcs_hb_suppressed"])
+
+        vm.set_gcs_heartbeat_suppressed(False)
+        vm._last_hb_sent = 0
+        vm._send_gcs_heartbeat(conn)
+        self.assertEqual(conn.mav.heartbeats, 2)
+        self.assertFalse(vm.snapshot()["gcs_hb_suppressed"])
+
+
+class TestSimSpawnConfig(unittest.TestCase):
+    def test_build_args_carries_speedup(self):
+        args = sim._build_args(5.0)
+        i = args.index("--speedup")
+        self.assertEqual(args[i + 1], "5.0")
+        self.assertIn("-M", args)
+
+    def test_resolve_cwd_default_is_binary_dir(self):
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            exe = pathlib.Path(td) / "ArduPlane.exe"
+            exe.write_bytes(b"")
+            self.assertEqual(sim._resolve_cwd(exe, fresh_eeprom=False), exe.parent)
+
+    def test_resolve_cwd_fresh_eeprom_isolated_and_wiped(self):
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            exe = pathlib.Path(td) / "ArduPlane.exe"
+            exe.write_bytes(b"")
+            demo_eeprom = exe.parent / "eeprom.bin"
+            demo_eeprom.write_bytes(b"demo state")
+            scratch = exe.parent / sim.SCENARIO_DIR_NAME
+            scratch.mkdir()
+            (scratch / "eeprom.bin").write_bytes(b"stale scenario state")
+
+            cwd = sim._resolve_cwd(exe, fresh_eeprom=True)
+            self.assertEqual(cwd, scratch)
+            self.assertFalse((scratch / "eeprom.bin").exists(),
+                             "stale scenario eeprom must be wiped")
+            self.assertEqual(demo_eeprom.read_bytes(), b"demo state",
+                             "demo eeprom next to the binary must never be touched")
+
+
+class TestStartEndpointCompat(unittest.TestCase):
+    def test_start_with_no_body_still_works(self):
+        # The UI's Simulator button has always POSTed /api/sim/start with no
+        # body — the M4 options must stay strictly additive.
+        client = TestClient(app)
+        with mock.patch.object(sim, "_start_blocking",
+                               return_value={"status": "started"}) as sb:
+            r = client.post("/api/sim/start")
+        self.assertEqual(r.status_code, 200)
+        req = sb.call_args.args[0]
+        self.assertEqual((req.speedup, req.fresh_eeprom), (1.0, False))
+
+
+class TestFaultEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+        sim._reset_faults()
+
+    def tearDown(self):
+        sim._reset_faults()
+
+    def test_fault_requires_vehicle(self):
+        with mock.patch.object(vehicle_manager, "connected", False):
+            r = self.client.post("/api/sim/fault", json={"fault": "gps"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_gps_fault_uses_new_param_name_when_present(self):
+        writes = []
+
+        def fake_set(name, value):
+            writes.append((name, value))
+            return {"verified": True, "accepted": value, "requested": value}
+
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "cached_type",
+                               side_effect=lambda n: 2 if n == "SIM_GPS1_ENABLE" else None), \
+             mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
+            r = self.client.post("/api/sim/fault",
+                                 json={"fault": "gps", "enable": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(writes, [("SIM_GPS1_ENABLE", 0.0)])
+
+    def test_gps_fault_falls_back_to_legacy_param(self):
+        writes = []
+
+        def fake_set(name, value):
+            writes.append((name, value))
+            return {"verified": True, "accepted": value, "requested": value}
+
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "cached_type",
+                               side_effect=lambda n: 4 if n == "SIM_GPS_DISABLE" else None), \
+             mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
+            r = self.client.post("/api/sim/fault",
+                                 json={"fault": "gps", "enable": False})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(writes, [("SIM_GPS_DISABLE", 0.0)])  # healthy value
+
+    def test_battery_fault_restores_previous_voltage(self):
+        writes = []
+
+        def fake_set(name, value):
+            writes.append((name, value))
+            return {"verified": True, "accepted": value, "requested": value}
+
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "cached_value",
+                               side_effect=lambda n: 12.4 if n == "SIM_BATT_VOLTAGE" else None), \
+             mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
+            r1 = self.client.post("/api/sim/fault",
+                                  json={"fault": "battery", "enable": True,
+                                        "value": 10.2})
+            r2 = self.client.post("/api/sim/fault",
+                                  json={"fault": "battery", "enable": False})
+        self.assertEqual((r1.status_code, r2.status_code), (200, 200))
+        self.assertEqual(writes, [("SIM_BATT_VOLTAGE", 10.2),
+                                  ("SIM_BATT_VOLTAGE", 12.4)])
+
+    def test_unverified_fault_write_fails_loudly(self):
+        def fake_set(name, value):
+            return {"verified": False, "accepted": None, "requested": value,
+                    "error": "no PARAM_VALUE echo from vehicle"}
+
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "cached_type", return_value=2), \
+             mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
+            r = self.client.post("/api/sim/fault", json={"fault": "gps"})
+        self.assertEqual(r.status_code, 502)
+
+    def test_gcs_link_fault_toggles_suppression(self):
+        with mock.patch.object(vehicle_manager, "connected", True):
+            r = self.client.post("/api/sim/fault",
+                                 json={"fault": "gcs_link", "enable": True})
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(vehicle_manager.snapshot()["gcs_hb_suppressed"])
+            status = self.client.get("/api/sim/status").json()
+            self.assertTrue(status["faults"]["gcs_link"])
+            r = self.client.post("/api/sim/fault",
+                                 json={"fault": "gcs_link", "enable": False})
+            self.assertEqual(r.status_code, 200)
+            self.assertFalse(vehicle_manager.snapshot()["gcs_hb_suppressed"])
+
+
+class TestSimParamRanges(unittest.TestCase):
+    def test_fault_params_are_range_guarded(self):
+        ok, _ = param_meta.validate("SIM_BATT_VOLTAGE", 999)
+        self.assertFalse(ok)
+        ok, _ = param_meta.validate("SIM_GPS1_ENABLE", 2)
+        self.assertFalse(ok)
+        ok, _ = param_meta.validate("SIM_GPS_DISABLE", 1)
+        self.assertTrue(ok)
+
+
+if __name__ == "__main__":
+    unittest.main()
