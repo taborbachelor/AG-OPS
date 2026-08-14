@@ -10,7 +10,9 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from app.guardian import GuardianConfig, config_to_dict
 from app.main import app
+from app.vehicle_manager import vehicle_manager
 
 
 def _sim_stopped(client, timeout: float = 15.0) -> bool:
@@ -40,6 +42,9 @@ def client():
                 c.post("/api/sim/stop")
             except Exception:
                 pass
+            # Scenarios share one vehicle_manager singleton per pytest process:
+            # a scenario that tuned the guardian must not leak into the next.
+            vehicle_manager.set_guardian_config(config_to_dict(GuardianConfig()))
             # SITL also exits on client disconnect; give the port time to free.
             _sim_stopped(c)
             time.sleep(1.0)

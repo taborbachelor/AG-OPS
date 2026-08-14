@@ -1,5 +1,8 @@
+from typing import Literal, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from app.guardian import config_to_dict
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
@@ -102,6 +105,49 @@ def get_failsafe():
         "rc_long_action": int(p.get("FS_LONG_ACTN", 1)),
         "raw": p,
     }
+
+
+# --- Guardian: GCS-side failsafe monitors + emergency state machine ---
+# All fields optional: a POST updates only what it names (partial config).
+
+class GuardianConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    gps_min_sats: Optional[int] = Field(None, ge=0, le=30)
+    gps_action: Optional[Literal["warn", "rtl"]] = None
+    batt_warn_volt: Optional[float] = Field(None, ge=0, le=100)
+    batt_rtl_volt: Optional[float] = Field(None, ge=0, le=100)
+    batt_action: Optional[Literal["warn", "rtl"]] = None
+    batt_low_s: Optional[float] = Field(None, ge=0, le=120)
+    link_warn_level: Optional[Literal["degraded", "poor", "critical"]] = None
+    pack_capacity_mah: Optional[float] = Field(None, ge=0, le=200000)
+    margin_reserve_s: Optional[float] = Field(None, ge=0, le=3600)
+    margin_action: Optional[Literal["warn", "rtl"]] = None
+    margin_low_s: Optional[float] = Field(None, ge=0, le=120)
+    margin_min_speed: Optional[float] = Field(None, ge=1, le=100)
+
+
+@router.get("/guardian")
+def get_guardian():
+    """Guardian config + live verdicts. Works without a vehicle (config is
+    GCS-side); state is meaningful once connected."""
+    return {"config": config_to_dict(vehicle_manager.guardian_config),
+            "state": vehicle_manager.guardian_state()}
+
+
+@router.post("/guardian")
+def set_guardian(update: GuardianConfigUpdate):
+    updates = {k: v for k, v in update.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(422, "no guardian settings provided")
+    # The two-threshold pair must stay ordered whichever half is updated.
+    cfg = vehicle_manager.guardian_config
+    warn = updates.get("batt_warn_volt", cfg.batt_warn_volt)
+    rtl = updates.get("batt_rtl_volt", cfg.batt_rtl_volt)
+    if rtl > warn:
+        raise HTTPException(422, f"batt_rtl_volt ({rtl}) must not exceed "
+                                 f"batt_warn_volt ({warn})")
+    return {"status": "ok",
+            "config": vehicle_manager.set_guardian_config(updates)}
 
 
 @router.post("/failsafe")

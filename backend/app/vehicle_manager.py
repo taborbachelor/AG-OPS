@@ -10,6 +10,7 @@ from pymavlink import mavutil
 
 from app.eventlog import log_event
 from app import config
+from app import guardian
 from app import param_meta
 
 # Flight logs live next to the app package.
@@ -220,6 +221,20 @@ class VehicleManager:
         # GCS-loss failsafe fires on demand: the vehicle believes the ground
         # station vanished while our RX side keeps observing the reaction.
         self._suppress_gcs_hb = False
+        # --- Guardian: GCS-side failsafe monitors + emergency state machine.
+        # Config is operator-tunable via /api/safety/guardian; state/monitors
+        # ride in snapshot() so the UI gets them over the telemetry WS free.
+        self.guardian_config = guardian.GuardianConfig()
+        self._guardian_lock = threading.Lock()
+        self._guardian = {"state": guardian.NORMAL, "monitors": {},
+                          "warnings": [], "rtl_source": None,
+                          "rtl_reason": None}
+        self._guardian_thread = None
+        self._guardian_mem = guardian.default_memory()
+        self._guardian_prev_armed = False
+        self._guardian_rtl_attempts = 0
+        # Set by land() so the state machine can tell LANDING from plain AUTO.
+        self._landing_requested = False
 
     def _set_state(self, new_state: str, level: str = "INFO", **details):
         """Transition the connection state machine and log the transition.
@@ -325,6 +340,7 @@ class VehicleManager:
             # so this lock-held param read/write has the link to itself.
             self._align_gcs_sysid()
             self._start_telemetry_loop()
+            self._start_guardian()
             # Request capabilities AFTER the loop is running so the AUTOPILOT_
             # VERSION reply is routed to _handle_msg — not swallowed by the
             # align's recv loop (which discards non-PARAM_VALUE messages).
@@ -463,6 +479,122 @@ class VehicleManager:
                 self._last_hb_sent = time.time()
             except Exception:
                 pass
+
+    # --- Guardian runner -----------------------------------------------------
+
+    def _start_guardian(self):
+        """1Hz supervisor thread (started on connect, exits with the link).
+        Same single-instance discipline as the telemetry loop."""
+        old = self._guardian_thread
+        if old is not None and old.is_alive():
+            return  # loop keys off self._running/connected; it follows the link
+        self._guardian_thread = threading.Thread(target=self._guardian_loop,
+                                                 daemon=True)
+        self._guardian_thread.start()
+
+    def _guardian_loop(self):
+        while self._running and self.connected:
+            try:
+                self._guardian_tick(time.time())
+            except Exception as e:
+                # The guardian must never take down the link it supervises.
+                log_event("guardian", "tick_error", level="ERROR", error=str(e))
+            time.sleep(1.0)
+
+    def _guardian_tick(self, now: float):
+        """One evaluation pass: judge telemetry, run the emergency state
+        machine, and execute (or stand down from) a guardian RTL."""
+        with self._telem_lock:
+            t = asdict(self.telemetry)
+        t["link_level"] = self._link_level(
+            (now - self._last_heartbeat) if self.connected and self._last_heartbeat
+            else None)
+        cfg = self.guardian_config
+        mem = self._guardian_mem
+
+        # Arm rising edge: a new flight gets fresh debounce/latch memory.
+        if t["armed"] and not self._guardian_prev_armed:
+            mem.update(guardian.default_memory())
+            self._landing_requested = False
+            self._guardian_rtl_attempts = 0
+        self._guardian_prev_armed = t["armed"]
+
+        res = guardian.evaluate(cfg, t, mem, now)
+        action, source, reason = res["action"], res["source"], res["reason"]
+        mode = t.get("mode")
+
+        # Operator override: we commanded RTL, the mode has left RTL, and the
+        # condition still demands it -> the operator wins. Log it once and
+        # stand down for this source until its condition clears.
+        if (mem["rtl_commanded_for"] is not None and mode != "RTL"
+                and action == "rtl" and source == mem["rtl_commanded_for"]):
+            log_event("guardian", "overridden_by_operator", level="WARN",
+                      source=source, mode=mode)
+            mem["standdown_for"] = source
+            mem["rtl_commanded_for"] = None
+        # Condition cleared: re-arm the latch and any standdown.
+        if action is None:
+            if mem["standdown_for"] is not None:
+                log_event("guardian", "standdown_cleared",
+                          source=mem["standdown_for"])
+            mem["standdown_for"] = None
+            if mode != "RTL":
+                mem["rtl_commanded_for"] = None
+                self._guardian_rtl_attempts = 0
+
+        rtl_fired = False
+        if (action == "rtl" and mem["rtl_commanded_for"] is None
+                and mem["standdown_for"] != source
+                and self._guardian_rtl_attempts < 3):
+            # Directive: record the triggering condition BEFORE the command.
+            log_event("guardian", "rtl_triggered", level="ERROR",
+                      source=source, reason=reason,
+                      monitors=res["monitors"])
+            rtl_fired = True
+            if self.set_mode("RTL"):
+                mem["rtl_commanded_for"] = source
+                self._guardian_rtl_attempts = 0
+            else:
+                self._guardian_rtl_attempts += 1
+                log_event("guardian", "rtl_command_failed", level="ERROR",
+                          source=source, attempt=self._guardian_rtl_attempts)
+                if self._guardian_rtl_attempts >= 3:
+                    log_event("guardian", "rtl_gave_up", level="ERROR",
+                              source=source,
+                              note="vehicle kept rejecting RTL; operator action required")
+
+        prev_state = self._guardian["state"]
+        state = guardian.derive_state(
+            prev_state, t["armed"], mode, res["warnings"],
+            rtl_commanded=(mem["rtl_commanded_for"] is not None or rtl_fired),
+            landing_requested=self._landing_requested)
+        if state != prev_state:
+            log_event("guardian", "state",
+                      level="WARN" if state not in (guardian.NORMAL,
+                                                    guardian.DISARMED) else "INFO",
+                      from_state=prev_state, to_state=state,
+                      warnings=res["warnings"])
+        with self._guardian_lock:
+            self._guardian = {
+                "state": state, "monitors": res["monitors"],
+                "warnings": res["warnings"],
+                "rtl_source": mem["rtl_commanded_for"],
+                "rtl_reason": reason if mem["rtl_commanded_for"] else None,
+            }
+
+    def set_guardian_config(self, updates: dict) -> dict:
+        """Apply operator-tuned guardian settings (already schema-validated by
+        the router). Logged like any other safety-relevant change."""
+        cfg = self.guardian_config
+        for k, v in updates.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+        log_event("guardian", "config_changed", **updates)
+        return guardian.config_to_dict(cfg)
+
+    def guardian_state(self) -> dict:
+        with self._guardian_lock:
+            return dict(self._guardian)
 
     def set_gcs_heartbeat_suppressed(self, suppressed: bool):
         """M4 fault injection: silence/restore our 1Hz GCS heartbeat. With
@@ -729,6 +861,9 @@ class VehicleManager:
         # M4: surfaced so the harness/UI can tell an injected GCS-loss from a
         # real one.
         d["gcs_hb_suppressed"] = self._suppress_gcs_hb
+        # Guardian verdicts ride along so the UI gets them over the WS free.
+        with self._guardian_lock:
+            d["guardian"] = dict(self._guardian)
         with self._param_lock:
             d["param_sync"] = dict(self._param_sync)
         # Link quality: fraction of expected 1Hz vehicle heartbeats actually
@@ -991,6 +1126,8 @@ class VehicleManager:
                 self.connection.target_system, self.connection.target_component, 1)
         if not self.set_mode("AUTO"):
             return {"ok": False, "error": "vehicle refused AUTO mode"}
+        # Tell the guardian's state machine this AUTO is a landing sequence.
+        self._landing_requested = True
         return {"ok": True}
 
     def get_available_modes(self) -> list[str]:
