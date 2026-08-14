@@ -31,14 +31,22 @@ function LaunchControl({ telemetry, connected }) {
       const res = await fetch(`${API}/vehicle/takeoff`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alt: Number(alt), force }),
+        // `override` mirrors the OVERRIDE toggle to the backend's M6 gate —
+        // the server is the go/no-go authority now, not this checklist.
+        body: JSON.stringify({ alt: Number(alt), force, override }),
       });
       const data = await res.json();
       if (res.ok) {
         flash(`Launching — climbing to ${alt} m ✓`, 'ok');
       } else {
         // Surface the real reason (e.g. pre-arm checks) and hint at Force.
-        const msg = data.detail || 'Takeoff failed';
+        // The M6 gate returns structured detail {message, failed[]} — name the
+        // failing blockers instead of a generic error.
+        const d = data.detail;
+        const msg = typeof d === 'string' ? d
+          : d && d.message
+            ? d.message + (d.failed ? ` — ${d.failed.join('; ')}` : '')
+            : 'Takeoff failed';
         flash(msg + (!force && /arm/i.test(msg) ? ' — try Force arm' : ''), 'err');
       }
     } catch (e) {

@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
+from app import preflight
+from app.eventlog import log_event
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
@@ -60,18 +62,44 @@ def set_mode(req: ModeRequest):
 
 
 class ArmRequest(BaseModel):
-    force: bool = False
+    force: bool = False      # bypass ArduPilot's own pre-arm checks (21196)
+    override: bool = False   # bypass the GCS-side pre-flight gate (M6)
 
 
 class TakeoffRequest(BaseModel):
     alt: float = Field(100.0, gt=0, le=2000)
     force: bool = False
+    override: bool = False
+
+
+def _preflight_gate(override: bool, command: str):
+    """M6: the backend, not the UI, is the go/no-go authority. Refuse arming
+    while a pre-flight BLOCKER fails, unless the operator explicitly
+    overrides — and either way, record the decision."""
+    pf = preflight.evaluate(vehicle_manager.snapshot(),
+                            vehicle_manager.cached_value("FENCE_ENABLE"))
+    if pf["ready"]:
+        return
+    if override:
+        log_event("preflight", "override", level="WARN", command=command,
+                  failed_blockers=pf["failed_blockers"])
+        return
+    log_event("preflight", "blocked", level="WARN", command=command,
+              failed_blockers=pf["failed_blockers"])
+    failed = [c for c in pf["checks"] if c["blocker"] and not c["ok"]]
+    raise HTTPException(409, {
+        "message": "pre-flight blockers failing — vehicle NOT armed",
+        "failed": [f"{c['label']} ({c['detail']})" if c["detail"] else c["label"]
+                   for c in failed],
+        "hint": "fix the blockers or arm with override=true",
+    })
 
 
 @router.post("/arm")
 def arm(req: ArmRequest = ArmRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
+    _preflight_gate(req.override, "arm")
     result = vehicle_manager.arm(force=req.force)
     if not result.get("ok"):
         raise HTTPException(400, result.get("error", "arming failed"))
@@ -94,6 +122,7 @@ def disarm(req: ArmRequest = ArmRequest()):
 def takeoff(req: TakeoffRequest = TakeoffRequest()):
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
+    _preflight_gate(req.override, "takeoff")
     result = vehicle_manager.takeoff(alt=req.alt, force=req.force)
     if not result.get("ok"):
         raise HTTPException(400, result.get("error", "takeoff failed"))

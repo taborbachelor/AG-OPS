@@ -2,6 +2,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from app import preflight
 from app.guardian import config_to_dict
 from app.vehicle_manager import vehicle_manager
 
@@ -105,6 +106,14 @@ def get_failsafe():
         "rc_long_action": int(p.get("FS_LONG_ACTN", 1)),
         "raw": p,
     }
+
+
+@router.get("/preflight")
+def get_preflight():
+    """Server-side go/no-go verdict (M6). The same evaluation gates the arm/
+    takeoff endpoints, so what the UI shows is what the backend enforces."""
+    return preflight.evaluate(vehicle_manager.snapshot(),
+                              vehicle_manager.cached_value("FENCE_ENABLE"))
 
 
 # --- Guardian: GCS-side failsafe monitors + emergency state machine ---

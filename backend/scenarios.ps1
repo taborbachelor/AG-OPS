@@ -11,7 +11,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("field-test", "link-loss", "gps-failure", "battery-fault",
-                 "rtl-recovery", "link-watchdog", "guardian", "all")]
+                 "rtl-recovery", "link-watchdog", "guardian", "preflight",
+                 "all")]
     [string]$Scenario
 )
 
@@ -23,6 +24,7 @@ $map = @{
     "rtl-recovery"  = "tests\sitl\test_scenario_rtl_recovery.py"
     "link-watchdog" = "tests\sitl\test_scenario_link_watchdog.py"
     "guardian"      = "tests\sitl\test_scenario_guardian.py"
+    "preflight"     = "tests\sitl\test_scenario_preflight.py"
 }
 
 $python = Join-Path $PSScriptRoot "venv\Scripts\python.exe"
