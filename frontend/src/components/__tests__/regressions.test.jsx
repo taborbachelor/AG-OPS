@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Regression tests for confirmed GCS audit findings:
  *  - SprayPanel: a plan response that resolves after the job changed must be
  *    dropped, and job-mutating buttons are disabled while a request runs.
@@ -9,6 +9,7 @@
  */
 import React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { vi } from 'vitest';
 import '@testing-library/jest-dom';
 import SprayPanel from '../SprayPanel';
 import FlightVitals from '../FlightVitals';
@@ -22,15 +23,15 @@ const TRI = [
 
 const sprayProps = (over = {}) => ({
   connected: true,
-  draft: [], setDraft: jest.fn(),
-  fields: [{ polygon: TRI, acres: null, source: 'drawn' }], setFields: jest.fn(),
-  area: [], setArea: jest.fn(),
-  drawing: false, setDrawing: jest.fn(),
-  areaDrawing: false, setAreaDrawing: jest.fn(),
-  snapping: false, setSnapping: jest.fn(),
+  draft: [], setDraft: vi.fn(),
+  fields: [{ polygon: TRI, acres: null, source: 'drawn' }], setFields: vi.fn(),
+  area: [], setArea: vi.fn(),
+  drawing: false, setDrawing: vi.fn(),
+  areaDrawing: false, setAreaDrawing: vi.fn(),
+  snapping: false, setSnapping: vi.fn(),
   snapStatus: '',
-  plan: null, setPlan: jest.fn(),
-  zones: null, setZones: jest.fn(),
+  plan: null, setPlan: vi.fn(),
+  zones: null, setZones: vi.fn(),
   homePos: null,
   ...over,
 });
@@ -42,9 +43,9 @@ afterEach(() => {
 describe('SprayPanel stale plan race', () => {
   test('drops a plan response that resolves after the job changed', async () => {
     let resolvePlan;
-    global.fetch = jest.fn(() => new Promise((res) => { resolvePlan = res; }));
+    global.fetch = vi.fn(() => new Promise((res) => { resolvePlan = res; }));
 
-    const setPlan = jest.fn();
+    const setPlan = vi.fn();
     render(<SprayPanel {...sprayProps({ setPlan, drawing: true, draft: TRI })} />);
 
     fireEvent.click(screen.getByText('Generate Spray Plan'));
@@ -74,7 +75,7 @@ describe('SprayPanel stale plan race', () => {
   });
 
   test('Clear job and per-field remove are disabled while planning', async () => {
-    global.fetch = jest.fn(() => new Promise(() => { /* never resolves */ }));
+    global.fetch = vi.fn(() => new Promise(() => { /* never resolves */ }));
 
     render(<SprayPanel {...sprayProps()} />);
     fireEvent.click(screen.getByText('Generate Spray Plan'));
@@ -98,7 +99,7 @@ describe('FlightVitals command feedback', () => {
   };
 
   test('a rejected RTL surfaces the backend error instead of failing silently', async () => {
-    global.fetch = jest.fn(async () => ({
+    global.fetch = vi.fn(async () => ({
       ok: false,
       status: 400,
       json: async () => ({ detail: 'Not connected' }),
@@ -111,7 +112,7 @@ describe('FlightVitals command feedback', () => {
   });
 
   test('an unreachable backend surfaces a failure note for LAND', async () => {
-    global.fetch = jest.fn(async () => { throw new TypeError('Failed to fetch'); });
+    global.fetch = vi.fn(async () => { throw new TypeError('Failed to fetch'); });
 
     render(<FlightVitals telemetry={telem} />);
     fireEvent.click(screen.getByText('LAND'));
