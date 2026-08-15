@@ -26,16 +26,25 @@ EVENT_DIR = Path(__file__).resolve().parent.parent / "logs" / "events"
 
 _logger = logging.getLogger("gcs.events")
 
+# Two locks: _lock guards the in-memory ring (taken by the API's /events
+# reader too, so it must never be held across disk I/O — a stalled disk would
+# otherwise freeze the event loop); _io_lock serializes the file writes.
 _lock = threading.Lock()
+_io_lock = threading.Lock()
 _ring: deque = deque(maxlen=500)
 _fh = None
 _fh_day = None  # "YYYYMMDD" the open file belongs to (daily roll)
 
+# Record fields owned by log_event itself; a caller-supplied field with one of
+# these names is stored under an "f_" prefix instead of clobbering the record.
+_CORE_FIELDS = frozenset({"ts", "t", "level", "component", "event"})
+
 
 def _file_for_today():
-    """Return an open handle for today's event file, rolling at midnight."""
+    """Return an open handle for today's event file, rolling at midnight.
+    Uses the UTC day so file names match the records' UTC `ts` values."""
     global _fh, _fh_day
-    day = datetime.now().strftime("%Y%m%d")
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
     if _fh is not None and _fh_day == day:
         return _fh
     if _fh is not None:
@@ -59,17 +68,34 @@ def log_event(component: str, event: str, level: str = "INFO", **fields):
         "component": component,
         "event": event,
     }
-    for k, v in fields.items():
-        try:
-            json.dumps(v)
-            rec[k] = v
-        except (TypeError, ValueError):
-            rec[k] = repr(v)
+    # Field sanitization must be as unraisable as the write below: json.dumps
+    # can raise RecursionError (not just TypeError/ValueError) on deep values,
+    # and a broken __repr__ raises out of the fallback — either would kill a
+    # flight-critical caller (telemetry/guardian/reconnect thread).
+    try:
+        for k, v in fields.items():
+            if k in _CORE_FIELDS:
+                k = "f_" + k
+            try:
+                # allow_nan=False: a NaN/inf telemetry float would otherwise
+                # write a bare `NaN` literal that strict parsers reject.
+                json.dumps(v, allow_nan=False)
+                rec[k] = v
+            except Exception:
+                try:
+                    rec[k] = repr(v)
+                except Exception:
+                    rec[k] = "<unrepresentable>"
+    except Exception:
+        pass
     try:
         with _lock:
             _ring.append(rec)
+        # Disk I/O outside the ring lock: the /events reader (event loop!)
+        # takes _lock, and must never wait behind a slow flush.
+        with _io_lock:
             fh = _file_for_today()
-            fh.write(json.dumps(rec) + "\n")
+            fh.write(json.dumps(rec, default=repr) + "\n")
             fh.flush()
     except Exception:
         pass  # logging must never take down the caller

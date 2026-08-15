@@ -16,15 +16,17 @@ pattern endpoints.
 
 import math
 
-from app.coverage import plan_coverage
+from app.coverage import _MAX_CLIP_WORK, EARTH_RADIUS_M, plan_coverage
 
-_EARTH_R = 6371000.0
+# Same meters-per-degree as the single-field planner, so spray lengths and
+# transit lengths summed into one total are on the same scale.
+_M_PER_DEG = math.pi / 180.0 * EARTH_RADIUS_M
 
 
 def _dist_m(a: dict, b: dict) -> float:
     """Equirectangular distance in meters — fine at job scale."""
-    kx = math.cos(math.radians((a["lat"] + b["lat"]) / 2.0)) * 111320.0
-    return math.hypot((a["lat"] - b["lat"]) * 111320.0, (a["lon"] - b["lon"]) * kx)
+    kx = math.cos(math.radians((a["lat"] + b["lat"]) / 2.0)) * _M_PER_DEG
+    return math.hypot((a["lat"] - b["lat"]) * _M_PER_DEG, (a["lon"] - b["lon"]) * kx)
 
 
 def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
@@ -43,11 +45,16 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
 
     planned = {}   # original index -> plan dict
     skipped = []
+    # ONE clip-work budget for the whole job: without it each of up to 25
+    # fields gets its own _MAX_CLIP_WORK allowance and a single request can
+    # burn ~a minute of GIL-bound CPU (starving telemetry) instead of ~2 s.
+    work_budget = [_MAX_CLIP_WORK]
     for i, poly in enumerate(fields):
         try:
             kwargs = {}
             if keepouts is not None:
-                kwargs = {"keepouts": keepouts, "keepout_buffer_m": keepout_buffer_m}
+                kwargs = {"keepouts": keepouts, "keepout_buffer_m": keepout_buffer_m,
+                          "work_budget": work_budget}
             plan = plan_coverage(poly, swath_m, alt_m, speed_ms=speed_ms, **kwargs)
             if plan["waypoints"]:
                 planned[i] = plan
@@ -132,6 +139,12 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
             "total_m": round(total_len, 1),
             "est_time_s": round(total_len / speed_ms, 1),
             "waypoints": len(combined),
+            # Connecting legs that physically cross a keepout polygon —
+            # the aircraft overflies the zone there (sprayer must be off;
+            # mind trees at spray altitude). The UI warns when > 0.
+            "keepout_overflights": sum(
+                planned[i]["stats"].get("keepout_overflights", 0)
+                for i in planned),
         },
         "skipped": skipped,
     }

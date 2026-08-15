@@ -28,6 +28,17 @@ class MultiRequest(BaseModel):
     # ponds). Merged with the OSM zone keepouts; honored even when the zone
     # service is down.
     keepouts: Optional[list] = Field(None, max_length=100)
+    # FAIL-CLOSED default: when the zone service is down the request is
+    # refused (502) unless the operator explicitly accepts planning without
+    # water/tree/building keepouts.
+    allow_missing_zones: bool = False
+
+
+# Zone-derived keepout rings are bounded like caller keepouts — but instead of
+# silently truncating (dropping keepouts = spraying them), an over-limit area
+# fails loudly so the operator shrinks the job.
+_MAX_ZONE_RINGS = 400
+_MAX_ZONE_RING_VERTICES = 2000
 
 
 @router.post("/plan_multi")
@@ -77,7 +88,8 @@ def plan_multi_endpoint(req: MultiRequest):
                 lat, lon = float(p["lat"]), float(p["lon"])
             except (TypeError, KeyError, ValueError):
                 raise HTTPException(422, f"keepout {ki}: vertices must be {{lat,lon}}")
-            if not (math.isfinite(lat) and math.isfinite(lon)):
+            if not (math.isfinite(lat) and math.isfinite(lon)
+                    and -90 <= lat <= 90 and -180 <= lon <= 180):
                 raise HTTPException(422, f"keepout {ki}: coordinate out of range")
             clean.append({"lat": lat, "lon": lon})
         user_keepouts.append(clean)
@@ -94,12 +106,37 @@ def plan_multi_endpoint(req: MultiRequest):
                 ring = list(zone.get("coords", []))
                 if len(ring) >= 2 and ring[0] == ring[-1]:
                     ring = ring[:-1]
-                if len(ring) >= 3:
-                    keepouts.append(ring)
+                if len(ring) < 3:
+                    continue
+                if len(ring) > _MAX_ZONE_RING_VERTICES:
+                    raise HTTPException(400, {
+                        "message": "a no-spray zone in this area is too "
+                                   "complex to clip — shrink the job area",
+                        "error": "zone_too_complex"})
+                keepouts.append(ring)
+        if len(keepouts) > _MAX_ZONE_RINGS:
+            # Never silently drop keepouts (dropping = spraying them).
+            raise HTTPException(400, {
+                "message": f"{len(keepouts)} no-spray zones in this area — "
+                           "too many to clip; shrink the job area",
+                "error": "too_many_zones"})
         # Same conservative choice as plan_auto: clip with the largest of the
         # per-kind buffers (over-standoff never sprays a keepout).
-    except RuntimeError:
-        # Zone service down: user keepouts (detected holes) still apply.
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        # FAIL-CLOSED: a job with silently-zero keepouts must never be the
+        # default outcome of an Overpass outage. The operator may explicitly
+        # accept it; detected in-field holes (user keepouts) still apply.
+        if not req.allow_missing_zones:
+            raise HTTPException(502, {
+                "message": "no-spray zone lookup failed — refusing to plan "
+                           "without zone data",
+                "error": "zones_unavailable",
+                "detail": str(e),
+                "hint": "retry, or pass allow_missing_zones=true to plan "
+                        "anyway WITHOUT water/tree/building keepouts",
+            })
         zones_unavailable = True
         if not user_keepouts:
             keepouts = None

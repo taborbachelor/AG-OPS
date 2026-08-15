@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 import json
@@ -235,6 +236,14 @@ class VehicleManager:
         self._guardian_rtl_attempts = 0
         # Set by land() so the state machine can tell LANDING from plain AUTO.
         self._landing_requested = False
+        # True once the vehicle has actually been seen in AUTO after land():
+        # lets the guardian clear a stale landing latch when the operator
+        # aborts the landing (leaves AUTO), without racing land()'s own
+        # latch-set against the telemetry mode catching up.
+        self._landing_seen_auto = False
+        # One-shot flag so a guardian RTL suppressed during landing is logged
+        # once per landing, not once per tick.
+        self._landing_rtl_suppressed_logged = False
 
     def _set_state(self, new_state: str, level: str = "INFO", **details):
         """Transition the connection state machine and log the transition.
@@ -373,9 +382,23 @@ class VehicleManager:
                     self.connection = None
             raise ConnectionError(f"Failed to connect: {e}")
 
-    def _request_data_streams(self, rate_hz: int = 10):
+    def _request_data_streams(self, rate_hz: int = None):
         """Ask the autopilot to stream telemetry. Without this, ArduPilot only
-        sends heartbeats and we get no attitude/position/battery data."""
+        sends heartbeats and we get no attitude/position/battery data.
+
+        Rate is link-aware: 10 Hz is fine on TCP/UDP (SITL, wifi bridge) but
+        ALL-streams at 10 Hz can saturate a 57600-baud SiK telemetry radio —
+        dropped heartbeats, a flapping link, failing mission transfers. Serial
+        links therefore default to 4 Hz. TELEM_RATE_HZ overrides both."""
+        if rate_hz is None:
+            if config.TELEM_RATE_HZ > 0:
+                rate_hz = config.TELEM_RATE_HZ
+            else:
+                cs = (self.connection_string or "").lower()
+                is_network = cs.startswith(("tcp:", "tcpin:", "udp:", "udpin:",
+                                            "udpout:"))
+                rate_hz = 10 if is_network else 4
+        log_event("link", "data_streams_requested", rate_hz=rate_hz)
         with self._send_lock:
             self.connection.mav.request_data_stream_send(
                 self.connection.target_system,
@@ -516,12 +539,37 @@ class VehicleManager:
         if t["armed"] and not self._guardian_prev_armed:
             mem.update(guardian.default_memory())
             self._landing_requested = False
+            self._landing_seen_auto = False
+            self._landing_rtl_suppressed_logged = False
             self._guardian_rtl_attempts = 0
         self._guardian_prev_armed = t["armed"]
 
         res = guardian.evaluate(cfg, t, mem, now)
         action, source, reason = res["action"], res["source"], res["reason"]
         mode = t.get("mode")
+
+        # Landing latch bookkeeping: once the landing sequence has actually
+        # been observed in AUTO, an operator leaving AUTO aborts the landing —
+        # clear the latch so later AUTO flights aren't mislabeled LANDING.
+        if self._landing_requested:
+            if mode == "AUTO":
+                self._landing_seen_auto = True
+            elif self._landing_seen_auto:
+                log_event("guardian", "landing_aborted_by_operator", mode=mode)
+                self._landing_requested = False
+                self._landing_seen_auto = False
+
+        # During an active landing approach the guardian must not command RTL:
+        # aborting a final approach to climb to RTL altitude on (typically) a
+        # dying battery is worse than completing the landing that is seconds
+        # away. Monitors keep evaluating and warnings keep flowing; only the
+        # RTL action is suppressed. ArduPilot's own failsafes remain primary.
+        if action == "rtl" and self._landing_requested and mode == "AUTO":
+            if not self._landing_rtl_suppressed_logged:
+                log_event("guardian", "rtl_suppressed_landing", level="WARN",
+                          source=source, reason=reason)
+                self._landing_rtl_suppressed_logged = True
+            action, source, reason = None, None, None
 
         # Operator override: we commanded RTL, the mode has left RTL, and the
         # condition still demands it -> the operator wins. Log it once and
@@ -871,11 +919,16 @@ class VehicleManager:
         # fresh link isn't reported as degraded).
         if self.connected and self._connected_at:
             window = min(10.0, max(1.0, now - self._connected_at))
-            got = sum(1 for t in self._hb_times if now - t <= window)
+            # list() first: iterating the deque directly while the telemetry
+            # thread appends raises "deque mutated during iteration" (list()
+            # is a single C-level copy, safe under the GIL).
+            got = sum(1 for t in list(self._hb_times) if now - t <= window)
             d["link_quality"] = min(100, int(round(100.0 * got / window)))
         else:
             d["link_quality"] = None
-        return d
+        # NaN/inf anywhere in the snapshot would serialize into invalid JSON
+        # for the WS/REST clients — scrub to None at the single choke point.
+        return _json_sanitize(d)
 
     def _on_link_lost(self):
         """Called when no heartbeat has arrived within the timeout. Mark the
@@ -1114,11 +1167,17 @@ class VehicleManager:
         if not up.get("ok"):
             return {"ok": False, "error": f"could not load takeoff mission: {up.get('error')}"}
 
+        prev_mode = self.telemetry.mode
         if not self.set_mode("AUTO"):
             return {"ok": False, "error": "vehicle refused AUTO mode"}
         time.sleep(0.5)
         armed = self.arm(force=force)
         if not armed.get("ok"):
+            # Don't leave a disarmed plane sitting in AUTO with a takeoff
+            # mission loaded — a later stray arm would launch it. Best-effort
+            # revert to the mode it was in before we touched it.
+            if prev_mode and prev_mode not in ("AUTO", "UNKNOWN"):
+                self.set_mode(prev_mode)
             return {"ok": False, "error": armed.get("error", "arming failed"),
                     "hint": "enable Force arm to bypass pre-arm checks"}
         return {"ok": True, "alt": alt}
@@ -1128,12 +1187,19 @@ class VehicleManager:
         waypoint + NAV_LAND touchdown and fly it in AUTO. The plane descends
         along the line from the approach fix to the landing point and touches
         down (ArduPlane disarms itself after landing)."""
-        if not self.connection:
+        conn = self.connection
+        if not conn:
             return {"ok": False, "error": "not connected"}
-        home_lat = self.home_lat or self.telemetry.lat
-        home_lon = self.home_lon or self.telemetry.lon
+        # Only a real HOME_POSITION is a valid landing point. Falling back to
+        # the CURRENT position would silently "land" wherever the plane
+        # happens to be (e.g. over the field being sprayed), not at the
+        # launch strip — refuse and point the operator at RTL, which uses the
+        # vehicle's own home and works even when we never got the message.
+        home_lat, home_lon = self.home_lat, self.home_lon
         if not home_lat or not home_lon:
-            return {"ok": False, "error": "home/position not known yet"}
+            return {"ok": False,
+                    "error": "home position not received from vehicle — "
+                             "cannot plan a landing approach; use RTL instead"}
         log_event("command", "land_requested", home_lat=home_lat, home_lon=home_lon)
 
         # Approach fix ~600 m north of home at 80 m; the plane descends along the
@@ -1147,13 +1213,20 @@ class VehicleManager:
         if not up.get("ok"):
             return {"ok": False, "error": f"could not load landing mission: {up.get('error')}"}
 
-        # Start from the approach leg (seq 1) rather than continuing an old index.
-        with self._send_lock:
-            self.connection.mav.mission_set_current_send(
-                self.connection.target_system, self.connection.target_component, 1)
+        # Start from the approach leg (seq 1) rather than continuing an old
+        # index. Uses the conn captured up top: self.connection can be nulled
+        # by the telemetry thread on link loss at any moment.
+        try:
+            with self._send_lock:
+                conn.mav.mission_set_current_send(
+                    conn.target_system, conn.target_component, 1)
+        except Exception as e:
+            return {"ok": False, "error": f"link failed mid-landing-setup: {e}"}
         if not self.set_mode("AUTO"):
             return {"ok": False, "error": "vehicle refused AUTO mode"}
         # Tell the guardian's state machine this AUTO is a landing sequence.
+        self._landing_seen_auto = False
+        self._landing_rtl_suppressed_logged = False
         self._landing_requested = True
         return {"ok": True}
 
@@ -1665,7 +1738,14 @@ class VehicleManager:
                     ack = msg
                     break
                 if 0 <= msg.seq < len(full):
-                    _send_item(msg.seq)
+                    try:
+                        _send_item(msg.seq)
+                    except Exception as e:
+                        # A pack/send failure (bad value, dying port) must not
+                        # skip the cancel below — the vehicle would sit
+                        # mid-transfer holding a partially-replaced mission.
+                        error = f"mission item {msg.seq} failed to send: {e}"
+                        break
                 # requests out of range: stale/corrupt frame — ignore
             else:
                 error = "mission transfer did not complete (vehicle kept re-requesting)"
@@ -1729,6 +1809,22 @@ class VehicleManager:
         self.telemetry.mission_count = len(items)
         log_event("mission", "download", count=len(items))
         return items
+
+
+def _json_sanitize(obj):
+    """Replace non-finite floats (NaN/inf) with None, recursively.
+
+    MAVLink floats can carry NaN (bad sensor, odd EKF state); json.dumps
+    would emit a bare `NaN` literal that JSON.parse rejects — every WS frame
+    and REST response would become invalid while the link looks healthy.
+    Numbers/strings pass through untouched, so the fast path is cheap."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize(v) for v in obj]
+    return obj
 
 
 # Singleton instance

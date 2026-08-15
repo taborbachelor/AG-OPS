@@ -40,6 +40,12 @@ GCS_COMPID = _int_env(
 # leave vehicle config untouched (then the operator must set it themselves).
 MANAGE_SYSID_MYGCS = _bool_env("MANAGE_SYSID_MYGCS", True)
 
+# Telemetry stream rate (MAV_DATA_STREAM_ALL) requested on connect.
+# 0 = automatic: 10 Hz on network links (TCP/UDP — SITL, wifi bridges),
+# 4 Hz on serial links, where ALL-streams at 10 Hz can saturate a 57600-baud
+# telemetry radio (dropped heartbeats, flapping link, failing transfers).
+TELEM_RATE_HZ = _int_env("TELEM_RATE_HZ", 0)
+
 # The parameter naming the vehicle's commanding GCS differs by firmware age:
 # ArduPilot 4.5+ renamed SYSID_MYGCS -> MAV_GCS_SYSID. connect() aligns whichever
 # one the vehicle actually has (tried in this order), so we work across versions.

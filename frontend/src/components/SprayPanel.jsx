@@ -64,6 +64,10 @@ function SprayPanel({
   const [status, setStatus] = useState('');
   const [zonesNote, setZonesNote] = useState('');
   const [upStatus, setUpStatus] = useState(null);
+  // Backend refused to plan because the zone service is down (fail-closed).
+  // Set -> we show a "Plan anyway (no zones)" button that retries with the
+  // explicit allow_missing_zones override.
+  const [zonesBlocked, setZonesBlocked] = useState(false);
 
   // Bumped on every job mutation (field added/removed/cleared). An in-flight
   // plan request captures the value at launch and discards its response if
@@ -76,6 +80,7 @@ function SprayPanel({
   const resetResults = () => {
     planReq.current += 1;
     setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
+    setZonesBlocked(false);
   };
 
   // Exclusive input modes: draw / area / snap.
@@ -173,8 +178,9 @@ function SprayPanel({
   };
 
   // One call plans the whole job: per-field zone-aware coverage + transit
-  // ordering. Zones come back inline; degrade is flagged, never silent.
-  const generate = async () => {
+  // ordering. Zones come back inline. Zone-service failure is FAIL-CLOSED:
+  // the backend refuses unless allowMissingZones explicitly overrides.
+  const generate = async (allowMissingZones = false) => {
     let jobFields = fields;
     if (jobFields.length === 0 && draft.length >= 3) {
       // Courtesy: an unclosed draft becomes the job's single field.
@@ -186,6 +192,7 @@ function SprayPanel({
     if (jobFields.length === 0) { flash('Add at least one field first'); return; }
     setBusy(true);
     resetResults();
+    setZonesBlocked(false);
     const req = planReq.current; // staleness token for this request
     // Detected in-field holes (farmsteads/ponds/tree stands) ride along as
     // keepouts so the passes clip around them automatically.
@@ -200,6 +207,7 @@ function SprayPanel({
           water_buffer: bufWater, tree_buffer: bufTrees, building_buffer: bufBuildings,
           home: homePos || undefined,
           keepouts: holeKeepouts.length ? holeKeepouts : undefined,
+          allow_missing_zones: allowMissingZones || undefined,
         }),
       });
       const data = await res.json();
@@ -210,7 +218,16 @@ function SprayPanel({
         return;
       }
       if (!res.ok) {
-        flash(`Plan failed: ${data.detail || res.status}`);
+        const detail = data.detail;
+        if (detail && detail.error === 'zones_unavailable') {
+          // Fail-closed refusal: no plan without zone data unless the
+          // operator explicitly accepts flying without keepouts.
+          setZonesBlocked(true);
+          setZonesNote('Zone service unavailable — no plan generated. '
+            + 'Retry, or plan anyway WITHOUT water/tree/building keepouts.');
+        } else {
+          flash(`Plan failed: ${(detail && detail.message) || detail || res.status}`);
+        }
         setBusy(false);
         return;
       }
@@ -231,6 +248,14 @@ function SprayPanel({
       }
       if ((data.skipped || []).length > 0) {
         flash(`${data.skipped.length} field(s) skipped: ${data.skipped[0].error}`);
+      }
+      const overflights = (data.totals && data.totals.keepout_overflights) || 0;
+      if (overflights > 0) {
+        // Connector legs are NOT rerouted around keepouts — the aircraft
+        // physically overflies them there (mind trees at spray altitude).
+        setZonesNote((n) => `${n ? n + ' · ' : ''}${overflights} connecting `
+          + 'leg(s) cross no-spray zones — aircraft overflies them '
+          + '(sprayer off; mind trees at low altitude)');
       }
     } catch (e) {
       if (req === planReq.current) flash('Plan error — is the backend running?');
@@ -399,10 +424,20 @@ function SprayPanel({
           <NumField label="Bldg buf" value={bufBuildings} unit="m" onChange={setBufBuildings} />
         </div>
 
-        <button className="control-btn success" onClick={generate}
+        <button className="control-btn success" onClick={() => generate()}
           disabled={busy || (fields.length === 0 && draft.length < 3)} style={{ width: '100%' }}>
           {busy ? 'Working…' : `Generate Spray Plan${fields.length > 1 ? ` (${fields.length} fields)` : ''}`}
         </button>
+
+        {zonesBlocked && (
+          <div className="safety-card">
+            <div className="spray-note">{zonesNote}</div>
+            <button className="control-btn danger" onClick={() => generate(true)}
+              disabled={busy} style={{ width: '100%' }}>
+              Plan anyway — NO no-spray zones
+            </button>
+          </div>
+        )}
 
         {totals && (
           <div className="safety-card">

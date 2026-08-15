@@ -1,8 +1,10 @@
 import logging
+import math
 import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +29,30 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     log_event("core", "unhandled_exception", level="ERROR",
               method=request.method, path=request.url.path, error=str(exc))
     return JSONResponse(status_code=500, content={"detail": f"Server error: {exc}"})
+
+
+def _serializable_422(obj):
+    """Make pydantic error details strictly JSON-serializable.
+
+    A 422 echoes the offending input back to the client; when that input is
+    NaN/Infinity (json.loads accepts the literals) the strict response
+    serializer raises and the client sees a 500 instead of the validation
+    error. Scrub non-finite floats and stringify anything exotic."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else repr(obj)
+    if isinstance(obj, dict):
+        return {k: _serializable_422(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serializable_422(v) for v in obj]
+    if obj is None or isinstance(obj, (str, int, bool)):
+        return obj
+    return repr(obj)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422,
+                        content={"detail": _serializable_422(exc.errors())})
 
 app.add_middleware(
     CORSMiddleware,

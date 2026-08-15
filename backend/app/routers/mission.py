@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal
 from app.vehicle_manager import vehicle_manager
 
@@ -9,13 +9,16 @@ CommandType = Literal["TAKEOFF", "WAYPOINT", "LOITER", "LAND", "RTL"]
 
 
 class MissionItem(BaseModel):
+    """Bounds matter beyond sanity: mission_item_int packs lat/lon as
+    int32 * 1e7 — an out-of-range value would raise a struct error mid-
+    transfer, aborting the upload with the vehicle left mid-transaction."""
     command: CommandType = "WAYPOINT"
-    lat: float
-    lon: float
-    alt: float
-    param1: float = 0.0
-    # Loiter radius in meters (param3 for LOITER items; ignored otherwise).
-    radius: float = 0.0
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    alt: float = Field(ge=-500, le=10000)          # m relative; generous sanity
+    param1: float = Field(0.0, ge=-100000, le=100000)
+    # Loiter radius in meters (param3 for LOITER items; negative = CCW).
+    radius: float = Field(0.0, ge=-100000, le=100000)
 
 
 class MissionUpload(BaseModel):

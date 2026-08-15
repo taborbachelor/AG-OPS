@@ -19,7 +19,13 @@ import urllib.request
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 USER_AGENT = "rc-plane-gcs/1.0"
-REQUEST_TIMEOUT_S = 25
+# Client timeout must exceed the server-side [timeout:25] budget, or a query
+# running near the server limit reliably dies client-side first and burns
+# both attempts on work the server would have finished.
+REQUEST_TIMEOUT_S = 30
+# Refuse absurd response bodies before parsing them into memory (the cache
+# would then pin multi-MB geometry sets).
+MAX_RESPONSE_BYTES = 30_000_000
 
 # Overpass is a shared free service: cap the query area and cache results
 # so a user panning the map doesn't hammer it (or get us rate-limited).
@@ -57,6 +63,14 @@ def _prune_cache(now: float) -> None:
         del _cache[next(iter(_cache))]
 
 
+# Linear waterways (streams, drainage ditches, drains, rivers, canals) are
+# the single most common ag no-spray feature and are mapped as OSM ways
+# (lines), not polygons. They are turned into zero-area "corridor" rings
+# (the polyline traced out and back) — the planner's Minkowski buffer then
+# produces a keepout corridor of the configured water buffer around them.
+_WATERWAY_RE = "^(stream|ditch|drain|river|canal|riverbank)$"
+
+
 def _build_query(lat: float, lon: float, radius_m: float) -> str:
     """Build the Overpass QL query for all three zone kinds at once."""
     around = f"(around:{int(radius_m)},{lat},{lon})"
@@ -68,6 +82,8 @@ def _build_query(lat: float, lon: float, radius_m: float) -> str:
             parts.append(f'relation["{key}"="{val}"]{around};')
     # Buildings: ways only (see _KIND_TAGS comment).
     parts.append(f'way["building"]{around};')
+    # Linear waterways (see _WATERWAY_RE above).
+    parts.append(f'way["waterway"~"{_WATERWAY_RE}"]{around};')
     body = "".join(parts)
     # 'out geom;' inlines per-node coordinates so we never need a second
     # request to resolve node references.
@@ -88,7 +104,19 @@ def _overpass_post(query: str) -> dict:
             req = urllib.request.Request(
                 OVERPASS_URL, data=data, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                body = resp.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise RuntimeError("Overpass response too large")
+                payload = json.loads(body.decode("utf-8"))
+            # CRITICAL: Overpass reports its own failures (query timeout,
+            # memory limit) as HTTP 200 with a "remark" and empty/PARTIAL
+            # elements. Treating that as "no zones here" would return a
+            # confident all-clear for an area that has water — the exact
+            # silent fail-open this module must never produce.
+            remark = str(payload.get("remark") or "")
+            if "error" in remark.lower() or "timed out" in remark.lower():
+                raise RuntimeError(f"Overpass runtime failure: {remark[:200]}")
+            return payload
         except Exception as exc:  # noqa: BLE001 - URLError, timeout, bad JSON...
             last_err = exc
     raise RuntimeError(
@@ -118,32 +146,99 @@ def _classify(tags: dict) -> str | None:
         for key, val in pairs:
             if tags.get(key) == val:
                 return kind
+    if "waterway" in tags:
+        return "water"
     if "building" in tags:
         return "buildings"
     return None
+
+
+def _corridor_ring(points: list[dict]) -> list[dict] | None:
+    """Turn an open polyline (waterway) into a zero-area out-and-back ring.
+
+    The planner buffers keepouts as interior + vertex discs + edge strips
+    (Minkowski sum), so a degenerate ring tracing the line forward then
+    backward yields exactly a buffer_m-wide corridor around the waterway —
+    no chord-closing across the field, no polygon assembly needed."""
+    pts = [{"lat": p["lat"], "lon": p["lon"]} for p in points]
+    if len(pts) < 2:
+        return None
+    if len(pts) == 2:
+        # Two-point segment: insert the midpoint so the open ring still has
+        # >= 3 distinct vertices after callers strip the closing duplicate
+        # (a bare [a, b] would be dropped by their len >= 3 check).
+        mid = {"lat": (pts[0]["lat"] + pts[1]["lat"]) / 2.0,
+               "lon": (pts[0]["lon"] + pts[1]["lon"]) / 2.0}
+        pts = [pts[0], mid, pts[1]]
+    ring = pts + pts[-2::-1]  # out and back; first == last
+    return ring
+
+
+def _stitch_outer_rings(members: list) -> list[list[dict]]:
+    """Assemble a relation's outer ways into closed rings.
+
+    A lake/forest outer boundary is frequently split across several ways;
+    chord-closing each way separately leaves interior area of a concave
+    body OUTSIDE every ring (sprayable water). Stitch ways end-to-end by
+    matching endpoints; segments that don't stitch into a closed ring fall
+    back to per-segment chord closing (the old behavior)."""
+    segs = []
+    for m in members:
+        if m.get("role") != "outer" or "geometry" not in m:
+            continue
+        pts = [{"lat": p["lat"], "lon": p["lon"]} for p in m["geometry"]]
+        if len(pts) >= 2:
+            segs.append(pts)
+
+    def key(p):
+        return (round(p["lat"], 7), round(p["lon"], 7))
+
+    rings: list[list[dict]] = []
+    while segs:
+        chain = segs.pop()
+        # Extend the chain until it closes or nothing joins.
+        extended = True
+        while extended and key(chain[0]) != key(chain[-1]):
+            extended = False
+            for i, s in enumerate(segs):
+                if key(s[0]) == key(chain[-1]):
+                    chain = chain + s[1:]
+                elif key(s[-1]) == key(chain[-1]):
+                    chain = chain + s[-2::-1]
+                elif key(s[-1]) == key(chain[0]):
+                    chain = s + chain[1:]
+                elif key(s[0]) == key(chain[0]):
+                    chain = s[::-1] + chain[1:]
+                else:
+                    continue
+                segs.pop(i)
+                extended = True
+                break
+        rings.append(chain)
+    return rings
 
 
 def _parse_overpass(payload: dict) -> dict:
     """Turn an Overpass 'out geom' response into kind-bucketed zones."""
     zones: dict[str, list] = {"water": [], "trees": [], "buildings": []}
     for el in payload.get("elements", []):
-        tags = el.get("tags", {})
+        tags = el.get("tags") or {}  # explicit "tags": null happens in the wild
         kind = _classify(tags)
         if kind is None:
             continue
         if el.get("type") == "way":
-            ring = _close_ring(el.get("geometry", []))
+            geom = el.get("geometry") or []
+            if "waterway" in tags and not (
+                    len(geom) > 1 and geom[0] == geom[-1]):
+                # Linear waterway: corridor ring instead of chord-closing.
+                ring = _corridor_ring(geom)
+            else:
+                ring = _close_ring(geom)
             if ring:
                 zones[kind].append({"kind": kind, "coords": ring, "tags": tags})
         elif el.get("type") == "relation" and kind != "buildings":
-            # Multipolygon: each outer member way becomes its own ring.
-            # Outers split across several ways aren't stitched — good
-            # enough for buffer distances, and far simpler than full
-            # multipolygon assembly.
-            for member in el.get("members", []):
-                if member.get("role") != "outer" or "geometry" not in member:
-                    continue
-                ring = _close_ring(member["geometry"])
+            for chain in _stitch_outer_rings(el.get("members", [])):
+                ring = _close_ring(chain)
                 if ring:
                     zones[kind].append(
                         {"kind": kind, "coords": ring, "tags": tags})
@@ -165,8 +260,18 @@ def fetch_zones(lat: float, lon: float, radius_m: float = 2000) -> dict:
     # just burns the retry budget on a request that can never succeed.
     if not math.isfinite(radius_m) or radius_m <= 0:
         raise ValueError("radius_m must be a positive finite number")
+    # lat/lon must be validated here too: a NaN center produces an Overpass
+    # query that returns 200 with zero elements — which would be cached and
+    # served as a confident "no zones here" under a key nothing can evict.
+    lat, lon = float(lat), float(lon)
+    if not (math.isfinite(lat) and math.isfinite(lon)
+            and -90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("lat/lon must be finite coordinates in range")
     radius_m = min(radius_m, MAX_RADIUS_M)
-    key = (round(lat, 3), round(lon, 3), int(radius_m))
+    # 4 decimals (~11 m grid): coarse enough for GPS jitter to hit the cache,
+    # fine enough that a hit is never a disc offset ~78 m from the request
+    # (which would drop zones near the radius edge).
+    key = (round(lat, 4), round(lon, 4), int(radius_m))
     now = time.time()
     _prune_cache(now)
     cached = _cache.get(key)

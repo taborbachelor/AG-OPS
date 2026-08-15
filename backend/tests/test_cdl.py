@@ -31,8 +31,9 @@ class TestAlbers(unittest.TestCase):
 
 def synth_grid():
     """40x40: corn field A (perfect rectangle), soybean field B with a 3x3
-    pond inside it, a water strip between them, single-pixel speckle in A,
-    and forest everywhere else."""
+    pond inside it, a water strip between them, a 1px POND in A (water is a
+    protected class — never despeckle-filled, becomes a keepout hole), a 1px
+    barren speckle in A (non-protected — filled), and forest everywhere else."""
     W = H = 40
     g = [[141] * W for _ in range(H)]                # forest
     for r in range(5, 35):
@@ -43,7 +44,8 @@ def synth_grid():
     for r in range(15, 18):
         for c in range(27, 30):
             g[r][c] = 111                            # pond inside B: 3x3
-    g[10][10] = 111                                  # 1px speckle in A (filled)
+    g[10][10] = 111                                  # 1px POND in A (kept as hole)
+    g[25][10] = 131                                  # 1px barren speckle (filled)
     for r in range(H):
         g[r][18] = 111                               # water strip
     return g
@@ -85,15 +87,20 @@ class TestDetect(unittest.TestCase):
         out = self._run(synth_grid())
         self.assertEqual(len(out["fields"]), 2)
         b, a = sorted(out["fields"], key=lambda f: -f["acres"])
-        # B: 420 - 9 pond px = 411; A: 360 (speckle filled by despeckle).
+        # B: 420 - 9 pond px = 411. A: 360 - 1 water px = 359 — the 1px pond
+        # is a PROTECTED class (real feature, never despeckle-filled) while
+        # the 1px barren speckle IS filled back to crop.
         self.assertAlmostEqual(b["acres"], 411 * cdl.ACRES_PER_PX, delta=1.0)
-        self.assertAlmostEqual(a["acres"], 360 * cdl.ACRES_PER_PX, delta=1.0)
+        self.assertAlmostEqual(a["acres"], 359 * cdl.ACRES_PER_PX, delta=1.0)
         self.assertEqual(b["crop"], "Soybeans")
         self.assertEqual(a["crop"], "Corn")
-        # The pond inside B becomes exactly one keepout hole; A has none.
+        # Each pond becomes exactly one keepout hole — including the 30 m
+        # single-pixel pond in A (regression: it used to be filled away,
+        # leaving the pond inside the sprayable polygon).
         self.assertEqual(len(b["holes"]), 1)
-        self.assertEqual(a["holes"], [])
+        self.assertEqual(len(a["holes"]), 1)
         self.assertGreaterEqual(len(b["holes"][0]), 3)
+        self.assertGreaterEqual(len(a["holes"][0]), 3)
 
     def test_rect_field_traces_to_four_corners(self):
         out = self._run(synth_grid())

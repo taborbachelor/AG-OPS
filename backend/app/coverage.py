@@ -34,6 +34,7 @@ def plan_coverage(
     speed_ms: float = 18.0,
     keepouts: Optional[list[list[dict]]] = None,
     keepout_buffer_m: float = 0.0,
+    work_budget: Optional[list] = None,
 ) -> dict:
     """Plan a serpentine spray pattern over a lat/lon polygon.
 
@@ -52,10 +53,14 @@ def plan_coverage(
             distance 0). A pass crossing a keepout splits into sub-segments
             outside the buffered zone; sub-segments shorter than
             _MIN_SEGMENT_M are dropped — too short to cycle the spray valve.
-            LIMITATION: transit hops between passes are NOT rerouted around
-            keepouts in this version. The drone may overfly a keepout between
-            passes with the sprayer off; it just never sprays inside the
-            buffered zone.
+            LIMITATION: connecting legs are NOT rerouted around keepouts in
+            this version — neither the hops between passes NOR the hop
+            between the two sub-segments a clipped pass splits into (that
+            one crosses the very keepout the clip avoided). The aircraft may
+            physically overfly a keepout (pond, TREE STAND — mind the spray
+            altitude) on any connecting leg, and once a spray pump exists
+            those legs must fly pump-off. stats.keepout_overflights counts
+            them so the UI can warn.
         keepout_buffer_m: extra standoff in meters around every keepout (>= 0).
 
     Returns:
@@ -121,9 +126,11 @@ def plan_coverage(
         # Legacy path: no clipping, no extra stats keys, identical output.
         segments = passes
         keepouts_applied = 0
+        overflights = 0
     else:
-        segments, keepouts_applied = _clip_passes_to_keepouts(
-            passes, keepouts, keepout_buffer_m, proj, cos_t, sin_t)
+        segments, keepouts_applied, overflights = _clip_passes_to_keepouts(
+            passes, keepouts, keepout_buffer_m, proj, cos_t, sin_t,
+            work_budget=work_budget)
         if not segments:
             raise ValueError("field fully blocked by keepout zones")
 
@@ -163,6 +170,10 @@ def plan_coverage(
         # stats shape (regression-pinned in tests).
         result["stats"]["keepouts_applied"] = keepouts_applied
         result["stats"]["n_segments"] = len(segments)
+        # Connecting legs that physically cross a keepout polygon (the
+        # aircraft overflies it; sprayer must be off) — surfaced so the UI
+        # can warn instead of the plan looking fully "avoided".
+        result["stats"]["keepout_overflights"] = overflights
     return result
 
 
@@ -312,7 +323,8 @@ def _clip_passes_to_keepouts(
     proj: tuple,
     cos_t: float,
     sin_t: float,
-) -> tuple[list[tuple[tuple[float, float], tuple[float, float]]], int]:
+    work_budget: Optional[list] = None,
+) -> tuple[list[tuple[tuple[float, float], tuple[float, float]]], int, int]:
     """Clip horizontal spray passes against buffered keepout polygons.
 
     Works entirely in the rotated local frame the passes were built in: each
@@ -320,15 +332,18 @@ def _clip_passes_to_keepouts(
     field's sweep rotation, so every pass stays a horizontal segment and
     clipping reduces to exact 1-D interval subtraction along x.
 
-    Returns (segments, keepouts_applied): sub-segments in flight order (the
-    parent pass's direction is preserved, so serpentine ordering survives)
-    and the count of keepout polygons that removed spray length from at
-    least one pre-clip pass — an order-independent definition, so overlap
-    between keepouts can't hide one behind another.
+    Returns (segments, keepouts_applied, overflights): sub-segments in flight
+    order (the parent pass's direction is preserved, so serpentine ordering
+    survives), the count of keepout polygons that removed spray length from
+    at least one pre-clip pass (order-independent, so overlap between
+    keepouts can't hide one behind another), and the number of connecting
+    legs between consecutive sub-segments that physically cross a keepout
+    polygon.
 
     Raises ValueError when the work performed (edge visits on rings that
-    survive the y-band prefilter) exceeds _MAX_CLIP_WORK, so a single
-    request can never burn more than a couple seconds of CPU here.
+    survive the y-band prefilter) exceeds the work budget — per call by
+    default, shared across a whole job when the caller passes work_budget —
+    so a single request can never burn more than a couple seconds of CPU.
     """
     lat0, lon0, m_per_deg, cos_lat = proj
     kp_rot = []
@@ -343,9 +358,19 @@ def _clip_passes_to_keepouts(
         ys = [y for _, y in pts]
         kp_ybounds.append((min(ys), max(ys)))
 
+    if work_budget is None:
+        work_budget = [_MAX_CLIP_WORK]
+
+    def _charge(n: int):
+        work_budget[0] -= n
+        if work_budget[0] < 0:
+            raise ValueError(
+                "keepout clipping too complex for this request: "
+                "increase the swath, shrink the field/job, or simplify "
+                "the keepouts")
+
     applied: set[int] = set()
     segments = []
-    work = 0  # keepout-edge visits performed; bounded by _MAX_CLIP_WORK
     for (sx, sy), (ex, _ey) in passes:  # sy == _ey: passes are horizontal
         lo, hi = (sx, ex) if sx <= ex else (ex, sx)
         blocked: list[tuple[float, float]] = []
@@ -356,12 +381,7 @@ def _clip_passes_to_keepouts(
             y_lo, y_hi = kp_ybounds[k]
             if sy < y_lo - buffer_m or sy > y_hi + buffer_m:
                 continue
-            work += len(ring)
-            if work > _MAX_CLIP_WORK:
-                raise ValueError(
-                    "keepout clipping too complex for this request: "
-                    "increase the swath, shrink the field, or simplify "
-                    "the keepouts")
+            _charge(len(ring))
             ivs = _merge_intervals(_blocked_intervals(ring, sy, buffer_m))
             for blo, bhi in ivs:
                 if min(bhi, hi) - max(blo, lo) > 1e-9:
@@ -376,7 +396,61 @@ def _clip_passes_to_keepouts(
             segments.extend(((a, sy), (b, sy)) for a, b in allowed)
         else:  # pass flew right-to-left: keep flight order and direction
             segments.extend(((b, sy), (a, sy)) for a, b in reversed(allowed))
-    return segments, len(applied)
+
+    # Count connecting legs (end of one sub-segment -> start of the next)
+    # that cross a keepout ring: the aircraft overflies the zone there.
+    overflights = 0
+    for i in range(1, len(segments)):
+        a = segments[i - 1][1]
+        b = segments[i][0]
+        if a == b:
+            continue
+        for k, ring in enumerate(kp_rot):
+            y_lo, y_hi = kp_ybounds[k]
+            if max(a[1], b[1]) < y_lo or min(a[1], b[1]) > y_hi:
+                continue
+            _charge(len(ring))
+            if _segment_crosses_ring(a, b, ring):
+                overflights += 1
+                break
+    return segments, len(applied), overflights
+
+
+def _seg_intersect(p, q, r, s) -> bool:
+    """True if segments pq and rs properly intersect (orientation test)."""
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    d1, d2 = cross(r, s, p), cross(r, s, q)
+    d3, d4 = cross(p, q, r), cross(p, q, s)
+    return (((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+            and d1 != d2 and d3 != d4)
+
+
+def _point_in_ring_xy(x: float, y: float,
+                      ring: list[tuple[float, float]]) -> bool:
+    """Ray-cast point-in-polygon on (x, y) tuples."""
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > y) != (yj > y):
+            if x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _segment_crosses_ring(a, b, ring) -> bool:
+    """True if segment ab enters keepout `ring`: crosses its boundary or has
+    its midpoint inside (covers a leg fully contained in the polygon)."""
+    n = len(ring)
+    for i in range(n):
+        if _seg_intersect(a, b, ring[i], ring[(i + 1) % n]):
+            return True
+    mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+    return _point_in_ring_xy(mx, my, ring)
 
 
 def _blocked_intervals(

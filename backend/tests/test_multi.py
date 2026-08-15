@@ -88,8 +88,17 @@ class TestUserKeepouts(unittest.TestCase):
                 {"lat": 39.90165, "lon": -95.79900},
                 {"lat": 39.90165, "lon": -95.79866},
                 {"lat": 39.90135, "lon": -95.79866}]
+        # Fail-closed default: zone-service failure refuses the plan…
         req = cm.MultiRequest(fields=[NEAR], keepouts=[pond])
         with mock.patch.object(cm, "fetch_zones", side_effect=RuntimeError("down")):
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as ctx:
+                cm.plan_multi_endpoint(req)
+            self.assertEqual(ctx.exception.status_code, 502)
+            self.assertEqual(ctx.exception.detail["error"], "zones_unavailable")
+            # …and the explicit opt-in still applies the detected holes.
+            req = cm.MultiRequest(fields=[NEAR], keepouts=[pond],
+                                  allow_missing_zones=True)
             out = cm.plan_multi_endpoint(req)
         self.assertTrue(out["zones_unavailable"])
         f = out["fields"][0]
@@ -113,9 +122,10 @@ class TestFieldsInArea(unittest.TestCase):
         selection = rect(39.8990, -95.8010, w_m=400, h_m=400)
         with mock.patch.object(field_boundaries, "fetch_fields",
                                return_value=[inside, outside]):
-            got = field_boundaries.fields_in_area(selection)
+            got, truncated = field_boundaries.fields_in_area(selection)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0], inside)
+        self.assertFalse(truncated)
 
     def test_selection_too_small_raises(self):
         with self.assertRaises(ValueError):

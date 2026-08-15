@@ -3,7 +3,8 @@ import math
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from app.cdl import detect_fields_cdl
-from app.field_boundaries import fetch_fields, fields_in_area, ring_acres, snap_to_field
+from app.field_boundaries import (fetch_fields, fields_in_area, ring_acres,
+                                  simplify_ring, snap_to_field)
 
 router = APIRouter()
 
@@ -18,13 +19,10 @@ class AreaBody(BaseModel):
 
 
 def _clean_ring(coords):
-    """Drop the ring-closing duplicate and downsample to stay editable and
-    under the planner's 500-vertex cap."""
-    ring = coords[:-1] if len(coords) > 1 and coords[0] == coords[-1] else list(coords)
-    if len(ring) > 400:
-        step = (len(ring) // 400) + 1
-        ring = ring[::step]
-    return ring
+    """Drop the ring-closing duplicate and simplify (deviation-bounded, NOT a
+    plain stride — a stride bulges outward across concavities, enclosing the
+    farmstead/pond a notch excluded) to stay under the planner's vertex cap."""
+    return simplify_ring(coords)
 
 
 @router.post("/detect")
@@ -39,6 +37,7 @@ def detect_fields(body: AreaBody):
     if not all(math.isfinite(p["lat"]) and math.isfinite(p["lon"]) for p in selection):
         raise HTTPException(422, "selection coordinates must be finite")
 
+    cdl_error = None
     try:
         cdl = detect_fields_cdl(selection)
         fields = [{
@@ -48,14 +47,15 @@ def detect_fields(body: AreaBody):
             "tags": {"source": "usda-cdl", "crop": f["crop"], "year": cdl["year"]},
         } for f in cdl["fields"]]
         return {"found": len(fields), "fields": fields,
-                "source": "usda-cdl", "year": cdl["year"]}
+                "source": "usda-cdl", "year": cdl["year"],
+                "truncated": cdl.get("truncated", False)}
     except ValueError as e:
         raise HTTPException(422, str(e))
-    except RuntimeError:
-        pass  # CropScape unavailable — fall back to mapped parcels
+    except RuntimeError as e:
+        cdl_error = str(e)  # CropScape unavailable — fall back to mapped parcels
 
     try:
-        parcels = fields_in_area(selection)
+        parcels, truncated = fields_in_area(selection)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except RuntimeError as e:
@@ -67,10 +67,17 @@ def detect_fields(body: AreaBody):
             continue
         fields.append({
             "polygon": ring,
+            # OSM parcels carry NO interior-hole data (unlike CDL): an
+            # explicit empty list + the cdl_unavailable flag below, so the
+            # UI can warn that in-field ponds/farmsteads were NOT detected
+            # instead of silently planning without them.
+            "holes": [],
             "acres": round(ring_acres(f["coords"]), 2),
             "tags": {**f.get("tags", {}), "source": "osm"},
         })
-    return {"found": len(fields), "fields": fields, "source": "osm"}
+    return {"found": len(fields), "fields": fields, "source": "osm",
+            "truncated": truncated,
+            "cdl_unavailable": True, "cdl_error": cdl_error}
 
 
 @router.get("/")
@@ -98,10 +105,6 @@ def snap(lat: float, lon: float, radius: float = 1500):
         raise HTTPException(502, str(e))
     if field is None:
         return {"found": False}
-    # Drop the ring-closing duplicate vertex; downsample huge rings so the
-    # result stays editable and under the planner's 500-vertex cap.
-    coords = field["coords"][:-1]
-    if len(coords) > 400:
-        step = (len(coords) // 400) + 1
-        coords = coords[::step]
+    # Deviation-bounded simplification (see _clean_ring) — never a stride.
+    coords = simplify_ring(field["coords"])
     return {"found": True, "polygon": coords, "tags": field.get("tags", {})}

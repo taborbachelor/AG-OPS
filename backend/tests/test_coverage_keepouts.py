@@ -14,6 +14,8 @@ import math
 import unittest
 from unittest import mock
 
+from fastapi import HTTPException
+
 from app import coverage as coverage_module
 from app.coverage import EARTH_RADIUS_M, plan_coverage
 from app.routers import coverage as coverage_router
@@ -391,17 +393,32 @@ class TestPlanAuto(unittest.TestCase):
         self.assertEqual(resp["stats"]["n_segments"],
                          resp["stats"]["n_passes"])
 
-    def test_overpass_failure_degrades_to_unclipped_plan(self):
+    def test_overpass_failure_fails_closed_by_default(self):
+        """Zone-service failure must NOT silently return an unclipped plan —
+        a normal-looking mission with zero keepouts is the one outcome this
+        endpoint must never default to."""
         def boom(*args, **kwargs):
             raise RuntimeError("Overpass API request failed after retry")
 
         with mock.patch.object(coverage_router, "fetch_zones", boom):
-            resp = coverage_router.plan_auto(self._request())
+            with self.assertRaises(HTTPException) as ctx:
+                coverage_router.plan_auto(self._request())
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.assertEqual(ctx.exception.detail["error"], "zones_unavailable")
+
+    def test_overpass_failure_degrades_only_with_explicit_optin(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError("Overpass API request failed after retry")
+
+        req = self._request()
+        req.allow_missing_zones = True
+        with mock.patch.object(coverage_router, "fetch_zones", boom):
+            resp = coverage_router.plan_auto(req)
 
         self.assertTrue(resp["zones_unavailable"])
         self.assertEqual(resp["zones"], {})
-        # The fallback is the exact legacy (unclipped) plan: same waypoints,
-        # no keepout stats keys.
+        # The opted-in fallback is the exact legacy (unclipped) plan: same
+        # waypoints, no keepout stats keys.
         legacy = plan_rect()
         self.assertEqual(resp["waypoints"], legacy["waypoints"])
         self.assertNotIn("keepouts_applied", resp["stats"])

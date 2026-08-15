@@ -38,7 +38,16 @@ PIXEL_M = 30.0
 ACRES_PER_PX = (PIXEL_M * PIXEL_M) / 4046.8564224   # ~0.2224 ac
 MAX_SPAN_M = 6000.0        # selection bbox cap (keeps rasters small)
 MIN_FIELD_PX = 10          # ~2.2 acres — ignore slivers
-MIN_HOLE_PX = 2            # interior islands >= ~0.45 ac become keepout holes
+MIN_HOLE_PX = 1            # EVERY interior island becomes a keepout hole: a
+                           # single 30x30 m pixel of water/farmstead is a real
+                           # feature (a farm pond), not noise — dropping it
+                           # put the pond inside the sprayable polygon. Extra
+                           # tiny keepouts cost a little chemical; the reverse
+                           # sprays the pond.
+# Total wall-clock budget for a detect call (all year attempts + downloads):
+# each _http_get could otherwise block a threadpool worker for 60 s x 6
+# requests — the same pool that serves disarm/RTL handlers.
+DETECT_BUDGET_S = 90.0
 MAX_FIELDS = 40
 SIMPLIFY_TOL_PX = 0.9      # straightens 30m staircases into clean diagonals
                            # (outer boundaries only — holes are keepouts and
@@ -50,6 +59,10 @@ SIMPLIFY_TOL_PX = 0.9      # straightens 30m staircases into clean diagonals
 # shrub/barren 131/152, wetlands 190/195, grass/pasture 62/176 (opt-in).
 CROP_CODES = set(range(1, 62)) | set(range(66, 78)) | set(range(196, 256))
 PASTURE_CODES = {62, 176}
+# Classes that are REAL physical features, never "speckle": water, developed,
+# forest, wetlands. A single-pixel island of these (a farm pond, a wellhead
+# pad) must never be despeckle-filled into sprayable cropland.
+PROTECTED_CODES = {111, 112, 121, 122, 123, 124, 141, 142, 143, 190, 195}
 
 CROP_NAMES = {
     1: "Corn", 4: "Sorghum", 5: "Soybeans", 6: "Sunflower", 21: "Barley",
@@ -63,25 +76,36 @@ _cache: dict = {}
 _CACHE_TTL = 1800.0
 
 
-def _http_get(url: str, timeout: float = 60.0) -> bytes:
+def _http_get(url: str, deadline: float, timeout: float = 60.0) -> bytes:
+    """GET with a per-request timeout AND a caller wall-clock deadline, so a
+    slow CropScape day can't pin a threadpool worker for minutes (that pool
+    is shared with disarm/RTL handlers)."""
+    remaining = deadline - time.time()
+    if remaining <= 1.0:
+        raise RuntimeError("CDL request budget exhausted")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
         return resp.read()
 
 
-def _fetch_clip(bbox_5070, year: int):
+def _fetch_clip(bbox_5070, year: int, deadline: float):
     """CropScape clip request -> (grid rows of class codes, geotransform).
     geotransform = (ulx, uly, sx, sy): x = ulx + px*sx, y = uly - py*sy."""
     x1, y1, x2, y2 = bbox_5070
     url = (f"{CROPSCAPE}?year={year}&"
            f"bbox={x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")
-    xml = _http_get(url).decode(errors="ignore")
+    xml = _http_get(url, deadline).decode(errors="ignore")
     m = re.search(r"<returnURL>(.*?)</returnURL>", xml)
     if not m:
         raise RuntimeError(f"CropScape gave no raster URL (year {year}): {xml[:200]}")
-    tif = _http_get(m.group(1).strip())
+    tif = _http_get(m.group(1).strip(), deadline)
 
     img = Image.open(io.BytesIO(tif))
+    if img.mode not in ("P", "L"):
+        # CDL rasters are 8-bit class codes. Anything else (an RGB error
+        # tile, a float raster) would make every `grid[r][c] in codes` test
+        # silently False -> "found: 0" presented as a real result.
+        raise RuntimeError(f"unexpected CDL raster mode {img.mode!r}")
     w, h = img.size
     data = list(img.getdata())
     grid = [data[r * w:(r + 1) * w] for r in range(h)]
@@ -97,10 +121,14 @@ def _fetch_clip(bbox_5070, year: int):
     return grid, gt
 
 
-def _despeckle(mask, w, h):
+def _despeckle(mask, w, h, grid=None):
     """Fill single-pixel classification noise: a non-crop cell with all four
     neighbors crop becomes crop; an isolated crop cell (no crop neighbors)
-    is dropped. One pass each — 30m speckle, not real features."""
+    is dropped. One pass each — 30m speckle, not real features.
+
+    EXCEPTION: cells classified as a PROTECTED code (water, developed,
+    forest, wetland) are never filled — a lone 30 m water pixel is a farm
+    pond, and filling it re-labels the pond as sprayable cropland."""
     fill = []
     drop = []
     for r in range(h):
@@ -109,6 +137,8 @@ def _despeckle(mask, w, h):
             inb = [(rr, cc) for rr, cc in n if 0 <= rr < h and 0 <= cc < w]
             crop_n = sum(1 for rr, cc in inb if mask[rr][cc])
             if not mask[r][c] and len(inb) == 4 and crop_n == 4:
+                if grid is not None and grid[r][c] in PROTECTED_CODES:
+                    continue
                 fill.append((r, c))
             elif mask[r][c] and crop_n == 0:
                 drop.append((r, c))
@@ -270,8 +300,10 @@ def detect_fields_cdl(selection, include_pasture=False, year=None):
         raise ValueError(f"selection too large — keep it under {MAX_SPAN_M/1000:.0f} km across")
     bbox = (min(xs), min(ys), max(xs), max(ys))
 
+    # `year` in the key: an explicit year=2023 request must never be served a
+    # cached 2025 result for the same bbox (or vice versa).
     key = (round(bbox[0], -1), round(bbox[1], -1), round(bbox[2], -1),
-           round(bbox[3], -1), include_pasture)
+           round(bbox[3], -1), include_pasture, year)
     now = time.time()
     hit = _cache.get(key)
     if hit and now - hit[0] < _CACHE_TTL:
@@ -279,22 +311,25 @@ def detect_fields_cdl(selection, include_pasture=False, year=None):
 
     codes = CROP_CODES | (PASTURE_CODES if include_pasture else set())
     years = [year] if year else [2025, 2024, 2023]
+    deadline = now + DETECT_BUDGET_S
     grid = gt = None
     last_err = None
     used_year = None
     for yr in years:
         try:
-            grid, gt = _fetch_clip(bbox, yr)
+            grid, gt = _fetch_clip(bbox, yr, deadline)
             used_year = yr
             break
         except Exception as e:  # noqa: BLE001 — try older year
             last_err = e
+            if time.time() >= deadline:
+                break
     if grid is None:
         raise RuntimeError(f"CDL fetch failed: {last_err}")
 
     h, w = len(grid), len(grid[0])
     mask = [[grid[r][c] in codes for c in range(w)] for r in range(h)]
-    mask = _despeckle(mask, w, h)
+    mask = _despeckle(mask, w, h, grid)
 
     comps = [c for c in _segment(mask, w, h) if len(c) >= MIN_FIELD_PX]
     comps.sort(key=len, reverse=True)
@@ -346,7 +381,10 @@ def detect_fields_cdl(selection, include_pasture=False, year=None):
             "crop": CROP_NAMES.get(top, "Cropland"),
         })
 
-    result = {"fields": fields, "year": used_year}
+    result = {"fields": fields, "year": used_year,
+              # More components existed than MAX_FIELDS: the list is the
+              # largest N, not everything — callers must say so.
+              "truncated": len(comps) > MAX_FIELDS}
     _cache[key] = (now, result)
     if len(_cache) > 32:
         _cache.pop(next(iter(_cache)))

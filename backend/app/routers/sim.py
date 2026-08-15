@@ -221,6 +221,30 @@ def _require_vehicle():
         raise HTTPException(400, "Not connected to a vehicle")
 
 
+def _require_sitl():
+    """Refuse fault injection on anything that isn't demonstrably SITL.
+
+    The gcs_link fault silences our GCS heartbeat: on a REAL vehicle with
+    FS_GCS enabled that triggers an actual RTL. SITL firmware exposes SIM_*
+    parameters and real firmware doesn't, so the synced param cache is the
+    discriminator; if the cache hasn't synced yet, probe one SIM param live
+    rather than guessing."""
+    cached = vehicle_manager.get_cached_params()
+    if any(n.startswith("SIM_") for n in cached):
+        return
+    if cached:
+        # Cache is populated and has no SIM_* params: this is real firmware.
+        raise HTTPException(409, "Fault injection refused: connected vehicle "
+                                 "is not a SITL simulator")
+    try:
+        probe = vehicle_manager.get_param("SIM_SPEEDUP")
+    except Exception:
+        probe = None
+    if probe is None:
+        raise HTTPException(409, "Fault injection refused: cannot confirm the "
+                                 "connected vehicle is a SITL simulator")
+
+
 def _verified_set(name: str, value: float) -> dict:
     """Write a fault param through the normal verified path; loud on failure so
     a scenario can never believe a fault is active when the vehicle never got
@@ -256,6 +280,7 @@ def _gps_fault_param() -> tuple[str, float, float]:
 def _inject_fault(req: FaultRequest) -> dict:
     global _batt_prev
     _require_vehicle()
+    _require_sitl()
     detail: dict = {}
 
     if req.fault == "gps":

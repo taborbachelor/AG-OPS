@@ -117,6 +117,8 @@ class TestFaultEndpoint(unittest.TestCase):
             return {"verified": True, "accepted": value, "requested": value}
 
         with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"SIM_SPEEDUP": 1.0}), \
              mock.patch.object(vehicle_manager, "cached_type",
                                side_effect=lambda n: 2 if n == "SIM_GPS1_ENABLE" else None), \
              mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
@@ -133,6 +135,8 @@ class TestFaultEndpoint(unittest.TestCase):
             return {"verified": True, "accepted": value, "requested": value}
 
         with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"SIM_SPEEDUP": 1.0}), \
              mock.patch.object(vehicle_manager, "cached_type",
                                side_effect=lambda n: 4 if n == "SIM_GPS_DISABLE" else None), \
              mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
@@ -149,6 +153,8 @@ class TestFaultEndpoint(unittest.TestCase):
             return {"verified": True, "accepted": value, "requested": value}
 
         with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"SIM_SPEEDUP": 1.0}), \
              mock.patch.object(vehicle_manager, "cached_value",
                                side_effect=lambda n: 12.4 if n == "SIM_BATT_VOLTAGE" else None), \
              mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
@@ -167,13 +173,38 @@ class TestFaultEndpoint(unittest.TestCase):
                     "error": "no PARAM_VALUE echo from vehicle"}
 
         with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"SIM_SPEEDUP": 1.0}), \
              mock.patch.object(vehicle_manager, "cached_type", return_value=2), \
              mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
             r = self.client.post("/api/sim/fault", json={"fault": "gps"})
         self.assertEqual(r.status_code, 502)
 
+    def test_fault_refused_on_non_sitl_vehicle(self):
+        """gcs_link on a REAL vehicle would silence our heartbeats and
+        trigger an actual FS_GCS RTL - a synced cache with no SIM_* params
+        identifies real firmware and must refuse every fault."""
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"FENCE_ENABLE": 1.0}):
+            r = self.client.post("/api/sim/fault",
+                                 json={"fault": "gcs_link", "enable": True})
+        self.assertEqual(r.status_code, 409)
+        self.assertFalse(vehicle_manager.snapshot()["gcs_hb_suppressed"])
+
+    def test_fault_refused_when_sitl_unconfirmable(self):
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={}), \
+             mock.patch.object(vehicle_manager, "get_param", return_value=None):
+            r = self.client.post("/api/sim/fault",
+                                 json={"fault": "gcs_link", "enable": True})
+        self.assertEqual(r.status_code, 409)
+
     def test_gcs_link_fault_toggles_suppression(self):
-        with mock.patch.object(vehicle_manager, "connected", True):
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"SIM_SPEEDUP": 1.0}):
             r = self.client.post("/api/sim/fault",
                                  json={"fault": "gcs_link", "enable": True})
             self.assertEqual(r.status_code, 200)

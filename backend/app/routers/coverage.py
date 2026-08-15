@@ -60,6 +60,14 @@ class AutoCoverageRequest(BaseModel):
     water_buffer: float = Field(15.0, ge=0)
     tree_buffer: float = Field(10.0, ge=0)
     building_buffer: float = Field(10.0, ge=0)
+    # Caller-supplied keepouts (e.g. CDL-detected in-field holes), merged
+    # with the OSM zones and honored even when the zone service is down.
+    keepouts: Optional[list[Annotated[list[LatLon],
+                                      Field(max_length=500)]]] = Field(
+        None, max_length=100)
+    # FAIL-CLOSED default: a plan with no zone data is only returned when the
+    # operator explicitly accepts flying without no-spray keepouts.
+    allow_missing_zones: bool = False
 
 
 # Same bounds as the multi router's speed field, enforced in the handlers:
@@ -109,9 +117,12 @@ def plan(req: CoverageRequest):
 def plan_auto(req: AutoCoverageRequest):
     """Plan coverage with keepouts auto-fetched from OSM around the field.
 
-    Zone search radius = half the field's bounding-box diagonal + 500 m
-    margin (spray drift + zones just past the boundary), capped at 5 km to
-    respect the shared Overpass service (fetch_zones caps again anyway).
+    Zone search radius = the farthest field vertex from the vertex centroid
+    + 500 m margin (spray drift + zones just past the boundary), capped at
+    5 km. NOT the bbox half-diagonal: that radius is only valid from the
+    bbox center, and measured from the vertex centroid it can leave part of
+    the field outside the queried disc — zones there would silently never
+    become keepouts.
 
     Per-kind buffers are applied conservatively: every keepout is clipped
     with the LARGEST buffer among the kinds actually present. A single
@@ -119,39 +130,54 @@ def plan_auto(req: AutoCoverageRequest):
     side of not spraying — never the reverse (a tree buffered like water
     wastes a little chemical; the opposite would contaminate the pond).
 
-    If the zone lookup fails (Overpass down / rate-limited), degrade
-    gracefully instead of 500ing: return the UNCLIPPED plan flagged
-    zones_unavailable=true so the operator can still fly and judge
-    keepouts visually.
+    FAIL-CLOSED: if the zone lookup fails (Overpass down / rate-limited /
+    query timed out), the request is refused with a 502 naming the problem —
+    a normal-looking plan with zero keepouts must never be the silent
+    default. The operator can explicitly accept flying without zone data by
+    passing allow_missing_zones=true, which returns the degraded plan
+    flagged zones_unavailable=true (caller keepouts still applied).
     """
     _check_speed(req.speed)  # before fetch_zones: fail fast, no network
     poly = [p.model_dump() for p in req.polygon]
-    lats = [p["lat"] for p in poly]
-    lons = [p["lon"] for p in poly]
-    clat = sum(lats) / len(lats)
-    clon = sum(lons) / len(lons)
-    # Half-diagonal of the bounding box in meters, via the same
-    # equirectangular approximation the planner itself uses.
+    clat = sum(p["lat"] for p in poly) / len(poly)
+    clon = sum(p["lon"] for p in poly) / len(poly)
     m_per_deg = math.pi / 180.0 * EARTH_RADIUS_M
-    span_x = (max(lons) - min(lons)) * m_per_deg * math.cos(math.radians(clat))
-    span_y = (max(lats) - min(lats)) * m_per_deg
-    radius = min(math.hypot(span_x, span_y) / 2.0 + 500.0, 5000.0)
+    kx = m_per_deg * math.cos(math.radians(clat))
+    span = max(math.hypot((p["lat"] - clat) * m_per_deg,
+                          (p["lon"] - clon) * kx) for p in poly)
+    radius = min(span + 500.0, 5000.0)
 
+    user_keepouts = ([[p.model_dump() for p in kp] for kp in req.keepouts]
+                     if req.keepouts else [])
     plan_kwargs = dict(swath_m=req.swath, alt_m=req.alt,
                        angle_deg=req.angle, speed_ms=req.speed)
     try:
         zones = fetch_zones(clat, clon, radius)
-    except RuntimeError:
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        if not req.allow_missing_zones:
+            raise HTTPException(502, {
+                "message": "no-spray zone lookup failed — refusing to plan "
+                           "without zone data",
+                "error": "zones_unavailable",
+                "detail": str(exc),
+                "hint": "retry, or pass allow_missing_zones=true to plan "
+                        "anyway WITHOUT water/tree/building keepouts",
+            })
         try:
-            unclipped = plan_coverage(poly, **plan_kwargs)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        return {**unclipped, "zones": {}, "zones_unavailable": True}
+            degraded = plan_coverage(
+                poly, **plan_kwargs,
+                keepouts=(user_keepouts or None),
+                keepout_buffer_m=(req.water_buffer if user_keepouts else 0.0))
+        except ValueError as exc2:
+            raise HTTPException(400, str(exc2))
+        return {**degraded, "zones": {}, "zones_unavailable": True}
 
     buffers = {"water": req.water_buffer, "trees": req.tree_buffer,
                "buildings": req.building_buffer}
-    keepouts: list[list[dict]] = []
-    max_buffer = 0.0
+    keepouts: list[list[dict]] = list(user_keepouts)
+    max_buffer = req.water_buffer if user_keepouts else 0.0
     for kind in ("water", "trees", "buildings"):
         for zone in zones.get(kind, []):
             ring = zone["coords"]

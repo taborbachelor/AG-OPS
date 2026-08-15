@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 
@@ -75,17 +75,20 @@ class LatLon(BaseModel):
 
 
 class FieldBoundary(BaseModel):
-    polygon: list[LatLon]
+    # Vertex cap: the self-intersection check below is O(n^2); an unbounded
+    # ~50k-point payload would pin a threadpool worker for minutes.
+    polygon: list[LatLon] = Field(min_length=3, max_length=1000)
 
 
 class OrderCreate(BaseModel):
     # Note: no price field on purpose — see pricing comment above.
-    name: str
-    email: str
-    phone: Optional[str] = None
+    # Length caps: these are stored verbatim; nothing legitimate needs more.
+    name: str = Field(min_length=1, max_length=200)
+    email: str = Field(min_length=3, max_length=254)
+    phone: Optional[str] = Field(None, max_length=50)
     field: FieldBoundary
-    date: str            # 'YYYY-MM-DD'
-    slot: str            # 'AM' | 'PM'
+    date: str = Field(max_length=10)   # 'YYYY-MM-DD'
+    slot: str = Field(max_length=2)    # 'AM' | 'PM'
 
 
 class StatusUpdate(BaseModel):
@@ -269,6 +272,10 @@ def _validate_new_order(body: OrderCreate) -> None:
     for p in body.field.polygon:
         if not (math.isfinite(p.lat) and math.isfinite(p.lon)):
             raise HTTPException(400, "Field coordinates must be finite numbers")
+        # Range check too: huge finite values overflow the shoelace products
+        # (round(inf) raises) or produce a price int sqlite can't store.
+        if not (-90 <= p.lat <= 90 and -180 <= p.lon <= 180):
+            raise HTTPException(400, "Field coordinates out of range")
     if _ring_self_intersects(body.field.polygon):
         raise HTTPException(
             400, "Field boundary must not cross itself — please redraw it")
@@ -304,6 +311,10 @@ def create_order(body: OrderCreate) -> dict:
     _validate_new_order(body)
 
     acres = _polygon_acres(body.field.polygon)
+    # An all-collinear "polygon" encloses nothing; billing the $150 minimum
+    # for a zero-area field is a bug either way — make the customer redraw.
+    if acres < 0.01:
+        raise HTTPException(400, "Field boundary encloses no area — please redraw it")
     # Store the boundary as GeoJSON (lon, lat order per the spec) so the GCS
     # can later turn it directly into a spray mission.
     ring = [[p.lon, p.lat] for p in body.field.polygon]

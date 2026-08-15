@@ -93,7 +93,9 @@ def fetch_fields(lat: float, lon: float, radius_m: float = 1500.0) -> list:
 
     now = time.time()
     _prune_cache(now)
-    key = (round(lat, 3), round(lon, 3), int(radius_m))
+    # 4 decimals (~11 m grid): a hit can no longer be a disc offset ~78 m
+    # from the requested center (parcels near the radius edge went missing).
+    key = (round(lat, 4), round(lon, 4), int(radius_m))
     hit = _cache.get(key)
     if hit and now - hit[0] <= CACHE_TTL_S:
         return hit[1]
@@ -102,6 +104,54 @@ def fetch_fields(lat: float, lon: float, radius_m: float = 1500.0) -> list:
     fields = _parse_fields(payload)
     _cache[key] = (now, fields)
     return fields
+
+
+def simplify_ring(ring: list, tol_m: float = 3.0, max_vertices: int = 450) -> list:
+    """Reduce a [{lat,lon}] ring's vertex count with a BOUNDED deviation.
+
+    Replaces the old plain-stride decimation (`ring[::step]`), which across a
+    concavity moves the boundary OUTWARD — a parcel mapped with a notch cut
+    around a farmstead/pond would lose the notch and enclose it, i.e. spray
+    it. Douglas-Peucker bounds the deviation to tol_m in either direction
+    (3 m is far below any spray buffer). If DP alone can't reach
+    max_vertices, the tolerance is doubled a few times before falling back
+    to a final stride pass (huge pathological rings only)."""
+    pts = ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else list(ring)
+    if len(pts) <= max_vertices:
+        return pts
+    clat = sum(p["lat"] for p in pts) / len(pts)
+    kx = 111320.0 * math.cos(math.radians(clat))
+    xy = [(p["lon"] * kx, p["lat"] * 111320.0) for p in pts]
+
+    def dp(tol):
+        keep = {0, len(xy) - 1}
+
+        def rec(lo, hi):
+            ax, ay = xy[lo]
+            bx, by = xy[hi]
+            seg = math.hypot(bx - ax, by - ay) or 1e-9
+            dmax, imax = -1.0, None
+            for i in range(lo + 1, hi):
+                px, py = xy[i]
+                d = abs((bx - ax) * (ay - py) - (ax - px) * (by - ay)) / seg
+                if d > dmax:
+                    dmax, imax = d, i
+            if dmax > tol and imax is not None:
+                rec(lo, imax)
+                keep.add(imax)
+                rec(imax, hi)
+
+        rec(0, len(xy) - 1)
+        return sorted(keep)
+
+    tol = tol_m
+    for _ in range(4):
+        idx = dp(tol)
+        if len(idx) <= max_vertices:
+            return [pts[i] for i in idx]
+        tol *= 2.0
+    step = (len(pts) // max_vertices) + 1
+    return pts[::step]
 
 
 def point_in_ring(lat: float, lon: float, ring: list) -> bool:
@@ -133,10 +183,14 @@ def ring_acres(ring: list) -> float:
     return abs(area / 2.0) / 4046.8564224
 
 
-def fields_in_area(selection: list, cap: int = 40) -> list:
+def fields_in_area(selection: list, cap: int = 40) -> tuple[list, bool]:
     """All mapped ag parcels inside a selection polygon: parcel centroid (or
     any sampled vertex) inside the selection counts. Selection drives the
-    Overpass radius, capped like everything else."""
+    Overpass radius, capped like everything else.
+
+    Returns (parcels, truncated): truncated=True means more than `cap`
+    parcels matched and the list is an arbitrary subset — callers must
+    surface that instead of presenting it as complete."""
     if len(selection) < 3:
         raise ValueError("selection polygon needs at least 3 vertices")
     clat = sum(p["lat"] for p in selection) / len(selection)
@@ -152,6 +206,7 @@ def fields_in_area(selection: list, cap: int = 40) -> list:
 
     parcels = fetch_fields(clat, clon, radius)
     out = []
+    truncated = False
     for f in parcels:
         cs = f["coords"]
         pc_lat = sum(c["lat"] for c in cs) / len(cs)
@@ -161,26 +216,44 @@ def fields_in_area(selection: list, cap: int = 40) -> list:
             step = max(1, len(cs) // 10)
             inside = any(point_in_ring(c["lat"], c["lon"], sel_ring) for c in cs[::step])
         if inside:
+            if len(out) >= cap:
+                truncated = True
+                break
             out.append(f)
-        if len(out) >= cap:
-            break
-    return out
+    return out, truncated
+
+
+def _dist_to_ring_m(lat: float, lon: float, ring: list) -> float:
+    """Minimum distance (m) from a point to a ring's boundary edges."""
+    kx = 111320.0 * math.cos(math.radians(lat))
+    px, py = lon * kx, lat * 111320.0
+    best = math.inf
+    for i in range(len(ring) - 1):
+        ax, ay = ring[i]["lon"] * kx, ring[i]["lat"] * 111320.0
+        bx, by = ring[i + 1]["lon"] * kx, ring[i + 1]["lat"] * 111320.0
+        dx, dy = bx - ax, by - ay
+        seg2 = dx * dx + dy * dy
+        if seg2 == 0.0:
+            best = min(best, math.hypot(px - ax, py - ay))
+            continue
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg2))
+        best = min(best, math.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+    return best
 
 
 def snap_to_field(lat: float, lon: float, radius_m: float = 1500.0):
-    """The parcel containing the click, else the one whose centroid is
-    nearest within 300 m, else None."""
+    """The parcel containing the click, else the one whose BOUNDARY is
+    nearest within 300 m, else None. (Nearest boundary, not nearest
+    centroid: a click between two parcels must snap to the one it is
+    actually beside, not to a farther, smaller parcel whose centroid
+    happens to be closer.)"""
     fields = fetch_fields(lat, lon, radius_m)
     for f in fields:
         if point_in_ring(lat, lon, f["coords"]):
             return f
     best, best_d = None, 300.0  # meters
-    kx = 111320.0 * math.cos(math.radians(lat))
     for f in fields:
-        cs = f["coords"]
-        clat = sum(c["lat"] for c in cs) / len(cs)
-        clon = sum(c["lon"] for c in cs) / len(cs)
-        d = math.hypot((clat - lat) * 111320.0, (clon - lon) * kx)
+        d = _dist_to_ring_m(lat, lon, f["coords"])
         if d < best_d:
             best, best_d = f, d
     return best

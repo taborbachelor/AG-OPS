@@ -157,9 +157,11 @@ class OrdersApiTest(unittest.TestCase):
             orders.create_order(_order_body(date=biz_today.isoformat()))
 
     def test_two_point_polygon_rejected(self):
-        with self.assertRaises(HTTPException) as ctx:
-            orders.create_order(_order_body(polygon=TINY_TRIANGLE[:2]))
-        self.assertEqual(ctx.exception.status_code, 400)
+        # Now rejected at the pydantic layer (min_length=3) before the
+        # handler even runs — a 422 over HTTP.
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            _order_body(polygon=TINY_TRIANGLE[:2])
 
     def test_bowtie_polygon_rejected(self):
         # A genuine self-crossing (Z-order corners) must still be caught.

@@ -127,6 +127,7 @@ def surface_test(req: SurfaceTest):
     rcmap_name, default_ch = _RCMAP[req.surface]
     cached = vehicle_manager.cached_value(rcmap_name)
     rc_ch = int(float(cached)) if cached is not None else default_ch
+    prev_mode = vehicle_manager.snapshot().get("mode")
     if not vehicle_manager.set_mode("MANUAL"):
         raise HTTPException(502, "vehicle refused MANUAL mode")
     channels = [0] * 8
@@ -143,6 +144,10 @@ def surface_test(req: SurfaceTest):
             sampled = vehicle_manager.snapshot().get("servo_outputs")
     finally:
         vehicle_manager.release_rc_override()
+        # Put the mode back — a bench vehicle silently left in MANUAL would
+        # surprise the next operation (best-effort; MANUAL is a safe floor).
+        if prev_mode and prev_mode not in ("MANUAL", "UNKNOWN"):
+            vehicle_manager.set_mode(prev_mode)
     return {"status": "ok", "surface": req.surface, "rc_channel": rc_ch,
             "pwm": req.pwm, "servo_outputs_during_hold": sampled}
 

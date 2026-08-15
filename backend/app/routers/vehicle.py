@@ -142,17 +142,32 @@ def land():
     return {"status": "landing", **result}
 
 
+def _refuse_full_sync_while_armed():
+    """A full parameter download holds the link lock for up to ~25s (longer on
+    a slow radio) — during which RTL/mode/disarm commands AND the guardian's
+    own RTL would queue behind it, and telemetry freezes. Never in flight."""
+    if vehicle_manager.snapshot().get("armed"):
+        raise HTTPException(409, {
+            "message": "full parameter sync refused while ARMED — it would "
+                       "block emergency commands (RTL/disarm) for its "
+                       "duration",
+            "hint": "use cached=true in flight, or sync after landing",
+        })
+
+
 @router.get("/params")
 def get_all_params(cached: bool = False):
     """Full parameter table. `cached=true` returns the M3 cache instantly (from
     the on-connect sync) without touching the link; otherwise it runs a fresh
-    sync (a few seconds; telemetry pauses while the link is dedicated to it)."""
+    sync (a few seconds; telemetry pauses while the link is dedicated to it).
+    A fresh sync is refused while armed — see _refuse_full_sync_while_armed."""
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
     if cached:
         params = vehicle_manager.get_cached_params()
         return {"params": params, "count": len(params), "cached": True,
                 "sync": vehicle_manager._param_sync}
+    _refuse_full_sync_while_armed()
     params = vehicle_manager.get_all_params()
     if not params:
         raise HTTPException(504, "Parameter download timed out")
@@ -162,9 +177,10 @@ def get_all_params(cached: bool = False):
 @router.post("/params/sync")
 def sync_params():
     """Kick off a fresh full parameter sync in the background. Poll progress via
-    telemetry's `param_sync` field."""
+    telemetry's `param_sync` field. Refused while armed (blocks the link)."""
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
+    _refuse_full_sync_while_armed()
     vehicle_manager.sync_params()
     return {"status": "syncing", "sync": vehicle_manager._param_sync}
 
@@ -206,9 +222,13 @@ def _is_volatile(name: str) -> bool:
 @router.post("/params/restore")
 def restore_params(req: ParamRestore):
     """Write a .param backup to the vehicle: only params that differ from the
-    cache are written (each one verified); every outcome is reported."""
+    cache are written (each one verified); every outcome is reported.
+    DISARMED-only, like the bench endpoints: a bulk restore is a bench/setup
+    operation and must never rewrite dozens of params on a flying vehicle."""
     if not vehicle_manager.connected:
         raise HTTPException(400, "Not connected")
+    if vehicle_manager.snapshot().get("armed"):
+        raise HTTPException(409, "Parameter restore is DISARMED-only")
     cache = vehicle_manager.get_cached_params()
     wanted, malformed = {}, []
     for ln in req.content.splitlines():
