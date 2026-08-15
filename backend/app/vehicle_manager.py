@@ -131,6 +131,20 @@ class TelemetryData:
     ekf_healthy: bool = False
     # Sensors SYS_STATUS reports as enabled-but-unhealthy, by name.
     sensor_errors: list = field(default_factory=list)
+    # EKF variance leading indicators (EKF_STATUS_REPORT): 0.0 (perfect)
+    # rising toward ArduPilot's own internal EKF reject threshold (~1.0) —
+    # an early signal ahead of ekf_healthy actually flipping False.
+    ekf_pos_var: float = 0.0
+    ekf_vel_var: float = 0.0
+    # Vibration (VIBRATION message): per-axis RMS m/s/s, plus cumulative
+    # accelerometer clipping event counts since boot (not since arm — the
+    # guardian baselines these itself at the arm edge).
+    vibration_x: float = 0.0
+    vibration_y: float = 0.0
+    vibration_z: float = 0.0
+    clip_0: int = 0
+    clip_1: int = 0
+    clip_2: int = 0
 
 
 class VehicleManager:
@@ -850,6 +864,16 @@ class VehicleManager:
                     and flags & (_EKF_POS_HORIZ_REL | _EKF_POS_HORIZ_ABS)
                     and not flags & _EKF_CONST_POS_MODE
                     and not flags & _EKF_UNINITIALIZED)
+                self.telemetry.ekf_pos_var = float(getattr(msg, "pos_horiz_variance", 0.0))
+                self.telemetry.ekf_vel_var = float(getattr(msg, "velocity_variance", 0.0))
+
+            elif msg_type == "VIBRATION":
+                self.telemetry.vibration_x = float(msg.vibration_x)
+                self.telemetry.vibration_y = float(msg.vibration_y)
+                self.telemetry.vibration_z = float(msg.vibration_z)
+                self.telemetry.clip_0 = int(msg.clipping_0)
+                self.telemetry.clip_1 = int(msg.clipping_1)
+                self.telemetry.clip_2 = int(msg.clipping_2)
 
             elif msg_type == "GPS_RAW_INT":
                 self.telemetry.gps_fix = msg.fix_type
@@ -999,6 +1023,17 @@ class VehicleManager:
             "hdg": t.heading, "as": round(t.airspeed, 2), "gs": round(t.groundspeed, 2),
             "pitch": round(t.pitch, 4), "roll": round(t.roll, 4), "yaw": round(t.yaw, 4),
             "volt": t.battery_voltage, "batt": t.battery_level, "mode": t.mode,
+            # Widened for post-flight diagnosis, not just replay: a near-miss
+            # that never escalates to a guardian action (a variance spike, a
+            # vibration burst) is otherwise invisible after the fact.
+            "gps_fix": t.gps_fix, "sats": t.gps_satellites,
+            "ekf_flags": t.ekf_flags,
+            "ekf_pos_var": round(t.ekf_pos_var, 3), "ekf_vel_var": round(t.ekf_vel_var, 3),
+            "vibe": [round(t.vibration_x, 2), round(t.vibration_y, 2),
+                    round(t.vibration_z, 2)],
+            "clip": [t.clip_0, t.clip_1, t.clip_2],
+            "sensor_errors": t.sensor_errors,
+            "wp_seq": t.mission_seq, "wp_dist": round(t.wp_dist, 1),
         }
         try:
             self._log_fh.write(json.dumps(rec) + "\n")

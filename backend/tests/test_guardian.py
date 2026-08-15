@@ -118,6 +118,66 @@ class TestMonitors(unittest.TestCase):
         res = _eval(cfg=cfg, t=_telem(battery_voltage=9.5))
         self.assertIsNone(res["action"])
 
+    def test_ekf_unhealthy_warns_but_default_action_is_warn(self):
+        res = _eval(t=_telem(ekf_healthy=False, ekf_flags=0))
+        self.assertIn("EKF unhealthy", " ".join(res["warnings"]))
+        self.assertIsNone(res["action"],
+                          "an untrustworthy position solution must not "
+                          "auto-command a navigate-home action by default")
+
+    def test_ekf_rtl_only_when_explicitly_configured(self):
+        res = _eval(cfg=GuardianConfig(ekf_action="rtl"),
+                   t=_telem(ekf_healthy=False))
+        self.assertEqual((res["action"], res["source"]), ("rtl", "ekf"))
+
+    def test_ekf_variance_warns_without_flipping_unhealthy(self):
+        # Below the flags' own threshold (still "healthy") but past the
+        # guardian's earlier variance heads-up.
+        res = _eval(t=_telem(ekf_healthy=True, ekf_pos_var=0.75))
+        self.assertIn("variance rising", " ".join(res["warnings"]))
+        self.assertIsNone(res["action"], "variance warning must never itself RTL")
+
+    def test_ekf_healthy_flight_has_no_ekf_warning(self):
+        res = _eval()  # _telem() doesn't set ekf_* -> defaults to healthy
+        self.assertTrue(res["monitors"]["ekf"]["ok"])
+
+    def test_vibration_high_warns_after_sustain_then_can_rtl(self):
+        cfg = GuardianConfig(vibe_action="rtl", vibe_sustained_s=5.0)
+        mem = guardian.default_memory()
+        t = _telem(vibration_x=45.0)
+        res = evaluate(cfg, t, mem, now=1000.0)
+        self.assertIn("vibration high", " ".join(res["warnings"]))
+        self.assertIsNone(res["action"], "first high sample must only start the clock")
+        res = evaluate(cfg, t, mem, now=1006.0)
+        self.assertEqual((res["action"], res["source"]), ("rtl", "vibration"))
+
+    def test_vibration_recovery_resets_the_clock(self):
+        cfg = GuardianConfig(vibe_action="rtl", vibe_sustained_s=5.0)
+        mem = guardian.default_memory()
+        evaluate(cfg, _telem(vibration_z=45.0), mem, now=1000.0)
+        evaluate(cfg, _telem(vibration_z=5.0), mem, now=1002.0)  # recovers
+        res = evaluate(cfg, _telem(vibration_z=45.0), mem, now=1006.0)
+        self.assertIsNone(res["action"], "recovery must reset the debounce")
+
+    def test_clip_growth_measured_from_arm_time_baseline(self):
+        # Non-zero clip counts already present at connect (cumulative since
+        # boot, not since arm) must not themselves read as new clipping.
+        mem = guardian.default_memory()
+        cfg = GuardianConfig(vibe_clip_warn=3)
+        baseline = _telem(clip_0=50, clip_1=0, clip_2=0)
+        res = evaluate(cfg, baseline, mem, now=1000.0)
+        self.assertTrue(res["monitors"]["vibration"]["ok"],
+                        "pre-existing boot-time clips must not read as new")
+        grown = _telem(clip_0=54, clip_1=0, clip_2=0)
+        res = evaluate(cfg, grown, mem, now=1001.0)
+        self.assertEqual(res["monitors"]["vibration"]["new_clips"], 4)
+        self.assertFalse(res["monitors"]["vibration"]["ok"])
+
+    def test_disabled_guardian_never_acts_on_vibration_either(self):
+        cfg = GuardianConfig(enabled=False, vibe_action="rtl", vibe_sustained_s=0.0)
+        res = _eval(cfg=cfg, t=_telem(vibration_x=90.0))
+        self.assertIsNone(res["action"])
+
 
 class TestStateMachine(unittest.TestCase):
     def test_transitions(self):
@@ -208,6 +268,8 @@ class TestGuardianApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertIn("batt_rtl_volt", body["config"])
+        self.assertIn("ekf_var_warn", body["config"])
+        self.assertIn("vibe_warn_ms2", body["config"])
         self.assertIn("state", body["state"])
 
     def test_partial_update_touches_only_named_fields(self):

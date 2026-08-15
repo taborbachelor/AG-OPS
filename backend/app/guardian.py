@@ -63,12 +63,37 @@ class GuardianConfig:
     margin_low_s: float = 10.0        # sustained seconds of negative margin
     # Assumed return speed when the plane is momentarily slow/turning (m/s).
     margin_min_speed: float = 12.0
+    # EKF monitor. Binary "unhealthy" mirrors preflight's ekf check but watches
+    # it continuously in flight (preflight only judges once, before arm).
+    # Warn-only by default for the same reason GPS is: an EKF that's already
+    # unhealthy means the position solution itself may not be trustworthy, so
+    # autonomously commanding RTL could send the vehicle the wrong way — the
+    # operator should decide, with whatever other cues (visual, RC) they have.
+    ekf_action: str = "warn"          # "warn" | "rtl"
+    # Variance leading indicators (EKF_STATUS_REPORT pos_horiz_variance /
+    # velocity_variance): 0.0 is perfect, rising toward ArduPilot's own
+    # internal EKF reject threshold (~1.0, see EK3_ERR_THRESH). A warning here
+    # means "drifting", ahead of the flags actually flipping unhealthy —
+    # always warn-only, it's an early heads-up, not itself a trigger.
+    ekf_var_warn: float = 0.6
+    # Vibration monitor (VIBRATION message). ArduPilot's own guidance treats
+    # RMS vibration above ~30 m/s/s in any axis as high. This is the standard
+    # early indicator of a developing mechanical problem (loose motor mount,
+    # prop imbalance, bearing wear) — not something RTL fixes by itself, but
+    # sustained high vibration or actively growing accelerometer clipping
+    # means the airframe may be degrading mid-flight, worth escalating past a
+    # threshold rather than only finding out after landing.
+    vibe_warn_ms2: float = 30.0
+    vibe_action: str = "warn"         # "warn" | "rtl"
+    vibe_sustained_s: float = 5.0     # debounce, same shape as battery
+    vibe_clip_warn: int = 5           # new clip events (since arm) before warning
 
 
 def default_memory() -> dict:
     """Per-flight monitor memory (debounce timestamps + latches). Reset on arm."""
     return {"batt_low_since": None, "margin_low_since": None,
-            "rtl_commanded_for": None, "standdown_for": None}
+            "rtl_commanded_for": None, "standdown_for": None,
+            "vibe_high_since": None, "clip_baseline": None}
 
 
 def _dist_home_m(t: dict) -> float | None:
@@ -168,6 +193,54 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
     else:
         mem["margin_low_since"] = None
     monitors["rtl_margin"] = margin
+
+    # --- EKF health + variance ---
+    ekf_healthy = bool(t.get("ekf_healthy", True))
+    pos_var = t.get("ekf_pos_var") or 0.0
+    vel_var = t.get("ekf_vel_var") or 0.0
+    ekf_bad = armed and not ekf_healthy
+    ekf_drifting = armed and not ekf_bad and (
+        pos_var >= cfg.ekf_var_warn or vel_var >= cfg.ekf_var_warn)
+    monitors["ekf"] = {"ok": not (ekf_bad or ekf_drifting),
+                       "healthy": ekf_healthy,
+                       "pos_var": round(pos_var, 3), "vel_var": round(vel_var, 3)}
+    if ekf_bad:
+        warnings.append(f"EKF unhealthy (flags={t.get('ekf_flags', 0)})")
+        if cfg.ekf_action == "rtl" and action is None:
+            action, reason, source = "rtl", "EKF unhealthy", "ekf"
+    elif ekf_drifting:
+        warnings.append(
+            f"EKF variance rising (pos={pos_var:.2f}, vel={vel_var:.2f} "
+            f">= {cfg.ekf_var_warn:.2f})")
+
+    # --- vibration ---
+    vibe = max(t.get("vibration_x") or 0.0, t.get("vibration_y") or 0.0,
+              t.get("vibration_z") or 0.0)
+    clips = (t.get("clip_0") or 0, t.get("clip_1") or 0, t.get("clip_2") or 0)
+    if armed and mem["clip_baseline"] is None:
+        mem["clip_baseline"] = clips
+    baseline = mem["clip_baseline"] or (0, 0, 0)
+    new_clips = max(0, max(c - b for c, b in zip(clips, baseline)))
+    vibe_high = armed and vibe >= cfg.vibe_warn_ms2
+    if vibe_high:
+        if mem["vibe_high_since"] is None:
+            mem["vibe_high_since"] = now
+    else:
+        mem["vibe_high_since"] = None
+    vibe_sustained = (mem["vibe_high_since"] is not None
+                      and now - mem["vibe_high_since"] >= cfg.vibe_sustained_s)
+    clip_high = armed and new_clips >= cfg.vibe_clip_warn
+    monitors["vibration"] = {"ok": not (vibe_high or clip_high),
+                             "peak_ms2": round(vibe, 1), "new_clips": new_clips}
+    if vibe_high:
+        warnings.append(f"vibration high ({vibe:.0f} m/s/s >= "
+                        f"{cfg.vibe_warn_ms2:.0f})")
+    if clip_high:
+        warnings.append(f"accelerometer clipping ({new_clips} events this flight)")
+    if (vibe_sustained or clip_high) and cfg.vibe_action == "rtl" and action is None:
+        action, source = "rtl", "vibration"
+        reason = (f"sustained high vibration/clipping "
+                  f"(peak {vibe:.0f} m/s/s, {new_clips} clip events)")
 
     if not cfg.enabled:
         action, reason, source = None, None, None

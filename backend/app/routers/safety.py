@@ -133,6 +133,12 @@ class GuardianConfigUpdate(BaseModel):
     margin_action: Optional[Literal["warn", "rtl"]] = None
     margin_low_s: Optional[float] = Field(None, ge=0, le=120)
     margin_min_speed: Optional[float] = Field(None, ge=1, le=100)
+    ekf_action: Optional[Literal["warn", "rtl"]] = None
+    ekf_var_warn: Optional[float] = Field(None, ge=0, le=5)
+    vibe_warn_ms2: Optional[float] = Field(None, ge=0, le=200)
+    vibe_action: Optional[Literal["warn", "rtl"]] = None
+    vibe_sustained_s: Optional[float] = Field(None, ge=0, le=120)
+    vibe_clip_warn: Optional[int] = Field(None, ge=0, le=1000)
 
 
 @router.get("/guardian")
