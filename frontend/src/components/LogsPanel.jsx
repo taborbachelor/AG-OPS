@@ -58,7 +58,9 @@ function LogsPanel({ setPlaybackTelem, setPlaybackPath }) {
       setSelected(name);
       setSamples(s);
       setHead(0);
-      setPlaybackPath(s.filter((x) => x.lat).map((x) => [x.lat, x.lon]));
+      // [lat, lon, alt] triples: Leaflet ignores the third element; the 3D
+      // view uses it to draw the recorded track at its real altitude.
+      setPlaybackPath(s.filter((x) => x.lat).map((x) => [x.lat, x.lon, x.alt || 0]));
       if (s.length) setPlaybackTelem(toTelem(s[0]));
       setStatus(`Loaded ${s.length} samples`);
     } catch { setStatus('Load failed'); }

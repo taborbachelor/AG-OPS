@@ -1,10 +1,14 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, Suspense } from 'react';
 import TopBar from './components/TopBar';
 import NavRail from './components/NavRail';
 import HudLeft from './components/HudLeft';
 import HudRight from './components/HudRight';
 import HudBottom from './components/HudBottom';
 import MapView from './components/MapView';
+
+// Cesium is ~1.2MB gzipped: split it into its own chunk so the HUD shell
+// paints immediately and the 3D engine streams in behind it.
+const MapView3D = React.lazy(() => import('./components/MapView3D'));
 import VideoFeed from './components/VideoFeed';
 import ConnectionOverlay from './components/ConnectionOverlay';
 import MissionPanel from './components/MissionPanel';
@@ -51,6 +55,10 @@ function App() {
 
   // One active view, switched from the left nav rail.
   const [view, setView] = useState('fly'); // fly | plan | spray | safety | rc | controls | logs
+
+  // 3D flight view (Cesium) is the default experience; PLAN and active
+  // drawing force the flat map because editing interactions are top-down.
+  const [threeD, setThreeD] = useState(true);
 
   // Supervisor console: once the aircraft is genuinely in flight, the UI
   // switches to a minimal supervision layout and latches there until disarm.
@@ -295,10 +303,12 @@ function App() {
     for (const stop of p.flight_order) {
       let wps = byIndex[stop.index].waypoints;
       if (stop.reversed) wps = [...wps].reverse();
+      // [lat, lon, alt] triples: Leaflet ignores the altitude; the 3D view
+      // draws the legs at their planned height.
       for (let i = 0; i + 1 < wps.length; i += 2) {
-        legs.push({ kind: 'spray', pts: [[wps[i].lat, wps[i].lon], [wps[i + 1].lat, wps[i + 1].lon]] });
+        legs.push({ kind: 'spray', pts: [[wps[i].lat, wps[i].lon, wps[i].alt], [wps[i + 1].lat, wps[i + 1].lon, wps[i + 1].alt]] });
         if (i + 2 < wps.length) {
-          legs.push({ kind: 'hop', pts: [[wps[i + 1].lat, wps[i + 1].lon], [wps[i + 2].lat, wps[i + 2].lon]] });
+          legs.push({ kind: 'hop', pts: [[wps[i + 1].lat, wps[i + 1].lon, wps[i + 1].alt], [wps[i + 2].lat, wps[i + 2].lon, wps[i + 2].alt]] });
         }
       }
     }
@@ -308,7 +318,7 @@ function App() {
     const hasHome = ts.length === p.flight_order.length + 1;
     ts.forEach((t, ti) => {
       const kind = hasHome && (ti === 0 || ti === ts.length - 1) ? 'home' : 'transit';
-      legs.push({ kind, pts: t.pts.map((q) => [q.lat, q.lon]) });
+      legs.push({ kind, pts: t.pts.map((q) => [q.lat, q.lon, q.alt]) });
     });
     return legs;
   }, [sprayPlan]);
@@ -316,26 +326,54 @@ function App() {
   // Full tools show when not flying, or when peeked mid-flight.
   const tools = !flying || toolsPeek;
 
+  // Editing must be top-down: planning view and any active drawing mode pin
+  // the flat map; everywhere else the 3D toggle decides.
+  const drawing2d = (view === 'plan' && tools)
+    || (view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing));
+  const use3d = threeD && !drawing2d;
+
   return (
     <div className="app">
       {/* Full-screen map background */}
       <div className="fullscreen-map">
-        <MapView
-          telemetry={viewTelem}
-          planning={view === 'plan' && tools}
-          waypoints={waypoints}
-          onAddWaypoint={addWaypoint}
-          onMoveWaypoint={moveWaypoint}
-          fence={fence}
-          playbackPath={playbackPath}
-          sprayField={sprayField}
-          sprayFields={sprayFields.map((f) => ({ polygon: f.polygon, holes: f.holes || [] }))}
-          sprayArea={sprayArea}
-          sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing)}
-          onAddSprayVertex={spraySnap ? snapClick : addSprayVertex}
-          sprayLegs={view === 'spray' ? sprayLegs : []}
-          zones={view === 'spray' ? sprayZones : null}
-        />
+        {use3d ? (
+          <Suspense fallback={<div className="map3d-wrap" />}>
+            <MapView3D
+              telemetry={viewTelem}
+              waypoints={waypoints}
+              fence={fence}
+              playbackPath={playbackPath}
+              sprayFields={sprayFields.map((f) => ({ polygon: f.polygon, holes: f.holes || [] }))}
+              sprayLegs={view === 'spray' ? sprayLegs : []}
+              zones={view === 'spray' ? sprayZones : null}
+              onSwitchTo2D={() => setThreeD(false)}
+            />
+          </Suspense>
+        ) : (
+          <MapView
+            telemetry={viewTelem}
+            planning={view === 'plan' && tools}
+            waypoints={waypoints}
+            onAddWaypoint={addWaypoint}
+            onMoveWaypoint={moveWaypoint}
+            fence={fence}
+            playbackPath={playbackPath}
+            sprayField={sprayField}
+            sprayFields={sprayFields.map((f) => ({ polygon: f.polygon, holes: f.holes || [] }))}
+            sprayArea={sprayArea}
+            sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing)}
+            onAddSprayVertex={spraySnap ? snapClick : addSprayVertex}
+            sprayLegs={view === 'spray' ? sprayLegs : []}
+            zones={view === 'spray' ? sprayZones : null}
+          />
+        )}
+        {!use3d && !drawing2d && (
+          <button
+            className="map-ctrl-btn wide map3d-enter"
+            onClick={() => setThreeD(true)}
+            title="3D flight view"
+          >◈ 3D</button>
+        )}
       </div>
 
       {/* Flight-critical status only */}

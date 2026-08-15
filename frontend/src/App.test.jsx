@@ -7,6 +7,7 @@ import '@testing-library/jest-dom';
 // neither is under test in this shell smoke test. vi.mock calls are hoisted
 // above the imports (same semantics as jest.mock under CRA before).
 vi.mock('./components/MapView', () => ({ default: () => null }));
+vi.mock('./components/MapView3D', () => ({ default: () => null }));
 vi.mock('./components/VideoFeed', () => ({ default: () => null }));
 
 import App from './App';

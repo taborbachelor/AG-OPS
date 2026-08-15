@@ -969,6 +969,47 @@ body {
   align-items: flex-end;
 }
 
+/* ===== 3D FLIGHT VIEW (Cesium) ===== */
+.map3d-wrap {
+  position: absolute;
+  inset: 0;
+}
+.map3d-container {
+  position: absolute;
+  inset: 0;
+}
+/* The camera-mode stack reuses .map-controls positioning via its own class. */
+.map3d-controls {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  z-index: 800;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+/* Entry button back into 3D from the flat map. */
+.map3d-enter {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  z-index: 801;
+}
+/* Keep Cesium's chrome consistent with the dark HUD: compact credit line,
+   no toolbar remnants. Attribution stays visible (imagery credit). */
+.cesium-viewer-bottom {
+  bottom: 2px !important;
+  left: 8px !important;
+}
+.cesium-credit-logoContainer { display: none !important; }
+.cesium-credit-expand-link { display: none !important; }
+.cesium-widget-credits {
+  font-size: 9px !important;
+  color: rgba(255, 255, 255, 0.45) !important;
+}
+.cesium-viewer .cesium-widget canvas { outline: none; }
+
 .layer-switch {
   display: flex;
   gap: 2px;
