@@ -83,6 +83,21 @@ function FlightVitals({ telemetry }) {
         </div>
       )}
 
+      {(() => {
+        // Guardian verdicts ride in telemetry: show the emergency state and
+        // its reason whenever the GCS-side failsafe layer has something to
+        // say. RTL states are red; plain monitor warnings are amber.
+        const g = t.guardian || {};
+        if (!g.state || g.state === 'NORMAL' || g.state === 'DISARMED') return null;
+        const red = g.state === 'RTL_REQUESTED' || g.state === 'RTL_ACTIVE';
+        const detail = g.rtl_reason || (g.warnings && g.warnings[0]) || '';
+        return (
+          <div className={`guardian-chip ${red ? 'red' : 'amber'}`}>
+            GUARDIAN {g.state.replace('_', ' ')}{detail ? ` — ${detail}` : ''}
+          </div>
+        );
+      })()}
+
       {t.mission_seq > 0 && t.mission_count > 0 && (
         <div className="mission-progress">
           WP {Math.min(t.mission_seq, t.mission_count)}/{t.mission_count}

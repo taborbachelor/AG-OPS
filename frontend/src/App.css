@@ -969,6 +969,38 @@ body {
   align-items: flex-end;
 }
 
+/* ===== NAV RAIL: MORE group (progressive disclosure) ===== */
+.nav-more-group {
+  display: flex;
+  flex-direction: column;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--glass-border);
+}
+.nav-btn.nav-more.open {
+  color: var(--accent);
+}
+
+/* ===== GUARDIAN chip (in-flight console) ===== */
+.guardian-chip {
+  align-self: center;
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--accent-orange);
+  color: var(--accent-orange);
+  margin-bottom: 6px;
+}
+.guardian-chip.red {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  animation: armpulse 1.2s ease-in-out infinite;
+}
+
 /* ===== 3D FLIGHT VIEW (Cesium) ===== */
 .map3d-wrap {
   position: absolute;

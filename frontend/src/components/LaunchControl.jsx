@@ -7,18 +7,26 @@ function LaunchControl({ telemetry, connected }) {
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null); // { msg, kind }
-  const [fenceOn, setFenceOn] = useState(null);      // null = unknown
   const [override, setOverride] = useState(false);   // bypass blocking checks
   const [showChecks, setShowChecks] = useState(true);
+  const [preflight, setPreflight] = useState(null);  // server verdicts (M6)
 
-  // Geofence state feeds the pre-flight checklist (advisory item).
+  // The checklist is EVALUATED by the backend (the same gate that refuses
+  // /arm): this component only renders the verdicts, so what the operator
+  // sees is exactly what the server enforces.
   useEffect(() => {
-    if (!connected) { setFenceOn(null); return; }
-    fetch(`${API}/safety/geofence`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((g) => setFenceOn(g ? !!g.enable : null))
-      .catch(() => setFenceOn(null));
-  }, [connected]);
+    if (!connected || telemetry.armed) { setPreflight(null); return; }
+    let alive = true;
+    const poll = async () => {
+      try {
+        const r = await fetch(`${API}/safety/preflight`);
+        if (alive && r.ok) setPreflight(await r.json());
+      } catch { if (alive) setPreflight(null); }
+    };
+    poll();
+    const id = setInterval(poll, 2500);
+    return () => { alive = false; clearInterval(id); };
+  }, [connected, telemetry.armed]);
 
   const flash = (msg, kind = 'info') => {
     setStatus({ msg, kind });
@@ -85,20 +93,19 @@ function LaunchControl({ telemetry, connected }) {
 
   const gpsReady = telemetry.gps_fix >= 3;
 
-  // Pre-flight checklist. Blockers gate ARM & TAKEOFF (override available);
-  // advisories warn but never block — bench setups legitimately lack them.
-  const t = telemetry;
-  const rcSeen = (t.rc_channels || []).some((v) => v >= 900 && v <= 2100);
-  const checks = [
-    { label: 'Link', ok: connected, block: true },
-    { label: 'GPS 3D fix', ok: gpsReady, block: true },
-    { label: 'Home set', ok: t.home_lat !== 0 || t.home_lon !== 0, block: true },
-    { label: 'Battery', ok: t.battery_level != null && t.battery_level > 30,
-      warn: t.battery_level == null ? 'no data' : `${t.battery_level}%` },
-    { label: 'RC input', ok: rcSeen, warn: 'none seen' },
-    { label: 'Geofence', ok: fenceOn === true, warn: fenceOn == null ? 'unknown' : 'off' },
-  ];
-  const blockersPass = checks.filter((c) => c.block).every((c) => c.ok);
+  // Server verdicts when available; a minimal local fallback (link + GPS)
+  // when the poll hasn't landed yet, so the panel is never blank.
+  const checks = preflight
+    ? preflight.checks.map((c) => ({
+        label: c.label, ok: c.ok, block: c.blocker,
+        warn: c.detail || undefined,
+      }))
+    : [
+        { label: 'Link', ok: connected, block: true },
+        { label: 'GPS 3D fix', ok: gpsReady, block: true },
+      ];
+  const blockersPass = preflight ? preflight.ready
+    : checks.filter((c) => c.block).every((c) => c.ok);
   const canLaunch = blockersPass || override;
 
   return (

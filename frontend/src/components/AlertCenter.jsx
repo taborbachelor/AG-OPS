@@ -48,6 +48,16 @@ function AlertCenter({ telemetry, connected, reconnecting }) {
         text: 'GPS DEGRADED', say: 'GPS degraded' },
       { id: 'rtl', sev: 'amber', on: rtlLatchRef.current,
         text: 'RTL ENGAGED — RETURNING HOME', say: 'Returning to launch' },
+      // Guardian (GCS-side failsafe layer): its warnings and — above all —
+      // a guardian-commanded RTL, with the recorded reason.
+      { id: 'guardW', sev: 'amber',
+        on: connected && t.armed && (t.guardian || {}).state === 'WARNING',
+        text: `GUARDIAN — ${((t.guardian || {}).warnings || [])[0] || 'monitor warning'}`,
+        say: 'Guardian warning' },
+      { id: 'guardR', sev: 'red',
+        on: connected && !!(t.guardian || {}).rtl_source,
+        text: `GUARDIAN RTL — ${(t.guardian || {}).rtl_reason || 'commanded return'}`,
+        say: 'Guardian returning home' },
     ];
 
     const next = [];

@@ -1,6 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 // Left-edge navigation rail — one view active at a time, DJI/QGC style.
+// Progressive disclosure: the three surfaces an operator lives in (FLY /
+// PLAN / SPRAY) are always visible; everything else sits behind MORE so the
+// default screen carries exactly three choices.
 const ICONS = {
   fly: (
     <svg viewBox="0 0 24 24">
@@ -55,10 +58,21 @@ const ICONS = {
   ),
 };
 
-const VIEWS = [
+ICONS.more = (
+  <svg viewBox="0 0 24 24">
+    <circle cx="5" cy="12" r="2" fill="currentColor" />
+    <circle cx="12" cy="12" r="2" fill="currentColor" />
+    <circle cx="19" cy="12" r="2" fill="currentColor" />
+  </svg>
+);
+
+const PRIMARY = [
   { id: 'fly', label: 'FLY' },
   { id: 'plan', label: 'PLAN' },
   { id: 'spray', label: 'SPRAY' },
+];
+
+const MORE = [
   { id: 'safety', label: 'SAFETY' },
   { id: 'rc', label: 'RC' },
   { id: 'controls', label: 'CTRL' },
@@ -67,19 +81,38 @@ const VIEWS = [
 ];
 
 function NavRail({ view, setView, hidden }) {
+  const [moreOpen, setMoreOpen] = useState(false);
+  // Keep the group visible while one of its views is active.
+  const showMore = moreOpen || MORE.some((v) => v.id === view);
+
+  const btn = (v, primary) => (
+    <button
+      key={v.id}
+      className={`nav-btn ${view === v.id ? 'active' : ''}`}
+      onClick={() => { setView(v.id); if (primary) setMoreOpen(false); }}
+      title={v.label}
+    >
+      {ICONS[v.id]}
+      <span>{v.label}</span>
+    </button>
+  );
+
   return (
     <nav className={`nav-rail ${hidden ? 'hidden' : ''}`}>
-      {VIEWS.map((v) => (
-        <button
-          key={v.id}
-          className={`nav-btn ${view === v.id ? 'active' : ''}`}
-          onClick={() => setView(v.id)}
-          title={v.label}
-        >
-          {ICONS[v.id]}
-          <span>{v.label}</span>
-        </button>
-      ))}
+      {PRIMARY.map((v) => btn(v, true))}
+      <button
+        className={`nav-btn nav-more ${showMore ? 'open' : ''}`}
+        onClick={() => setMoreOpen((o) => !o)}
+        title="More tools"
+      >
+        {ICONS.more}
+        <span>MORE</span>
+      </button>
+      {showMore && (
+        <div className="nav-more-group">
+          {MORE.map((v) => btn(v, false))}
+        </div>
+      )}
     </nav>
   );
 }
