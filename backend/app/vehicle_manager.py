@@ -1064,6 +1064,33 @@ class VehicleManager:
                 "error": ("no acknowledgement from vehicle" if ack is None
                           else "vehicle rejected disarm (in flight? use force)")}
 
+    def run_command(self, command: int, p1=0, p2=0, p3=0, p4=0, p5=0, p6=0,
+                    p7=0, name: str = "command_long") -> dict:
+        """Send a COMMAND_LONG and wait for its COMMAND_ACK — the generic,
+        ack-checked path for bench/setup commands (DO_SET_SERVO, PREFLIGHT_
+        CALIBRATION, ...). IN_PROGRESS counts as accepted: calibrations ack
+        that way and finish via STATUSTEXT."""
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        conn = self.connection
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.command_long_send(
+                    conn.target_system, conn.target_component, command, 0,
+                    p1, p2, p3, p4, p5, p6, p7)
+            ack = self._wait_command_ack(command)
+        in_progress = getattr(mavutil.mavlink, "MAV_RESULT_IN_PROGRESS", 5)
+        ok = ack is not None and ack.result in (
+            mavutil.mavlink.MAV_RESULT_ACCEPTED, in_progress)
+        log_event("command", name, level="INFO" if ok else "WARN",
+                  command=command, ok=ok,
+                  ack_result=(ack.result if ack else None))
+        if ok:
+            return {"ok": True, "result": ack.result, "error": None}
+        return {"ok": False, "result": (ack.result if ack else None),
+                "error": ("no acknowledgement from vehicle" if ack is None
+                          else f"vehicle rejected command (result={ack.result})")}
+
     def takeoff(self, alt: float = 100.0, force: bool = False) -> dict:
         """Auto-takeoff for a fixed-wing: load a minimal takeoff+loiter mission at
         the current position, switch to AUTO, and arm. The plane launches itself

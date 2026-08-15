@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.eventlog import log_event
-from app.routers import telemetry, mission, connection, vehicle, safety, logs, coverage, coverage_multi, zones, orders, fields, sim
+from app.routers import telemetry, mission, connection, vehicle, safety, logs, coverage, coverage_multi, zones, orders, fields, sim, bench
 
 # Make app loggers (incl. gcs.events mirrors) visible in the server console;
 # no-ops if the root logger is already configured by the host process.
@@ -48,6 +48,7 @@ app.include_router(zones.router, prefix="/api/zones", tags=["zones"])
 app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
 app.include_router(fields.router, prefix="/api/fields", tags=["fields"])
 app.include_router(sim.router, prefix="/api/sim", tags=["sim"])
+app.include_router(bench.router, prefix="/api/bench", tags=["bench"])
 
 
 @app.get("/api/health")

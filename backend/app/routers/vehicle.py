@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from app import preflight
 from app.eventlog import log_event
@@ -164,6 +167,80 @@ def sync_params():
         raise HTTPException(400, "Not connected")
     vehicle_manager.sync_params()
     return {"status": "syncing", "sync": vehicle_manager._param_sync}
+
+
+@router.get("/params/backup")
+def backup_params():
+    """Full parameter backup in Mission Planner .param format (NAME,VALUE
+    lines) from the synced cache — take one before every bench session and
+    before the first flight, so any change is reversible."""
+    if not vehicle_manager.connected:
+        raise HTTPException(400, "Not connected")
+    params = vehicle_manager.get_cached_params()
+    sync = vehicle_manager.snapshot().get("param_sync") or {}
+    if not params or not sync.get("synced"):
+        raise HTTPException(409, {
+            "message": "parameter cache not fully synced — backup would be "
+                       "incomplete", "sync": sync})
+    caps = vehicle_manager.snapshot().get("capabilities") or {}
+    lines = [f"# {len(params)} params, fw {caps.get('fw_version', '?')}, "
+             f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}"]
+    lines += [f"{n},{v:.6g}" for n, v in sorted(params.items())]
+    return PlainTextResponse("\n".join(lines) + "\n",
+                             media_type="text/plain",
+                             headers={"Content-Disposition":
+                                      'attachment; filename="backup.param"'})
+
+
+class ParamRestore(BaseModel):
+    content: str  # .param file text: NAME,VALUE per line, # comments ignored
+
+
+def _is_volatile(name: str) -> bool:
+    """Params the firmware live-estimates (writing them back can never verify
+    — found on the harness: BARO*_GND_PRESS re-estimates continuously) or that
+    are runtime statistics. A restore skips these, like Mission Planner does."""
+    return name.endswith("_GND_PRESS") or name.startswith("STAT_")
+
+
+@router.post("/params/restore")
+def restore_params(req: ParamRestore):
+    """Write a .param backup to the vehicle: only params that differ from the
+    cache are written (each one verified); every outcome is reported."""
+    if not vehicle_manager.connected:
+        raise HTTPException(400, "Not connected")
+    cache = vehicle_manager.get_cached_params()
+    wanted, malformed = {}, []
+    for ln in req.content.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        parts = ln.replace("\t", ",").split(",")
+        try:
+            wanted[parts[0].strip().upper()] = float(parts[1])
+        except (IndexError, ValueError):
+            malformed.append(ln)
+    if not wanted:
+        raise HTTPException(422, "no NAME,VALUE lines found")
+    written, failed, skipped, unknown, volatile = [], [], [], [], []
+    for name, value in wanted.items():
+        if name not in cache:
+            unknown.append(name)
+            continue
+        if _is_volatile(name):
+            volatile.append(name)
+            continue
+        if abs(cache[name] - value) < 1e-6:
+            skipped.append(name)
+            continue
+        res = vehicle_manager.set_param(name, value)
+        (written if res.get("verified") else failed).append(name)
+    log_event("bench", "params_restored", written=len(written),
+              failed=failed, unknown=len(unknown), volatile=len(volatile))
+    return {"status": "ok" if not failed else "partial",
+            "written": written, "failed": failed, "skipped_same": len(skipped),
+            "skipped_volatile": volatile, "unknown_on_vehicle": unknown,
+            "malformed_lines": malformed}
 
 
 class ParamUpdate(BaseModel):

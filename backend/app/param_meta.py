@@ -60,7 +60,18 @@ PARAM_RANGES = {
     "SIM_GPS_DISABLE": (0, 1),
     "SIM_GPS1_ENABLE": (0, 1),
     "SIM_BATT_VOLTAGE": (0, 100),
+    # First-flight bundle (bench router). Both param generations covered:
+    # older firmware has ARMING_CHECK/ALT_HOLD_RTL(cm), newer (4.8+) has
+    # ARMING_SKIPCHK/ARMING_REQUIRE/RTL_ALTITUDE(m).
+    "FS_SHORT_ACTN": (0, 4),
+    "ALT_HOLD_RTL": (-1, 100000),   # cm; -1 = return at current altitude
+    "ARMING_CHECK": (0, 1 << 20),   # bitmask; 1 = all checks
+    "ARMING_SKIPCHK": (0, 1 << 20),  # bitmask; 0 = skip nothing
+    "ARMING_REQUIRE": (0, 2),
+    "RTL_ALTITUDE": (1, 1000),      # m
 }
+# Servo exerciser (bench router) parks/restores output functions.
+PARAM_RANGES.update({f"SERVO{i}_FUNCTION": (0, 300) for i in range(1, 17)})
 
 
 def validate(name: str, value, param_type=None):
