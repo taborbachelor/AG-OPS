@@ -139,6 +139,11 @@ class GuardianConfigUpdate(BaseModel):
     vibe_action: Optional[Literal["warn", "rtl"]] = None
     vibe_sustained_s: Optional[float] = Field(None, ge=0, le=120)
     vibe_clip_warn: Optional[int] = Field(None, ge=0, le=1000)
+    airspeed_warn_ms: Optional[float] = Field(None, ge=0, le=100)
+    airspeed_min_ms: Optional[float] = Field(None, ge=0, le=100)
+    airspeed_action: Optional[Literal["warn", "rtl"]] = None
+    airspeed_low_s: Optional[float] = Field(None, ge=0, le=60)
+    airborne_alt_m: Optional[float] = Field(None, ge=0, le=100)
 
 
 @router.get("/guardian")
@@ -161,6 +166,11 @@ def set_guardian(update: GuardianConfigUpdate):
     if rtl > warn:
         raise HTTPException(422, f"batt_rtl_volt ({rtl}) must not exceed "
                                  f"batt_warn_volt ({warn})")
+    as_warn = updates.get("airspeed_warn_ms", cfg.airspeed_warn_ms)
+    as_min = updates.get("airspeed_min_ms", cfg.airspeed_min_ms)
+    if as_min > as_warn:
+        raise HTTPException(422, f"airspeed_min_ms ({as_min}) must not exceed "
+                                 f"airspeed_warn_ms ({as_warn})")
     return {"status": "ok",
             "config": vehicle_manager.set_guardian_config(updates)}
 

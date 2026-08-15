@@ -87,13 +87,30 @@ class GuardianConfig:
     vibe_action: str = "warn"         # "warn" | "rtl"
     vibe_sustained_s: float = 5.0     # debounce, same shape as battery
     vibe_clip_warn: int = 5           # new clip events (since arm) before warning
+    # Stall/airspeed margin. Airspeed already flows into telemetry (VFR_HUD);
+    # this compares it against an operator-set safe-flight floor rather than
+    # reading the vehicle's own ARSPD_FBW_MIN/AIRSPEED_MIN param (name varies
+    # by firmware version, and guardian deliberately stays param-cache-free —
+    # same "operator states the number" precedent as margin_min_speed /
+    # pack_capacity_mah above). ArduPlane's own TECS/stall protection is the
+    # primary defense here; this is the second, earlier layer that tells the
+    # operator by name, same role the guardian plays everywhere else. Gated
+    # on being airborne (altitude past a small threshold), not just armed —
+    # airspeed is legitimately near zero while taxiing or mid-takeoff-roll,
+    # and that must never read as a stall warning.
+    airspeed_warn_ms: float = 10.0
+    airspeed_min_ms: float = 8.0      # sustained below this is stall-risk territory
+    airspeed_action: str = "warn"     # "warn" | "rtl"
+    airspeed_low_s: float = 3.0       # shorter than battery — stall risk develops fast
+    airborne_alt_m: float = 5.0       # below this, treat as ground ops, not flight
 
 
 def default_memory() -> dict:
     """Per-flight monitor memory (debounce timestamps + latches). Reset on arm."""
     return {"batt_low_since": None, "margin_low_since": None,
             "rtl_commanded_for": None, "standdown_for": None,
-            "vibe_high_since": None, "clip_baseline": None}
+            "vibe_high_since": None, "clip_baseline": None,
+            "airspeed_low_since": None}
 
 
 def _dist_home_m(t: dict) -> float | None:
@@ -241,6 +258,30 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
         action, source = "rtl", "vibration"
         reason = (f"sustained high vibration/clipping "
                   f"(peak {vibe:.0f} m/s/s, {new_clips} clip events)")
+
+    # --- airspeed / stall margin ---
+    alt = t.get("altitude") or 0.0
+    airspeed = t.get("airspeed") or 0.0
+    airborne = armed and alt >= cfg.airborne_alt_m
+    as_warn = airborne and airspeed < cfg.airspeed_warn_ms
+    as_low = airborne and airspeed < cfg.airspeed_min_ms
+    if as_low:
+        if mem["airspeed_low_since"] is None:
+            mem["airspeed_low_since"] = now
+    else:
+        mem["airspeed_low_since"] = None
+    as_low_sustained = (mem["airspeed_low_since"] is not None
+                        and now - mem["airspeed_low_since"] >= cfg.airspeed_low_s)
+    monitors["airspeed"] = {"ok": not as_warn, "airspeed": round(airspeed, 1),
+                            "airborne": airborne}
+    if as_warn:
+        warnings.append(
+            f"airspeed low ({airspeed:.1f} m/s < warn {cfg.airspeed_warn_ms:.1f})"
+            + (" — stall risk" if as_low else ""))
+    if as_low_sustained and cfg.airspeed_action == "rtl" and action is None:
+        action, source = "rtl", "airspeed"
+        reason = (f"airspeed {airspeed:.1f} m/s below stall-risk floor "
+                  f"{cfg.airspeed_min_ms:.1f} m/s for {cfg.airspeed_low_s:.0f}s")
 
     if not cfg.enabled:
         action, reason, source = None, None, None

@@ -15,7 +15,8 @@ from app.vehicle_manager import VehicleManager, vehicle_manager
 def _telem(**over):
     t = {"armed": True, "mode": "AUTO", "lat": 39.91, "lon": -95.80,
          "home_lat": 39.9042, "home_lon": -95.7997, "altitude": 60.0,
-         "groundspeed": 18.0, "battery_voltage": 12.4, "battery_current": 12.0,
+         "groundspeed": 18.0, "airspeed": 18.0,
+         "battery_voltage": 12.4, "battery_current": 12.0,
          "battery_consumed_mah": 500.0, "gps_fix": 3, "gps_satellites": 10,
          "link_level": "good"}
     t.update(over)
@@ -178,6 +179,39 @@ class TestMonitors(unittest.TestCase):
         res = _eval(cfg=cfg, t=_telem(vibration_x=90.0))
         self.assertIsNone(res["action"])
 
+    def test_low_airspeed_on_the_ground_is_not_a_stall_warning(self):
+        # Taxiing / mid-takeoff-roll: armed, airspeed ~0, but not airborne yet.
+        res = _eval(t=_telem(altitude=0.5, airspeed=0.0))
+        self.assertTrue(res["monitors"]["airspeed"]["ok"])
+        self.assertNotIn("airspeed", " ".join(res["warnings"]))
+
+    def test_low_airspeed_while_airborne_warns(self):
+        res = _eval(t=_telem(altitude=60.0, airspeed=6.0))
+        self.assertIn("airspeed low", " ".join(res["warnings"]))
+        self.assertIn("stall risk", " ".join(res["warnings"]))
+        self.assertIsNone(res["action"], "warn threshold must not command RTL")
+
+    def test_airspeed_rtl_requires_sustained_low_and_explicit_config(self):
+        cfg = GuardianConfig(airspeed_action="rtl", airspeed_low_s=3.0)
+        mem = guardian.default_memory()
+        t = _telem(altitude=60.0, airspeed=5.0)
+        self.assertIsNone(evaluate(cfg, t, mem, 1000.0)["action"])
+        res = evaluate(cfg, t, mem, 1004.0)
+        self.assertEqual((res["action"], res["source"]), ("rtl", "airspeed"))
+
+    def test_airspeed_recovery_resets_the_clock(self):
+        cfg = GuardianConfig(airspeed_action="rtl", airspeed_low_s=3.0)
+        mem = guardian.default_memory()
+        evaluate(cfg, _telem(altitude=60.0, airspeed=5.0), mem, now=1000.0)
+        evaluate(cfg, _telem(altitude=60.0, airspeed=15.0), mem, now=1001.0)  # recovers
+        res = evaluate(cfg, _telem(altitude=60.0, airspeed=5.0), mem, now=1005.0)
+        self.assertIsNone(res["action"], "recovery must reset the debounce")
+
+    def test_disabled_guardian_never_acts_on_airspeed_either(self):
+        cfg = GuardianConfig(enabled=False, airspeed_action="rtl", airspeed_low_s=0.0)
+        res = _eval(cfg=cfg, t=_telem(altitude=60.0, airspeed=2.0))
+        self.assertIsNone(res["action"])
+
 
 class TestStateMachine(unittest.TestCase):
     def test_transitions(self):
@@ -284,6 +318,11 @@ class TestGuardianApi(unittest.TestCase):
     def test_inverted_battery_thresholds_rejected(self):
         r = self.client.post("/api/safety/guardian",
                              json={"batt_rtl_volt": 12.0, "batt_warn_volt": 11.0})
+        self.assertEqual(r.status_code, 422)
+
+    def test_inverted_airspeed_thresholds_rejected(self):
+        r = self.client.post("/api/safety/guardian",
+                             json={"airspeed_min_ms": 12.0, "airspeed_warn_ms": 10.0})
         self.assertEqual(r.status_code, 422)
 
     def test_empty_update_rejected(self):
