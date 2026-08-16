@@ -7,8 +7,12 @@ hardware required to try it.
 
 ## Quick start (SITL, no hardware)
 
-**First time only** — install dependencies:
+**First time only** — fetch the simulator binaries, then install dependencies:
 ```powershell
+# SITL binaries (~21 MB) are not committed to git — fetch them first, or start-all.ps1
+# will fail with a missing sitl\ArduPlane.exe. Needs git-bash (ships with Git for Windows).
+bash sitl/download_sitl.sh
+
 cd backend; python -m venv venv; .\venv\Scripts\Activate.ps1; pip install -r requirements.txt; cd ..
 cd frontend; npm install; cd ..
 cd web; npm install; cd ..
@@ -47,7 +51,7 @@ Same flow, but in Quick Connect pick the detected COM port instead of Simulator 
 USB, 115200 baud). See CLAUDE-CALEB.md for bench-testing notes and safety interlocks.
 
 ## Stack
-- **Backend:** Python 3.13 / FastAPI / pymavlink / pyserial
+- **Backend:** Python 3.13+ (developed on 3.13, currently running 3.14) / FastAPI / pymavlink / pyserial
 - **GCS frontend:** React / Leaflet / Recharts
 - **Customer site:** React / Vite / Leaflet
 - **Communication:** MAVLink over serial/USB telemetry radio (or `tcp:127.0.0.1:5760` for SITL)
@@ -58,4 +62,10 @@ CLAUDE-CALEB.md for the annotated summary.
 
 ## Project docs
 Architecture, decisions, session history, and the working task list live in
-**CLAUDE-CALEB.md** — read that before making changes.
+**CLAUDE-CALEB.md** at the repo root — read that before making changes.
+
+## Not in git (won't come across on a fresh clone)
+- `sitl/` binaries — re-fetch with `bash sitl/download_sitl.sh` (see above)
+- `sitl/logs/*.BIN`, `backend/logs/` — recorded SITL flights, only needed to replay old sessions
+- `backend/data/orders.db` — customer-site orders; recreated empty on first run
+- `backend/dist/AgOpsGCS.exe` — rebuild from source rather than copying the binary
