@@ -51,7 +51,8 @@ Same flow, but in Quick Connect pick the detected COM port instead of Simulator 
 USB, 115200 baud). See CLAUDE-CALEB.md for bench-testing notes and safety interlocks.
 
 ## Stack
-- **Backend:** Python 3.13+ (developed on 3.13, currently running 3.14) / FastAPI / pymavlink / pyserial
+- **Backend:** Python 3.13 (`backend\venv` is 3.13.13 — that's what the shipped exe is built
+  against; a 3.14 system interpreter is fine for everything else) / FastAPI / pymavlink / pyserial
 - **GCS frontend:** React / Leaflet / Recharts
 - **Customer site:** React / Vite / Leaflet
 - **Communication:** MAVLink over serial/USB telemetry radio (or `tcp:127.0.0.1:5760` for SITL)
@@ -68,4 +69,16 @@ Architecture, decisions, session history, and the working task list live in
 - `sitl/` binaries — re-fetch with `bash sitl/download_sitl.sh` (see above)
 - `sitl/logs/*.BIN`, `backend/logs/` — recorded SITL flights, only needed to replay old sessions
 - `backend/data/orders.db` — customer-site orders; recreated empty on first run
-- `backend/dist/AgOpsGCS.exe` — rebuild from source rather than copying the binary
+- `backend/dist/AgOpsGCS.exe` — rebuild rather than copying the binary (see below)
+
+## Rebuilding the exe
+`AgOpsGCS.spec` is tracked; the build output is not. Frontend bundle first, then PyInstaller:
+```powershell
+cd frontend; npm run build; cd ..
+cd backend; .\venv\Scripts\pyinstaller.exe AgOpsGCS.spec --noconfirm; cd ..
+```
+Output lands at `backend\dist\AgOpsGCS.exe` (~54 MB, bundles `frontend/build` as
+`frontend_build`). Ship a `sitl\` folder next to it for demo mode. Smoke test: run it, then
+check `http://127.0.0.1:8000/docs` responds and `/` serves the UI. Note the onefile
+bootloader spawns a child process — killing the launched pid alone leaves the server on
+:8000, so kill by name (`Get-Process AgOpsGCS | Stop-Process -Force`).
