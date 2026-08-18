@@ -502,6 +502,9 @@ function SprayPanel({
               <Stat v={fmt(totals.spray_path_m / 1000, 1)} l="spray km" />
               <Stat v={fmt(totals.transit_m / 1000, 1)} l="transit km" />
               <Stat v={totals.waypoints} l="waypoints" />
+              {totals.coverage_pct != null && (
+                <Stat v={`${totals.coverage_pct}%`} l="coverage" />
+              )}
             </div>
             {keepoutsApplied > 0 && (
               <div className="spray-keep">
@@ -520,6 +523,13 @@ function SprayPanel({
               </div>
             )}
             {zonesNote && <div className="spray-note">{zonesNote}</div>}
+            {totals.uncovered_acres > 0.05 && (
+              <div className="spray-note">
+                {totals.uncovered_acres} acre(s) of sprayable ground not
+                covered by any pass — usually the strip alongside a keepout.
+                Tighten the swath or re-angle the passes to close it.
+              </div>
+            )}
             {hazardOverflights > 0 && (
               <div className="spray-note" style={{ color: '#ff5c5c', fontWeight: 600 }}>
                 {hazardOverflights} leg(s) STILL cross a powerline corridor —

@@ -83,9 +83,14 @@ def plan_coverage(
         When keepouts is not None, stats additionally carries
         "keepouts_applied" (how many keepout polygons actually removed spray
         length from at least one pass) and "n_segments" (spray sub-segments
-        after clipping; n_passes stays the pre-clip sweep-pass count). Calls
-        without keepouts keep the exact legacy shape so existing clients see
-        byte-for-byte identical responses.
+        after clipping; n_passes stays the pre-clip sweep-pass count), plus
+        coverage analysis — "coverage_pct", "sprayable_acres",
+        "uncovered_acres" — measuring how much of the ground we INTENDED to
+        spray the passes actually hit (keepout area is excluded from the
+        denominator, since not spraying a pond is the plan working, not a
+        gap). Calls without keepouts keep the exact legacy stats shape so
+        existing clients see identical responses; pass keepouts=[] to opt
+        into the extra stats on a field with none.
         Also returns "leg_kinds": one entry per consecutive waypoint pair,
         each "spray" | "hop" | "detour". A detour inserts extra waypoints, so
         a caller can no longer assume waypoints arrive in strict spray pairs —
@@ -281,6 +286,27 @@ def plan_coverage(
         # aircraft overflies it; sprayer must be off) — surfaced so the UI
         # can warn instead of the plan looking fully "avoided".
         result["stats"]["keepout_overflights"] = overflights
+    # Coverage analysis: what fraction of the sprayable ground the passes
+    # actually hit. Cheap in the rotated frame and it answers the question an
+    # operator actually has ("did we cover the field?"), which pass counts and
+    # path length do not.
+    if keepouts is not None:
+        # Gated exactly like keepouts_applied/n_segments above. A call without
+        # keepouts is contractually indistinguishable from the pre-keepout
+        # planner (TestLegacyRegression pins the exact stats key set), and
+        # that promise is not mine to break for a diagnostic. Every product
+        # path — plan_auto, plan_multi — passes keepouts, so they all get it;
+        # a bare /plan caller opts in by passing keepouts=[].
+        try:
+            kp_rot_cov, kp_bounds_cov = _project_rings(
+                keepouts, proj, cos_t, sin_t)
+            result["stats"].update(_coverage_stats(
+                rot, segments, kp_rot_cov, kp_bounds_cov,
+                keepout_buffer_m, swath_m, _charge))
+        except ValueError:
+            # Budget exhaustion must not lose an otherwise good plan —
+            # coverage is a diagnostic, not part of the flight path.
+            pass
     if hazards is not None:
         result["stats"]["hazard_reroutes"] = hazard_reroutes
         # The number that matters: legs that STILL cross a hazard because
@@ -457,18 +483,7 @@ def _clip_passes_to_keepouts(
     default, shared across a whole job when the caller passes work_budget —
     so a single request can never burn more than a couple seconds of CPU.
     """
-    lat0, lon0, m_per_deg, cos_lat = proj
-    kp_rot = []
-    kp_ybounds = []  # per-ring (min y, max y) for the prefilter below
-    for kp in keepouts:
-        pts = []
-        for p in kp:
-            x = (p["lon"] - lon0) * m_per_deg * cos_lat
-            y = (p["lat"] - lat0) * m_per_deg
-            pts.append((x * cos_t + y * sin_t, -x * sin_t + y * cos_t))
-        kp_rot.append(pts)
-        ys = [y for _, y in pts]
-        kp_ybounds.append((min(ys), max(ys)))
+    kp_rot, kp_ybounds = _project_rings(keepouts, proj, cos_t, sin_t)
 
     if work_budget is None:
         work_budget = [_MAX_CLIP_WORK]
@@ -542,6 +557,111 @@ def _detour_budget_m(straight_len_m: float) -> float:
 
 _MIN_DETOUR_BUDGET_M = 250.0
 _DETOUR_RATIO = 3.0
+
+
+def _project_rings(rings, proj, cos_t, sin_t):
+    """Project lat/lon rings into the field's rotated local frame.
+
+    Returns (rings_xy, y_bounds). Shared by keepout clipping and the coverage
+    analysis so both see byte-identical geometry — computing it twice invites
+    the two disagreeing about where a keepout is.
+    """
+    lat0, lon0, m_per_deg, cos_lat = proj
+    rings_xy, bounds = [], []
+    for ring in rings or []:
+        pts = []
+        for p in ring:
+            x = (p["lon"] - lon0) * m_per_deg * cos_lat
+            y = (p["lat"] - lat0) * m_per_deg
+            pts.append((x * cos_t + y * sin_t, -x * sin_t + y * cos_t))
+        rings_xy.append(pts)
+        ys = [y for _, y in pts]
+        bounds.append((min(ys), max(ys)))
+    return rings_xy, bounds
+
+
+# Coverage analysis samples the field on a grid. Resolution is tied to the
+# swath so the answer means the same thing at any field size, and the total
+# sample count is capped so a huge field cannot turn a plan request into a
+# multi-second CPU burn.
+_COVERAGE_SAMPLES_PER_SWATH = 4
+_COVERAGE_MAX_SAMPLES = 120_000
+
+
+def _coverage_stats(field_rot, segments, kp_rot, kp_ybounds,
+                    buffer_m, swath_m, charge):
+    """Measure what fraction of the SPRAYABLE field the passes actually cover.
+
+    Sprayable = inside the field boundary and outside every buffered keepout,
+    i.e. the ground we intended to spray. Keepout area is excluded rather than
+    counted as a miss — not spraying a pond is the plan working, not a gap.
+
+    Works in the rotated frame, where every pass is horizontal: a sample is
+    covered iff some pass line lies within half a swath in y and the sample's
+    x falls inside that pass's sprayed extent. Passes sit one swath apart, so
+    at most two can be in range and the test is O(1) per sample rather than a
+    scan over every segment.
+
+    Returns {} when there is nothing meaningful to measure.
+    """
+    if not segments:
+        return {}
+    xs = [x for x, _ in field_rot]
+    ys = [y for _, y in field_rot]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    if x1 <= x0 or y1 <= y0:
+        return {}
+    res = swath_m / _COVERAGE_SAMPLES_PER_SWATH
+    # Coarsen rather than refuse if the field is enormous: an approximate
+    # coverage number is useful, a 20-second one is not.
+    while ((x1 - x0) / res) * ((y1 - y0) / res) > _COVERAGE_MAX_SAMPLES:
+        res *= 2.0
+    half = swath_m / 2.0
+
+    # Bucket the sprayed extents by pass line (y), so lookup is by y.
+    by_y: dict[float, list[tuple[float, float]]] = {}
+    for (sx, sy), (ex, _ey) in segments:
+        by_y.setdefault(sy, []).append((min(sx, ex), max(sx, ex)))
+    pass_ys = sorted(by_y)
+
+    sprayable = covered = 0
+    y = y0 + res / 2.0
+    while y <= y1:
+        charge(len(field_rot))
+        inside = _merge_intervals(list(_line_crossings(field_rot, y)))
+        if inside:
+            blocked = []
+            for k, ring in enumerate(kp_rot):
+                lo, hi = kp_ybounds[k]
+                if y < lo - buffer_m or y > hi + buffer_m:
+                    continue
+                charge(len(ring))
+                blocked.extend(_blocked_intervals(ring, y, buffer_m))
+            open_iv = []
+            for a, b in inside:
+                open_iv.extend(_subtract_intervals(a, b,
+                                                   _merge_intervals(blocked)))
+            # Pass lines close enough in y to cover this row.
+            near = [py for py in pass_ys if abs(py - y) <= half]
+            for a, b in open_iv:
+                x = a + res / 2.0
+                while x <= b:
+                    sprayable += 1
+                    for py in near:
+                        if any(lo <= x <= hi for lo, hi in by_y[py]):
+                            covered += 1
+                            break
+                    x += res
+        y += res
+
+    if sprayable == 0:
+        return {}
+    cell = res * res
+    return {
+        "coverage_pct": round(100.0 * covered / sprayable, 1),
+        "sprayable_acres": round(sprayable * cell / _M2_PER_ACRE, 2),
+        "uncovered_acres": round((sprayable - covered) * cell / _M2_PER_ACRE, 2),
+    }
 
 
 def _order_segments_around_hazards(segments, hulls, tol, charge):

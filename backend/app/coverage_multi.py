@@ -34,6 +34,19 @@ def _dist_m(a: dict, b: dict) -> float:
     return math.hypot((a["lat"] - b["lat"]) * _M_PER_DEG, (a["lon"] - b["lon"]) * kx)
 
 
+def _coverage_totals(planned: dict) -> dict:
+    """Aggregate per-field coverage into job totals, area-weighted."""
+    sprayable = sum(p["stats"].get("sprayable_acres", 0.0) for p in planned.values())
+    uncovered = sum(p["stats"].get("uncovered_acres", 0.0) for p in planned.values())
+    if sprayable <= 0:
+        return {}
+    return {
+        "sprayable_acres": round(sprayable, 2),
+        "uncovered_acres": round(uncovered, 2),
+        "coverage_pct": round(100.0 * (sprayable - uncovered) / sprayable, 1),
+    }
+
+
 def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
                home=None, speed_ms=18.0, hazards=None, hazard_buffer_m=0.0):
     """Plan a multi-field job.
@@ -253,6 +266,11 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
             "hazard_overflights": sum(
                 planned[i]["stats"].get("hazard_overflights", 0)
                 for i in planned) + transit_overflights,
+            # Job-wide coverage: how much of the ground we intended to
+            # spray the passes actually hit. Aggregated by AREA, not by
+            # averaging per-field percentages — a 2-acre field missing half
+            # of itself must not weigh the same as a 200-acre field.
+            **_coverage_totals(planned),
             # The RTL path home crosses a hazard. RTL is autopilot-controlled
             # and flies straight, so we cannot route around it — the operator
             # has to know before launching.

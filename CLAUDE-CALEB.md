@@ -277,6 +277,33 @@ Newest first isn't required — kept chronological. This section is an append-on
 add a new dated entry here rather than editing old ones. Everything above the `---` is the
 "living" reference — keep that current and reorganize freely.
 
+#### Coverage analysis + real-Sabetha planner validation (2026-08-18)
+- **Validated the whole planner against REAL Sabetha zone data first** (the actual operating area
+  and demo site), applying the day's lesson that fixtures lie. Three 40-acre fields around town:
+  all plan cleanly, 20 passes each, keepouts applied 2 / 13 / 0 by location, no refusals or
+  crashes. Zones there: water 29, buildings 184, trees 0, **powerline 0** (consistent with the
+  earlier finding — the powerline feature is inert at the demo site). Core chain is healthy.
+- **New: coverage analysis** (`_coverage_stats` in `coverage.py`) — `coverage_pct`,
+  `sprayable_acres`, `uncovered_acres`, aggregated area-weighted into `plan_multi` totals and
+  shown in the SprayPanel job summary. Answers the question pass counts and path length do not:
+  *did we actually cover the field?* Keepout area is excluded from the denominator — not spraying
+  a pond is the plan working, not a gap.
+- **Real numbers on those Sabetha fields: 100% on the clean field, 98.8% and 98.0% on the two
+  with keepouts — 0.41 and 0.56 acres of genuinely missed ground each.** That gap is the strip
+  alongside a keepout, and it is exactly what headland passes (still unbuilt) would close. Measure
+  first, then optimise: the number now exists to justify and verify that work.
+- Cheap by construction: the analysis runs in the rotated frame where passes are horizontal, so a
+  sample is an O(1) lookup against at most two pass lines rather than a scan over every segment.
+  Sample resolution is tied to the swath and the grid coarsens on huge fields rather than burning
+  the shared CPU budget; budget exhaustion drops the diagnostic instead of losing the plan.
+- **Caught a contract I was about to break silently:** `TestLegacyRegression` deliberately pins
+  the EXACT stats key set for a call without keepouts ("indistinguishable from the old planner").
+  Adding coverage keys unconditionally broke it. Coverage is now gated on `keepouts is not None`,
+  exactly like `keepouts_applied`/`n_segments` — every product path (plan_auto, plan_multi) passes
+  keepouts so they all get it, and a bare `/plan` caller opts in with `keepouts=[]`. Breaking a
+  deliberately-tested promise should be a decision, not a side effect of a diagnostic.
+- 335 backend tests (+6), 6 frontend, builds clean.
+
 #### Hazard crossings are now FAIL-CLOSED — found by testing against a real 115 kV line (2026-08-18)
 - **How it was found:** everything in the powerline + rerouting work had been verified against
   synthetic fixtures. Running the full chain against REAL OSM data — the "6th & Golden-Tecumseh
