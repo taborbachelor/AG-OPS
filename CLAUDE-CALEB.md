@@ -277,6 +277,80 @@ Newest first isn't required — kept chronological. This section is an append-on
 add a new dated entry here rather than editing old ones. Everything above the `---` is the
 "living" reference — keep that current and reorganize freely.
 
+#### 🔴 SITL scenario suite is INTERMITTENTLY FAILING on this machine (2026-08-18) — not a code bug
+- **Symptom:** `scenarios.ps1 all` fails 2–4 scenarios per run, with a DIFFERENT set each time.
+  Observed sets across four runs: `{bench, link_watchdog, preflight}`, `{link_watchdog,
+  preflight, rtl_recovery, soak}`, `{field_test, link_watchdog}`, `{battery_fault,
+  link_watchdog}`. Every failure is the same assertion, at `h.connect()` BEFORE the scenario
+  does anything: `connect failed: 500 ... [WinError 10054] An existing connection was forcibly
+  closed by the remote host`. `link_watchdog` failed in all four.
+- **PROVEN not to be a code regression.** The suite was re-run with all in-flight work stashed,
+  working tree clean at `79d54a4` — **the pristine baseline failed too** (battery_fault +
+  link_watchdog). Supporting evidence: `connection.py`, `sim.py` and `vehicle_manager.py` import
+  neither `coverage` nor `reroute`, so nothing in the planner work is in the connect path at
+  all. The failing scenarios also pass when run in isolation (4/4 green, 130s).
+- **Mechanism:** a stale `ArduPlane.exe` is left holding TCP 5760 (confirmed by `tasklist` /
+  `netstat` after several runs). The next scenario's SITL cannot own the port, and the backend's
+  connect lands on a socket that immediately drops. `backend/tests/sitl/harness.py` hardcodes
+  `tcp:127.0.0.1:5760`, so there is no isolation between scenarios and no way to run two at once.
+- **Workaround until fixed:** `Get-Process ArduPlane | Stop-Process -Force` before every run, run
+  the suite with the machine otherwise IDLE, and re-run any failure in isolation before believing
+  it. Do NOT run the unit suite or anything CPU-heavy alongside it — doing so stretched a run
+  from 245s to 466s and broke a scenario that passes clean (that one was self-inflicted).
+- **Real fix (promote this up the queue — it is now more than a parallelism nicety):** give the
+  harness a dynamic/parameterised port instead of the hardcoded 5760, and make teardown REAP the
+  spawned simulator (verify the process is gone and the port is free before the next spawn,
+  rather than assuming `POST /api/sim/stop` succeeded). Until then, a crashed scenario silently
+  poisons every subsequent run, and the suite reports what looks exactly like a code regression.
+- **Note it passed 10/10 twice earlier the same day**, so the flake is timing/state dependent,
+  not a permanent break. That is precisely what makes it dangerous: a green run is not evidence
+  the problem is gone.
+
+#### Lane B item 2 — connector-leg rerouting SHIPPED (2026-08-18)
+- **The problem:** spray PASSES were clipped around keepouts, but the connecting legs never
+  were — in-field hops, inter-field transits, and the home leg all flew straight through, and
+  only the in-field ones were even counted (`keepout_overflights`). Transits and home legs were
+  not checked at all. Acceptable while every keepout protected spray quality; a powerline made
+  it a collision.
+- **`app/reroute.py` (new, pure geometry):** hazard rings are reduced to their CONVEX HULL,
+  expanded by the clearance buffer with a circumscribed 32-sided polygon, and legs are routed as
+  taut paths around them. Over-conservative by construction (hull ⊇ ring), matching the
+  codebase's standing "over-standoff errs safe" rule. Deliberately NOT a visibility graph —
+  shorter is not the goal, provably clear is, and the degenerate cases are far easier to get
+  right on convex hulls. **Unroutable legs return None and the caller keeps counting them**, so
+  a leg we failed to solve is never silently presented as safe.
+- **The hazard set is a SUBSET of keepouts.** Only `powerline` today. Rerouting around every
+  pond and treeline would add flight time and battery for no safety gain — overflying those with
+  the sprayer off costs nothing. Water/trees/buildings keep the cheap straight-line behavior.
+- **Three things found by measuring rather than assuming:**
+  1. **The first working version made the mission 2.6× longer** (waypoints 40 → 210) because a
+     field bisected by a line alternates sides every pass and each crossing got its own detour.
+     Fixed by ordering the spray sub-segments so same-side passes fly together: **one crossing
+     instead of ten, 1.12× path length, 54 waypoints.** Ordering only engages when a hazard
+     actually blocks a leg, so hazard-free plans keep the exact serpentine they always had.
+  2. **The first hull geometry made the feature a no-op.** Spray passes are clipped at exactly
+     the buffer distance, so their endpoints sit exactly on the hazard boundary — and a
+     circumscribed octagon bulges ~8% past it, putting EVERY endpoint inside the hull and making
+     every leg unroutable. It reported 10 overflights and rerouted 0. Fixed with a 32-sided hull
+     (~0.48% bulge) plus an explicit metric tolerance; worst-case clearance shortfall is now
+     under 10 cm on a 20 m buffer, far inside the GPS error this projection already accepts.
+  3. **The home leg must NOT be rerouted.** The mission ends at the last field waypoint and the
+     aircraft returns under autopilot RTL, which flies straight and knows nothing about our
+     keepouts. Appending detour points there would fly the aircraft out to a detour vertex and
+     then RTL straight back across the line — worse than not trying. The home leg's route is
+     computed for display and `totals.home_leg_hazard` warns the operator instead.
+- **UI: the backend now says what each leg IS (`leg_kinds` / `combined_leg_kinds`).** `App.jsx`
+  had been inferring spray-vs-hop from index PARITY (waypoints in strict pairs). Detours insert
+  waypoints, so parity breaks — and the failure mode is drawing a hop as a SPRAY leg, i.e.
+  showing spraying over a keepout. The unknown-kind fallback was also `spray`; it is now `hop`,
+  the conservative direction. Detour legs render in hazard yellow so the operator can see why
+  the path bends.
+- **323 backend tests** (+22 geometry incl. 600 randomized property cases proving a returned
+  path never enters a hazard, +20 planner/router). 6 frontend tests, frontend builds.
+- **Still open (deliberately):** a concave hazard is treated as its filled hull, so detours are
+  longer than strictly necessary and a gap inside the hull goes unused. Accepted — see the
+  module docstring.
+
 #### Lane B item 1 — powerline keepouts SHIPPED (2026-08-18)
 - **OSM `power=line` / `power=minor_line` buffer keepouts, end to end**, per
   `POWERLINE-KEEPOUTS.md` (that doc is now marked SHIPPED and carries the full detail).

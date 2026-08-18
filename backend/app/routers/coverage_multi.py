@@ -109,6 +109,8 @@ def plan_multi_endpoint(req: MultiRequest):
     # isn't there. User keepouts keep the water default, as in plan_auto.
     buf = req.water_buffer if user_keepouts else 0.0
     keepouts = list(user_keepouts)
+    # See _HAZARD_KINDS in routers/coverage.py — legs route around these.
+    hazards: list = []
     try:
         z = fetch_zones(clat, clon, radius)
         zones = z
@@ -126,6 +128,8 @@ def plan_multi_endpoint(req: MultiRequest):
                         "error": "zone_too_complex"})
                 keepouts.append(ring)
                 buf = max(buf, buffers[kind])
+                if kind == "powerline":
+                    hazards.append(ring)
         if len(keepouts) > _MAX_ZONE_RINGS:
             # Never silently drop keepouts (dropping = spraying them).
             raise HTTPException(400, {
@@ -161,6 +165,8 @@ def plan_multi_endpoint(req: MultiRequest):
             fields, req.swath, req.alt,
             keepouts=keepouts, keepout_buffer_m=buf,
             home=home, speed_ms=req.speed,
+            hazards=(hazards or None),
+            hazard_buffer_m=req.powerline_buffer,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

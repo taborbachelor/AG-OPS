@@ -71,6 +71,8 @@ function SprayPanel({
   // Set -> we show a "Plan anyway (no zones)" button that retries with the
   // explicit allow_missing_zones override.
   const [zonesBlocked, setZonesBlocked] = useState(false);
+  const [hazardOverflights, setHazardOverflights] = useState(0);
+  const [homeLegHazard, setHomeLegHazard] = useState(false);
 
   // Bumped on every job mutation (field added/removed/cleared). An in-flight
   // plan request captures the value at launch and discards its response if
@@ -84,6 +86,7 @@ function SprayPanel({
     planReq.current += 1;
     setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
     setZonesBlocked(false);
+    setHazardOverflights(0); setHomeLegHazard(false);
   };
 
   // Exclusive input modes: draw / area / snap.
@@ -256,14 +259,24 @@ function SprayPanel({
       if ((data.skipped || []).length > 0) {
         flash(`${data.skipped.length} field(s) skipped: ${data.skipped[0].error}`);
       }
-      const overflights = (data.totals && data.totals.keepout_overflights) || 0;
+      const totals = data.totals || {};
+      const overflights = totals.keepout_overflights || 0;
       if (overflights > 0) {
-        // Connector legs are NOT rerouted around keepouts — the aircraft
-        // physically overflies them there (mind trees at spray altitude).
+        // Connector legs are NOT rerouted around spray-quality keepouts — the
+        // aircraft physically overflies them (mind trees at spray altitude).
+        // Hazard keepouts (powerlines) ARE routed around; see below.
         setZonesNote((n) => `${n ? n + ' · ' : ''}${overflights} connecting `
           + 'leg(s) cross no-spray zones — aircraft overflies them '
           + '(sprayer off; mind trees at low altitude)');
       }
+      if (totals.hazard_reroutes > 0) {
+        setZonesNote((n) => `${n ? n + ' · ' : ''}${totals.hazard_reroutes} `
+          + 'leg(s) routed around powerlines');
+      }
+      // The one that is not a statistic: legs we could NOT route. The plan
+      // still crosses a line there, so it has to be impossible to miss.
+      setHazardOverflights(totals.hazard_overflights || 0);
+      setHomeLegHazard(Boolean(totals.home_leg_hazard));
     } catch (e) {
       if (req === planReq.current) flash('Plan error — is the backend running?');
     }
@@ -478,6 +491,20 @@ function SprayPanel({
               </div>
             )}
             {zonesNote && <div className="spray-note">{zonesNote}</div>}
+            {hazardOverflights > 0 && (
+              <div className="spray-note" style={{ color: '#ff5c5c', fontWeight: 600 }}>
+                {hazardOverflights} leg(s) STILL cross a powerline corridor —
+                could not be routed around. Do not fly this plan without
+                checking those legs.
+              </div>
+            )}
+            {homeLegHazard && (
+              <div className="spray-note" style={{ color: '#ffd600' }}>
+                The return-home path crosses a powerline corridor. RTL flies
+                straight home and will NOT avoid it — fly the return manually
+                or move the home point.
+              </div>
+            )}
             <div className="spray-hint" style={{ textAlign: 'left' }}>
               Legend: <span style={{ color: '#00e5ff' }}>■ spray</span> ·{' '}
               <span style={{ color: '#ff9100' }}>■ transit</span> ·{' '}

@@ -34,6 +34,22 @@ altitude, bank-angle-near-ground, stall margin, and terrain/AGL clearance stop b
 (camera/terrain-avoidance is explicitly a later phase per the TODO list), reorder priority toward
 the data-tracking items, which matter at any altitude.
 
+## Connector-leg rerouting — SHIPPED 2026-08-18
+Related to item 5 below (live keepout proximity) but distinct: this is
+PLANNING-time avoidance, not an in-flight monitor. Connecting legs — the hops
+between spray sub-segments, the inter-field transits, and the home leg — used
+to fly straight through keepouts and were only COUNTED. That was fine while
+every keepout protected spray quality; powerline keepouts made it a collision
+risk. See `app/reroute.py` and the "Connector-leg rerouting" History entry in
+`CLAUDE-CALEB.md` for the full design, including why the hazard set is a
+SUBSET of keepouts (rerouting around every treeline costs flight time for no
+safety gain) and why the home leg is reported rather than routed (RTL is
+autopilot-controlled and flies straight).
+
+Item 5 below is still open and still worth doing: planning-time avoidance does
+not help if the aircraft drifts off the planned path, so the in-flight
+proximity monitor remains the second layer.
+
 ## Part 1 — what's already there (don't rebuild it)
 - **`preflight.py`**: one-time go/no-go gate before arm/takeoff (link READY, GPS 3D fix, EKF
   healthy, home known as blockers; battery/RC/fence/sensors as advisories). Runs once, not during

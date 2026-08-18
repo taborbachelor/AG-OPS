@@ -50,6 +50,7 @@ const LEG_STYLE = {
   hop: { color: CYAN.withAlpha(0.35), width: 2 },
   transit: { color: ORANGE, width: 2.5 },
   home: { color: PURPLE, width: 2.5 },
+  detour: { color: Cesium.Color.fromCssColorString('#ffd600'), width: 3 },
 };
 
 // Aircraft primitive model, scaled up for visibility from mission distances.
@@ -330,7 +331,7 @@ export default function MapView3D({
 
     // Planned flight legs at altitude ([lat, lon, alt?] point lists).
     for (const leg of sprayLegs || []) {
-      const style = LEG_STYLE[leg.kind] || LEG_STYLE.spray;
+      const style = LEG_STYLE[leg.kind] || LEG_STYLE.hop;
       add({
         polyline: {
           positions: leg.pts.map(([la, lo, al]) => cart(la, lo, al ?? 60)),

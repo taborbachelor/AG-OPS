@@ -301,15 +301,23 @@ function App() {
     const byIndex = Object.fromEntries(p.fields.map((f) => [f.index, f]));
     const legs = [];
     for (const stop of p.flight_order) {
-      let wps = byIndex[stop.index].waypoints;
-      if (stop.reversed) wps = [...wps].reverse();
+      const field = byIndex[stop.index];
+      let wps = field.waypoints;
+      // The BACKEND says what each leg is. This used to infer spray-vs-hop
+      // from index parity (waypoints in strict pairs), which stops being true
+      // the moment a hazard detour inserts extra waypoints — and the failure
+      // mode is drawing a hop as a SPRAY leg, i.e. showing spraying over a
+      // keepout. Parity is only a fallback for a plan with no leg_kinds.
+      let kinds = field.leg_kinds || [];
+      if (stop.reversed) {
+        wps = [...wps].reverse();
+        kinds = [...kinds].reverse();
+      }
       // [lat, lon, alt] triples: Leaflet ignores the altitude; the 3D view
       // draws the legs at their planned height.
-      for (let i = 0; i + 1 < wps.length; i += 2) {
-        legs.push({ kind: 'spray', pts: [[wps[i].lat, wps[i].lon, wps[i].alt], [wps[i + 1].lat, wps[i + 1].lon, wps[i + 1].alt]] });
-        if (i + 2 < wps.length) {
-          legs.push({ kind: 'hop', pts: [[wps[i + 1].lat, wps[i + 1].lon, wps[i + 1].alt], [wps[i + 2].lat, wps[i + 2].lon, wps[i + 2].alt]] });
-        }
+      for (let i = 0; i + 1 < wps.length; i += 1) {
+        const kind = kinds[i] || (i % 2 === 0 ? 'spray' : 'hop');
+        legs.push({ kind, pts: [[wps[i].lat, wps[i].lon, wps[i].alt], [wps[i + 1].lat, wps[i + 1].lon, wps[i + 1].alt]] });
       }
     }
     const ts = p.transits || [];

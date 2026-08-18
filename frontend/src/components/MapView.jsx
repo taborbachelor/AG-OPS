@@ -84,6 +84,9 @@ const LEG_STYLE = {
   hop: { color: '#00e5ff', weight: 1.5, opacity: 0.45, dashArray: '3 5' },
   transit: { color: '#ff9100', weight: 2.5, opacity: 0.85, dashArray: '8 6' },
   home: { color: '#b388ff', weight: 2, opacity: 0.8, dashArray: '8 6' },
+  // A leg routed around a hazard. Drawn in the hazard colour so the operator
+  // can see WHY the path bends where it does.
+  detour: { color: '#ffd600', weight: 2.5, opacity: 0.9, dashArray: '6 4' },
 };
 
 function fieldBadge(n) {
@@ -359,7 +362,7 @@ function MapView({
         {/* Whole-job flight: spray passes, hops, transits, home legs */}
         {sprayLegs.map((leg, i) => (
           <Polyline key={`leg-${i}`} positions={leg.pts}
-            pathOptions={LEG_STYLE[leg.kind] || LEG_STYLE.spray} />
+            pathOptions={LEG_STYLE[leg.kind] || LEG_STYLE.hop} />
         ))}
 
         {/* Planned flight path */}

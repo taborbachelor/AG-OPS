@@ -9,14 +9,19 @@ Ordering: greedy nearest-endpoint tour starting from `home` (or the first
 field). Each field's serpentine can be flown from either end, so the tour may
 REVERSE a field's waypoints when entering from the far end shortens transit.
 
-Transit legs are straight lines and are NOT rerouted around keepouts (same
-documented limitation as in-field hops) — they fly at spray altitude between
-pattern endpoints.
+Transit legs fly at spray altitude between pattern endpoints. They are NOT
+rerouted around ordinary keepouts — overflying a pond with the sprayer off
+costs nothing — but they ARE rerouted around `hazards` (powerlines), because
+crossing one of those is a crash rather than a wasted pass. Before this,
+inter-field transits and the home legs were not even CHECKED for crossings;
+only in-field hops were counted.
 """
 
 import math
 
-from app.coverage import _MAX_CLIP_WORK, EARTH_RADIUS_M, plan_coverage
+from app.coverage import (_MAX_CLIP_WORK, _project, _unproject,
+                          EARTH_RADIUS_M, plan_coverage)
+from app.reroute import hazard_hull, hull_tolerance, route_leg
 
 # Same meters-per-degree as the single-field planner, so spray lengths and
 # transit lengths summed into one total are on the same scale.
@@ -30,15 +35,23 @@ def _dist_m(a: dict, b: dict) -> float:
 
 
 def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
-               home=None, speed_ms=18.0):
+               home=None, speed_ms=18.0, hazards=None, hazard_buffer_m=0.0):
     """Plan a multi-field job.
 
     fields: list of polygons (each a list of {lat,lon}). Fields that fail to
     plan (fully blocked / degenerate) are reported in `skipped`, never fatal
     unless NO field survives.
 
+    hazards: keepout rings that must be FLOWN AROUND rather than overflown
+    (powerlines). Applied to in-field hops by plan_coverage and to the transit
+    and home legs here, with hazard_buffer_m of lateral clearance. A leg that
+    cannot be routed keeps its straight path and is counted in
+    totals.hazard_overflights so the operator is warned.
+
     Returns {fields, flight_order, transits, combined_waypoints, totals,
-             skipped}.
+             skipped}. Each transit carries "kind" ("direct" or "detour") and
+    its full point list; combined_waypoints includes detour points, and
+    combined_leg_kinds labels every consecutive pair.
     """
     if not fields:
         raise ValueError("at least one field is required")
@@ -55,6 +68,11 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
             if keepouts is not None:
                 kwargs = {"keepouts": keepouts, "keepout_buffer_m": keepout_buffer_m,
                           "work_budget": work_budget}
+            if hazards:
+                kwargs["hazards"] = hazards
+                kwargs["hazard_buffer_m"] = hazard_buffer_m
+                # Hazard rerouting draws on the same job-wide CPU allowance.
+                kwargs.setdefault("work_budget", work_budget)
             plan = plan_coverage(poly, swath_m, alt_m, speed_ms=speed_ms, **kwargs)
             if plan["waypoints"]:
                 planned[i] = plan
@@ -86,38 +104,116 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
         wps = planned[idx]["waypoints"]
         pos = wps[0] if rev else wps[-1]  # exit at the other end
 
+    # --- Hazard hulls for the transit/home legs -----------------------------
+    # One projection for the WHOLE job (the per-field ones are centred on each
+    # field and would disagree between them). Transit legs span fields, so
+    # they must be routed in a single shared frame.
+    job_pts = [p for f in fields for p in f]
+    if home:
+        job_pts = job_pts + [home]
+    _, job_proj = _project(job_pts)
+    transit_hulls = []
+    if hazards:
+        lat0, lon0, m_per_deg, cos_lat = job_proj
+        for hz in hazards:
+            ring = [((p["lon"] - lon0) * m_per_deg * cos_lat,
+                     (p["lat"] - lat0) * m_per_deg) for p in hz]
+            hull = hazard_hull(ring, hazard_buffer_m)
+            if len(hull) >= 3:
+                transit_hulls.append(hull)
+
+    def _charge(n):
+        work_budget[0] -= n
+        if work_budget[0] < 0:
+            raise ValueError(
+                "keepout clipping too complex for this request: "
+                "increase the swath, shrink the job, or simplify the keepouts")
+
+    transit_overflights = 0
+    transit_reroutes = 0
+
+    def _leg(a, b, origin):
+        """Build one transit leg from a to b, routed around hazards.
+
+        Returns the leg dict; its "pts" carry any detour vertices, so the UI
+        draws — and the mission flies — the path actually planned.
+        """
+        nonlocal transit_overflights, transit_reroutes
+        pts = [{"lat": a["lat"], "lon": a["lon"]},
+               {"lat": b["lat"], "lon": b["lon"]}]
+        kind = "direct"
+        if transit_hulls:
+            lat0, lon0, m_per_deg, cos_lat = job_proj
+            pa = ((a["lon"] - lon0) * m_per_deg * cos_lat,
+                  (a["lat"] - lat0) * m_per_deg)
+            pb = ((b["lon"] - lon0) * m_per_deg * cos_lat,
+                  (b["lat"] - lat0) * m_per_deg)
+            detour = route_leg(pa, pb, transit_hulls, charge=_charge,
+                               tol_m=hull_tolerance(hazard_buffer_m))
+            if detour is None:
+                # Straight leg kept, but never silently — the operator is told.
+                transit_overflights += 1
+            elif detour:
+                transit_reroutes += 1
+                kind = "detour"
+                mid = []
+                for (x, y) in detour:
+                    dlat, dlon = _unproject(x, y, job_proj)
+                    mid.append({"lat": dlat, "lon": dlon})
+                pts = ([pts[0]] + mid + [pts[-1]])
+        length = sum(_dist_m(pts[i - 1], pts[i]) for i in range(1, len(pts)))
+        return {"from": origin, "pts": pts, "length_m": round(length, 1),
+                "kind": kind}, length
+
     # --- Stitch: combined waypoints + explicit transit legs ---
     combined = []
+    combined_leg_kinds = []
     transits = []
     transit_len = 0.0
     pos = dict(home) if home else None
+
+    def _extend(points, kinds):
+        """Append points to the combined mission, labelling each new leg."""
+        for i, pt in enumerate(points):
+            if combined:
+                combined_leg_kinds.append(kinds[i] if i < len(kinds) else "hop")
+            combined.append(pt)
+
     for stop in flight_order:
         wps = list(planned[stop["index"]]["waypoints"])
+        kinds = list(planned[stop["index"]].get("leg_kinds") or [])
         if stop["reversed"]:
             wps = wps[::-1]
+            kinds = kinds[::-1]   # leg i joins wp i and i+1; reversing both keeps them aligned
         entry = wps[0]
         if pos is not None:
             # The very first leg (nothing stitched yet) departs home; every
             # later leg departs the previous field's exit.
-            leg_len = _dist_m(pos, entry)
-            transits.append({
-                "from": "home" if (home and not combined) else "field",
-                "pts": [{"lat": pos["lat"], "lon": pos["lon"]},
-                        {"lat": entry["lat"], "lon": entry["lon"]}],
-                "length_m": round(leg_len, 1),
-            })
+            leg, leg_len = _leg(pos, entry,
+                                "home" if (home and not combined) else "field")
+            transits.append(leg)
             transit_len += leg_len
-        combined.extend(wps)
+            # The transit's intermediate points are real waypoints too.
+            _extend(leg["pts"][1:-1], ["transit"] * len(leg["pts"][1:-1]))
+            _extend([entry], ["transit"])
+            _extend(wps[1:], kinds)
+        else:
+            _extend(wps, [None] + kinds)
         pos = wps[-1]
+    home_leg_hazard = False
     if home:
-        leg_len = _dist_m(pos, home)
-        transits.append({
-            "from": "field",
-            "pts": [{"lat": pos["lat"], "lon": pos["lon"]},
-                    {"lat": home["lat"], "lon": home["lon"]}],
-            "length_m": round(leg_len, 1),
-        })
+        leg, leg_len = _leg(pos, home, "field")
+        transits.append(leg)
         transit_len += leg_len
+        # DELIBERATELY NOT added to combined_waypoints. The return home is not
+        # part of the commanded mission — the mission ends at the last field
+        # waypoint and the aircraft returns under autopilot RTL, which flies
+        # STRAIGHT home and knows nothing about our keepouts. Appending detour
+        # points here would be worse than useless: the aircraft would fly out
+        # to a detour vertex and then RTL straight back across the hazard.
+        # So the home leg's route is computed for DISPLAY and for the warning
+        # below, and the operator is told that RTL will not avoid it.
+        home_leg_hazard = leg["kind"] == "detour" or transit_overflights > 0
 
     spray_len = sum(planned[i]["stats"]["path_length_m"] for i in planned)
     area_acres = sum(planned[i]["stats"]["area_acres"] for i in planned)
@@ -145,6 +241,21 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
             "keepout_overflights": sum(
                 planned[i]["stats"].get("keepout_overflights", 0)
                 for i in planned),
+            # Legs actually routed around a hazard (in-field hops + transits).
+            "hazard_reroutes": sum(
+                planned[i]["stats"].get("hazard_reroutes", 0)
+                for i in planned) + transit_reroutes,
+            # THE number that matters: legs that still cross a hazard because
+            # routing could not resolve them. Any value > 0 is an operator
+            # warning, not a statistic.
+            "hazard_overflights": sum(
+                planned[i]["stats"].get("hazard_overflights", 0)
+                for i in planned) + transit_overflights,
+            # The RTL path home crosses a hazard. RTL is autopilot-controlled
+            # and flies straight, so we cannot route around it — the operator
+            # has to know before launching.
+            "home_leg_hazard": home_leg_hazard,
         },
+        "combined_leg_kinds": combined_leg_kinds,
         "skipped": skipped,
     }

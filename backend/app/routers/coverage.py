@@ -82,6 +82,12 @@ class AutoCoverageRequest(BaseModel):
 # into the 422 body, which strict JSON serialization also turns into a 500.
 _SPEED_MIN_MS, _SPEED_MAX_MS = 1.0, 80.0
 
+# Keepout kinds that connecting legs must be FLOWN AROUND rather than
+# overflown. Water/trees/buildings protect spray quality — crossing one with
+# the sprayer off is free. A powerline is an airframe hazard, so it is the
+# only kind here today.
+_HAZARD_KINDS = ("powerline",)
+
 
 def _check_speed(speed: float) -> None:
     """Reject non-finite or out-of-range speeds with a serializable 422."""
@@ -190,6 +196,9 @@ def plan_auto(req: AutoCoverageRequest):
                "buildings": req.building_buffer,
                "powerline": req.powerline_buffer}
     keepouts: list[list[dict]] = list(user_keepouts)
+    # Hazard rings are ALSO keepouts (their spray passes still get clipped);
+    # this list additionally makes connecting legs route AROUND them.
+    hazards: list[list[dict]] = []
     max_buffer = req.water_buffer if user_keepouts else 0.0
     for kind in ("water", "trees", "buildings", "powerline"):
         for zone in zones.get(kind, []):
@@ -199,10 +208,14 @@ def plan_auto(req: AutoCoverageRequest):
             if len(ring) >= 3:
                 keepouts.append(ring)
                 max_buffer = max(max_buffer, buffers[kind])
+                if kind in _HAZARD_KINDS:
+                    hazards.append(ring)
     try:
         planned = plan_coverage(poly, **plan_kwargs,
                                 keepouts=keepouts,
-                                keepout_buffer_m=max_buffer)
+                                keepout_buffer_m=max_buffer,
+                                hazards=(hazards or None),
+                                hazard_buffer_m=req.powerline_buffer)
     except ValueError as exc:
         # Includes "field fully blocked by keepout zones" — a geometry
         # outcome the client must see, not a server fault.
