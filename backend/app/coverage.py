@@ -229,8 +229,10 @@ def plan_coverage(
         elif not hazard_hulls:
             _add(a, "hop")
         else:
+            straight = math.dist(flat[-1], a)
             detour = route_leg(flat[-1], a, hazard_hulls, charge=_charge,
-                               tol_m=hazard_tol)
+                               tol_m=hazard_tol,
+                               max_extra_m=_detour_budget_m(straight))
             if detour is None:
                 # Unroutable: keep the straight leg, but NEVER silently — the
                 # operator has to know this one still crosses a hazard.
@@ -524,6 +526,22 @@ def _clip_passes_to_keepouts(
                 overflights += 1
                 break
     return segments, len(applied), overflights
+
+
+def _detour_budget_m(straight_len_m: float) -> float:
+    """How much extra distance a hazard detour may add before we give up.
+
+    Power lines are unbounded linear features, so "route around it" can mean
+    flying kilometres to the end of the line. Cap the detour at something an
+    operator would actually accept; past that, report the crossing instead of
+    planning a path nobody will fly. Generous in absolute terms so a short hop
+    can still take a real detour around a compact obstacle.
+    """
+    return max(_MIN_DETOUR_BUDGET_M, _DETOUR_RATIO * straight_len_m)
+
+
+_MIN_DETOUR_BUDGET_M = 250.0
+_DETOUR_RATIO = 3.0
 
 
 def _order_segments_around_hazards(segments, hulls, tol, charge):

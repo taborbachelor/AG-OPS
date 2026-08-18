@@ -277,6 +277,37 @@ Newest first isn't required — kept chronological. This section is an append-on
 add a new dated entry here rather than editing old ones. Everything above the `---` is the
 "living" reference — keep that current and reorganize freely.
 
+#### Hazard crossings are now FAIL-CLOSED — found by testing against a real 115 kV line (2026-08-18)
+- **How it was found:** everything in the powerline + rerouting work had been verified against
+  synthetic fixtures. Running the full chain against REAL OSM data — the "6th & Golden-Tecumseh
+  Hill" 115 kV Evergy transmission line near Topeka — produced a plan whose **closest approach to
+  the live conductor was 1.7 m**, with 0 reroutes and 29 unresolved crossings. The fixtures all
+  passed. **Fixture-only verification was not evidence the feature worked.**
+- **Root cause 1 — the fixture was unrealistic.** It used a 400 m line beside a 400 m field, so a
+  detour could cheaply round the line's END. Real transmission lines run for kilometres past the
+  field: routing "around" one means flying to the end of the line. Measured offline, a 50 m hop
+  became a **5 km detour**. Detours are now bounded (`_detour_budget_m` = max(250 m, 3x the
+  straight leg)); beyond that the leg is reported unresolved instead of planning a path nobody
+  would fly. `LongLineTests` pins the realistic geometry.
+- **Root cause 2 — reporting a crossing is not enough.** An unresolved crossing means the plan
+  contains a leg flying THROUGH the corridor. A red warning on a plan that will destroy the
+  aircraft is weak. **`plan_auto` and `plan_multi` now REFUSE (409 `hazard_crossings`) when any
+  leg still crosses a hazard**, unless the caller passes `allow_hazard_crossings=true` — exactly
+  the posture the zone-service outage already takes with `allow_missing_zones`. SprayPanel shows
+  the same style of explicit "Plan anyway — legs WILL cross the powerline" opt-in, with the
+  practical advice: split the field along the line and spray each side as its own job.
+- **Verified against the same live line afterwards:** the plan is now REFUSED with "29 connecting
+  leg(s) cross a powerline corridor and could not be routed around". With the explicit opt-in it
+  plans and reports all 29 (closest approach 0.3 m — which is exactly why it must be deliberate).
+  That field is criss-crossed by several lines and genuinely cannot be sprayed without crossing;
+  the correct product answer is to say so, not to hide it in a statistic.
+- **329 backend tests**, 6 frontend, builds clean. A cached copy of the real Overpass payload was
+  kept for offline debugging — the public endpoint rate-limits (429/504) after a few queries, so
+  cache the payload rather than re-fetching in a debug loop.
+- **Standing lesson for this project:** GIS features must be validated against real OSM data
+  before they are called done. Synthetic rings are too well-behaved — they are compact, isolated,
+  and conveniently sized, and every one of those three assumptions was false in the field.
+
 #### 🔴 SITL scenario suite is INTERMITTENTLY FAILING on this machine (2026-08-18) — not a code bug
 - **Symptom:** `scenarios.ps1 all` fails 2–4 scenarios per run, with a DIFFERENT set each time.
   Observed sets across four runs: `{bench, link_watchdog, preflight}`, `{link_watchdog,

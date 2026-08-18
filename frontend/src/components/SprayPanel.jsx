@@ -72,6 +72,7 @@ function SprayPanel({
   // explicit allow_missing_zones override.
   const [zonesBlocked, setZonesBlocked] = useState(false);
   const [hazardOverflights, setHazardOverflights] = useState(0);
+  const [hazardBlocked, setHazardBlocked] = useState(false);
   const [homeLegHazard, setHomeLegHazard] = useState(false);
 
   // Bumped on every job mutation (field added/removed/cleared). An in-flight
@@ -86,7 +87,7 @@ function SprayPanel({
     planReq.current += 1;
     setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
     setZonesBlocked(false);
-    setHazardOverflights(0); setHomeLegHazard(false);
+    setHazardOverflights(0); setHomeLegHazard(false); setHazardBlocked(false);
   };
 
   // Exclusive input modes: draw / area / snap.
@@ -186,7 +187,8 @@ function SprayPanel({
   // One call plans the whole job: per-field zone-aware coverage + transit
   // ordering. Zones come back inline. Zone-service failure is FAIL-CLOSED:
   // the backend refuses unless allowMissingZones explicitly overrides.
-  const generate = async (allowMissingZones = false) => {
+  const generate = async (allowMissingZones = false,
+    allowHazardCrossings = false) => {
     let jobFields = fields;
     if (jobFields.length === 0 && draft.length >= 3) {
       // Courtesy: an unclosed draft becomes the job's single field.
@@ -215,6 +217,7 @@ function SprayPanel({
           home: homePos || undefined,
           keepouts: holeKeepouts.length ? holeKeepouts : undefined,
           allow_missing_zones: allowMissingZones || undefined,
+          allow_hazard_crossings: allowHazardCrossings || undefined,
         }),
       });
       const data = await res.json();
@@ -232,6 +235,14 @@ function SprayPanel({
           setZonesBlocked(true);
           setZonesNote('Zone service unavailable — no plan generated. '
             + 'Retry, or plan anyway WITHOUT water/tree/building keepouts.');
+        } else if (detail && detail.error === 'hazard_crossings') {
+          // Fail-closed refusal: the plan contains legs that fly THROUGH a
+          // powerline corridor. Measured at 1.7 m from a live 115 kV line
+          // before this gate existed — a warning was not enough.
+          setHazardBlocked(true);
+          setHazardOverflights(detail.count || 0);
+          setZonesNote(`${detail.count} leg(s) cross a powerline corridor and `
+            + 'could not be routed around — no plan generated.');
         } else {
           flash(`Plan failed: ${(detail && detail.message) || detail || res.status}`);
         }
@@ -452,6 +463,24 @@ function SprayPanel({
           disabled={busy || (fields.length === 0 && draft.length < 3)} style={{ width: '100%' }}>
           {busy ? 'Working…' : `Generate Spray Plan${fields.length > 1 ? ` (${fields.length} fields)` : ''}`}
         </button>
+
+        {hazardBlocked && (
+          <div className="safety-card">
+            <div className="spray-note" style={{ color: '#ff5c5c', fontWeight: 600 }}>
+              {zonesNote}
+            </div>
+            <div className="spray-hint" style={{ textAlign: 'left' }}>
+              A powerline usually runs far past the field, so there is no short
+              way around it. Either split the field along the line and spray
+              each side as its own job, or accept the crossings and fly them
+              manually at a safe crossing altitude.
+            </div>
+            <button className="control-btn danger" onClick={() => generate(false, true)}
+              disabled={busy} style={{ width: '100%' }}>
+              Plan anyway — legs WILL cross the powerline
+            </button>
+          </div>
+        )}
 
         {zonesBlocked && (
           <div className="safety-card">

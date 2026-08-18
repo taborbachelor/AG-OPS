@@ -72,6 +72,12 @@ class AutoCoverageRequest(BaseModel):
     # FAIL-CLOSED default: a plan with no zone data is only returned when the
     # operator explicitly accepts flying without no-spray keepouts.
     allow_missing_zones: bool = False
+    # FAIL-CLOSED for the same reason, one step further: if a connecting leg
+    # still crosses a powerline corridor after rerouting, the plan contains a
+    # path that flies through the conductor (measured at 1.7 m from a live
+    # 115 kV line before this gate existed). Warning about that is not enough
+    # — the operator has to accept it deliberately.
+    allow_hazard_crossings: bool = False
 
 
 # Same bounds as the multi router's speed field, enforced in the handlers:
@@ -220,5 +226,17 @@ def plan_auto(req: AutoCoverageRequest):
         # Includes "field fully blocked by keepout zones" — a geometry
         # outcome the client must see, not a server fault.
         raise HTTPException(400, str(exc))
+    crossings = planned.get("stats", {}).get("hazard_overflights", 0)
+    if crossings and not req.allow_hazard_crossings:
+        raise HTTPException(409, {
+            "message": f"{crossings} connecting leg(s) cross a powerline "
+                       "corridor and could not be routed around",
+            "error": "hazard_crossings",
+            "count": crossings,
+            "hint": "split the field along the line, or pass "
+                    "allow_hazard_crossings=true to plan anyway — those legs "
+                    "fly THROUGH the corridor and must be flown manually or "
+                    "at a safe crossing altitude",
+        })
     # Echo the zones so a UI can render what was avoided and why.
     return {**planned, "zones": zones, "zones_unavailable": False}

@@ -10,6 +10,8 @@ import math
 import unittest
 from unittest import mock
 
+from fastapi import HTTPException
+
 from app.coverage import _MAX_CLIP_WORK, plan_coverage
 from app.coverage_multi import plan_multi
 from app.reroute import hazard_hull, segment_enters_hull
@@ -228,6 +230,56 @@ class MultiFieldTests(unittest.TestCase):
         self.assertEqual(len(job["combined_leg_kinds"]),
                          len(job["combined_waypoints"]) - 1)
         self.assertIn("spray", job["combined_leg_kinds"])
+
+
+class FailClosedTests(unittest.TestCase):
+    """An unresolved hazard crossing is a path THROUGH the conductor.
+
+    Measured against a live 115 kV Evergy line near Topeka: before this gate,
+    plan_auto happily returned a plan whose closest approach to the line was
+    1.7 m. Warning about that is not enough — the operator has to accept it
+    deliberately, the same posture the zone-service outage already takes.
+    """
+
+    FIELD = _rect(LAT, LON, 400, 300)
+    # A line running far past the field, so no detour is short enough.
+    LONG_LINE = _line_ns(LAT + 150 / _M_PER_DEG,
+                         LON + 200 / (_M_PER_DEG * math.cos(math.radians(LAT))),
+                         6000)
+
+    def _zones(self):
+        ring = self.LONG_LINE + [self.LONG_LINE[0]]
+        return {"water": [], "trees": [], "buildings": [],
+                "powerline": [{"kind": "powerline", "coords": ring,
+                               "tags": {"power": "line"}}]}
+
+    def _plan(self, **kw):
+        req = cov.AutoCoverageRequest(polygon=self.FIELD, swath=30.0,
+                                      powerline_buffer=25.0, **kw)
+        with mock.patch.object(cov, "fetch_zones", return_value=self._zones()):
+            return cov.plan_auto(req)
+
+    def test_refuses_when_a_leg_still_crosses(self):
+        with self.assertRaises(HTTPException) as ctx:
+            self._plan()
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail["error"], "hazard_crossings")
+        self.assertGreater(ctx.exception.detail["count"], 0)
+
+    def test_explicit_opt_in_returns_the_plan(self):
+        plan = self._plan(allow_hazard_crossings=True)
+        self.assertGreater(plan["stats"]["hazard_overflights"], 0)
+        self.assertTrue(plan["waypoints"])
+
+    def test_no_crossing_needs_no_opt_in(self):
+        """A field clear of the line plans normally — the gate is not a
+        blanket refusal whenever a powerline exists in the area."""
+        far = _rect(LAT + 0.02, LON - 0.02, 200, 200)
+        req = cov.AutoCoverageRequest(polygon=far, swath=30.0,
+                                      powerline_buffer=25.0)
+        with mock.patch.object(cov, "fetch_zones", return_value=self._zones()):
+            plan = cov.plan_auto(req)
+        self.assertEqual(plan["stats"]["hazard_overflights"], 0)
 
 
 class BudgetTests(unittest.TestCase):

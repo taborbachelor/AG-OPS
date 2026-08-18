@@ -224,7 +224,8 @@ def _path_len(path) -> float:
     return sum(math.dist(path[i - 1], path[i]) for i in range(1, len(path)))
 
 
-def route_leg(a, b, hulls, charge=None, tol_m: float = 0.0):
+def route_leg(a, b, hulls, charge=None, tol_m: float = 0.0,
+              max_extra_m: float = math.inf):
     """Route the leg a->b around every hazard hull it would otherwise enter.
 
     Returns the list of INTERMEDIATE waypoints (never including a or b), which
@@ -240,6 +241,16 @@ def route_leg(a, b, hulls, charge=None, tol_m: float = 0.0):
     within that distance of the hull boundary counts as ON it, not inside.
     Without it, spray endpoints clipped at exactly the buffer distance read as
     inside the hazard and every leg becomes unroutable.
+
+    `max_extra_m` caps how much distance a detour may ADD over the straight
+    leg; beyond it the leg is reported unresolved instead. This is not a
+    performance guard, it is a correctness one. Hazards here are power lines,
+    which are LINEAR and effectively unbounded — a real transmission line runs
+    for kilometres past the field. Going "around" one means flying to the end
+    of the line, so an unbounded router happily turns a 50 m hop into a 5 km
+    detour (measured against a real 115 kV Evergy line). No operator would fly
+    that. When the detour is absurd the honest output is "this plan crosses
+    the line here, deal with it", not a path nobody will follow.
     """
     if not hulls:
         return []
@@ -266,6 +277,11 @@ def route_leg(a, b, hulls, charge=None, tol_m: float = 0.0):
             if blocking:
                 break
         if blocking is None:
+            if math.isfinite(max_extra_m):
+                extra = _path_len(path) - math.dist(a, b)
+                if extra > max_extra_m:
+                    # A clear path exists but it is not one anybody would fly.
+                    return None
             return path[1:-1]           # clear: hand back the detour points
         i, hull = blocking
         p, q = path[i - 1], path[i]

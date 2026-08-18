@@ -19,7 +19,7 @@ only in-field hops were counted.
 
 import math
 
-from app.coverage import (_MAX_CLIP_WORK, _project, _unproject,
+from app.coverage import (_MAX_CLIP_WORK, _detour_budget_m, _project, _unproject,
                           EARTH_RADIUS_M, plan_coverage)
 from app.reroute import hazard_hull, hull_tolerance, route_leg
 
@@ -149,7 +149,9 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
             pb = ((b["lon"] - lon0) * m_per_deg * cos_lat,
                   (b["lat"] - lat0) * m_per_deg)
             detour = route_leg(pa, pb, transit_hulls, charge=_charge,
-                               tol_m=hull_tolerance(hazard_buffer_m))
+                               tol_m=hull_tolerance(hazard_buffer_m),
+                               max_extra_m=_detour_budget_m(
+                                   math.dist(pa, pb)))
             if detour is None:
                 # Straight leg kept, but never silently — the operator is told.
                 transit_overflights += 1

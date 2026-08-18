@@ -12,8 +12,8 @@ import math
 import random
 import unittest
 
-from app.reroute import (convex_hull, hazard_hull, route_leg,
-                         segment_enters_hull, _point_in_hull)
+from app.reroute import (convex_hull, hazard_hull, hull_tolerance,
+                         route_leg, segment_enters_hull, _point_in_hull)
 
 
 def _box(cx, cy, half):
@@ -157,6 +157,40 @@ class RouteLegTests(unittest.TestCase):
         pts = route_leg(a, b, hulls)
         self.assertNotIn(a, pts)
         self.assertNotIn(b, pts)
+
+
+class LongLineTests(unittest.TestCase):
+    """Realistic hazard geometry: an unbounded linear feature.
+
+    The original fixtures used a 400 m line beside a 400 m field, so a detour
+    could cheaply round the line's END. Real transmission lines run for
+    kilometres past the field — verified against a live 115 kV Evergy line
+    near Topeka, where the unbounded router turned a 50 m hop into a 5 km
+    detour and the plan still passed 1.7 m from the conductor. These pin the
+    bounded behavior that replaced it.
+    """
+
+    LINE = _corridor(0.0, -2500.0, 0.0, 2500.0)   # 5 km, N-S
+
+    def test_unbounded_detour_is_refused(self):
+        hull = hazard_hull(self.LINE, 25.0)
+        tol = hull_tolerance(25.0)
+        a, b = (-25.0, 10.0), (25.0, 10.0)
+        # Unbounded: a path exists, but it runs to the end of the line.
+        free = route_leg(a, b, [hull], tol_m=tol)
+        self.assertIsNotNone(free)
+        self.assertGreater(max(abs(p[1]) for p in free), 2000,
+                           "fixture no longer forces a long way round")
+        # Bounded: refused, so the caller reports the crossing instead.
+        self.assertIsNone(route_leg(a, b, [hull], tol_m=tol, max_extra_m=250.0))
+
+    def test_short_way_round_still_allowed(self):
+        """A compact hazard must still be routed — the cap is not a blanket no."""
+        hull = hazard_hull(_box(0, 0, 30), 20.0)
+        pts = route_leg((-200, 0), (200, 0), [hull],
+                        tol_m=hull_tolerance(20.0), max_extra_m=250.0)
+        self.assertTrue(pts)
+        self.assertTrue(_path_clear([(-200, 0)] + pts + [(200, 0)], [hull]))
 
 
 class PropertyTests(unittest.TestCase):

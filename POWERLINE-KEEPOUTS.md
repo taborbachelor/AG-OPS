@@ -54,6 +54,13 @@ tighter radius or a per-kind query split, not a bigger cap.
 
 ## Original design (kept for provenance — implemented as written unless noted above)
 
+## Follow-up (2026-08-18): connector legs + fail-closed crossings
+Rerouting of connecting legs shipped alongside this, and real-data testing then forced two
+corrections: detours are BOUNDED (a real line runs kilometres past the field, so "around" it can
+mean a 5 km detour for a 50 m hop), and an unresolved crossing now REFUSES the plan (409) unless
+the operator explicitly opts in — a leg that still crosses is a path through the conductor, not a
+statistic. Full detail in the CLAUDE-CALEB.md History entries for 2026-08-18.
+
 ## Why this is next on the roadmap
 Known gap already logged in this project's notes: "powerlines not in CDL — future: OSM
 power=line buffer keepouts." USDA CDL is landcover classification (crop vs. water vs. forest); it

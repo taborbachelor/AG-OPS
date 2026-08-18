@@ -34,6 +34,9 @@ class MultiRequest(BaseModel):
     # refused (502) unless the operator explicitly accepts planning without
     # water/tree/building keepouts.
     allow_missing_zones: bool = False
+    # See routers/coverage.py — a leg that still crosses a powerline corridor
+    # is a path through the conductor, not a statistic.
+    allow_hazard_crossings: bool = False
 
 
 # Zone-derived keepout rings are bounded like caller keepouts — but instead of
@@ -171,6 +174,18 @@ def plan_multi_endpoint(req: MultiRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
+    crossings = result.get("totals", {}).get("hazard_overflights", 0)
+    if crossings and not req.allow_hazard_crossings:
+        raise HTTPException(409, {
+            "message": f"{crossings} leg(s) cross a powerline corridor and "
+                       "could not be routed around",
+            "error": "hazard_crossings",
+            "count": crossings,
+            "hint": "split the affected field along the line, or pass "
+                    "allow_hazard_crossings=true to plan anyway — those legs "
+                    "fly THROUGH the corridor and must be flown manually or "
+                    "at a safe crossing altitude",
+        })
     result["zones"] = {} if zones_unavailable else zones
     result["zones_unavailable"] = zones_unavailable
     return result
