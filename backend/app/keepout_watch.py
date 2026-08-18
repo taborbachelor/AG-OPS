@@ -29,11 +29,21 @@ from app.gis_zones import dist_to_zone_m
 # Kinds whose rings are airframe hazards rather than spray-quality zones.
 HAZARD_KINDS = frozenset({"powerline"})
 
-# Ceiling on monitored rings. The guardian ticks at 1 Hz and every tick walks
-# these, so this bounds worst-case per-tick work. Over the cap we keep the
-# rings NEAREST the mission and say so — never a silent truncation, because a
-# dropped ring is an unwatched hazard.
-MAX_RINGS = 400
+# Ceiling on monitored rings, sized from a MEASUREMENT against real OSM data
+# rather than a guess (2026-08-18, 3 km queries):
+#   Sabetha KS (the actual demo/home site): 213 rings total.
+#   Topeka KS (dense, and the nearest area with mapped powerlines): 3,732 rings
+#     — 3,679 of them buildings, one ring with 4,952 vertices.
+# At the full 3,732 rings a proximity check costs 3.5 ms against the guardian's
+# 1000 ms tick budget. An earlier 400 cap therefore bought nothing and dropped
+# 90% of a built-up area: at one test point it reported the nearest keepout as
+# 52.4 m when the true answer over the whole set was 19.0 m. Truncation was
+# changing the answer, not just the runtime.
+#
+# Hazards are never the rings dropped, so the SAFETY path survives truncation
+# regardless; what truncation corrupts is the reported nearest-KEEPOUT
+# distance, which is why `complete` is reported alongside it.
+MAX_RINGS = 4000
 
 _M_PER_DEG_LAT = 111_320.0
 
@@ -116,6 +126,11 @@ def prepare(zones, hazard_buffer_m: float = 20.0) -> dict:
         "n_hazards": sum(1 for r in rings if r["hazard"]),
         "n_keepouts": sum(1 for r in rings if not r["hazard"]),
         "dropped": dropped,
+        # False once anything was dropped: the nearest-KEEPOUT distance is then
+        # measured against a subset and must not be presented as the real
+        # closest approach. Hazards are never dropped, so hazard distance and
+        # every warning stay trustworthy either way.
+        "complete": dropped == 0,
     }
 
 
@@ -129,7 +144,8 @@ def nearest(prepared: dict, lat: float, lon: float) -> dict:
     """
     buffer_m = (prepared or {}).get("hazard_buffer_m", 0.0)
     out = {"known": False, "hazard_dist_m": None, "hazard_kind": None,
-           "keepout_dist_m": None, "breach": False, "buffer_m": buffer_m}
+           "keepout_dist_m": None, "breach": False, "buffer_m": buffer_m,
+           "keepout_complete": bool((prepared or {}).get("complete", True))}
     if not prepared or not prepared.get("rings"):
         return out
     if not (math.isfinite(lat) and math.isfinite(lon)):

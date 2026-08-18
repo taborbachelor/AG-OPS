@@ -145,6 +145,17 @@ proximity monitor remains the second layer.
      monitor after every upload.
    - Warn-only by default on purpose: an RTL turns the aircraft toward home, which could steer it
      ACROSS the very line it is close to. The operator decides.
+
+   **Validated against real OSM geometry, not just synthetic rings** — applying the standing lesson
+   from the same day's planner work. 3 km queries: Sabetha (the demo site) returns 213 rings;
+   Topeka (dense, and the nearest area with mapped powerlines) returns 3,732, including one ring
+   with 4,952 vertices. That validation **found a real bug**: the ring cap was 400, so a built-up
+   area lost 90% of its geometry and the reported nearest-keepout distance was measured against an
+   arbitrary subset — 52.4 m at a test point where the true answer over the full set was 19.0 m.
+   Truncation was changing the answer, not just the runtime. The cap is now 4,000 (the full Topeka
+   query costs 3.5 ms per tick against a 1000 ms budget, so the old cap bought nothing), and any
+   truncation that does happen is reported as `keepout_complete: false` rather than implied.
+   Hazards were correctly never among the dropped rings, so the safety path was intact throughout.
 6. ~~**Wind (`WIND` message — not currently subscribed).**~~ **DONE 2026-08-18.** The doc asked to
    confirm ArduPilot actually streams it before assuming it was free — **it does**: verified live
    with `SIM_WIND_SPD=12 / SIM_WIND_DIR=270`, `telemetry.wind_speed` tracked it 0.1 -> 12.0 m/s at

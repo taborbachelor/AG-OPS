@@ -79,6 +79,20 @@ class TestPrepare(unittest.TestCase):
         self.assertEqual(len(p["rings"]), keepout_watch.MAX_RINGS)
         self.assertEqual(p["dropped"], 21)
         self.assertEqual(p["n_hazards"], 1, "a hazard must never be the one dropped")
+        self.assertFalse(p["complete"], "a truncated set must say so")
+
+    def test_a_real_world_sized_query_is_not_truncated(self):
+        """Sized from real OSM: a 3 km query over Topeka KS returns 3,679
+        buildings. The cap exists for pathological input, not for a normal
+        built-up area, and the old 400 would have dropped 90% of it."""
+        self.assertGreaterEqual(keepout_watch.MAX_RINGS, 3700)
+
+    def test_completeness_rides_through_to_the_proximity_result(self):
+        rings = [_square(HOME_LAT + i * 0.001, HOME_LON)
+                 for i in range(keepout_watch.MAX_RINGS + 5)]
+        p = keepout_watch.prepare(_zones(water=rings), 20.0)
+        out = keepout_watch.nearest(p, HOME_LAT, HOME_LON)
+        self.assertFalse(out["keepout_complete"])
 
 
 class TestNearest(unittest.TestCase):

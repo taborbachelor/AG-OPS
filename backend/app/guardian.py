@@ -392,6 +392,10 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
         "hazard_kind": prox.get("hazard_kind"),
         "keepout_dist_m": (round(prox["keepout_dist_m"], 1)
                            if prox.get("keepout_dist_m") is not None else None),
+        # False when the ring set was truncated: the keepout distance above is
+        # then a subset's answer. Hazard distance is unaffected — hazards are
+        # never the rings dropped.
+        "keepout_complete": prox.get("keepout_complete", True),
     }
     if breach:
         _warn("keepout", 

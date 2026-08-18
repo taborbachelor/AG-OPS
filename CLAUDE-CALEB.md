@@ -397,6 +397,17 @@ files). That is now the highest-value software item in the project's safety chai
 while the aircraft rolls continuously — cross-checks against live attitude have to compare a
 RANGE over a window, never two instants.
 
+**Applied the parallel session's real-OSM lesson to this work, and it paid.** The proximity
+monitor was unit-tested entirely on synthetic squares, so it was re-validated against live
+Overpass data: Sabetha 213 rings, Topeka 3,732 (3,679 buildings, one ring with 4,952 vertices).
+That found a real bug — the ring cap was 400, so a dense area lost 90% of its geometry and the
+reported nearest-keepout distance came from an arbitrary subset: **52.4 m at a point where the
+true answer was 19.0 m.** Truncation was changing the answer, not just the runtime. Cap raised to
+4,000 (full Topeka query = 3.5 ms/tick against a 1000 ms budget, so the old cap bought nothing),
+and any real truncation now reports `keepout_complete: false` instead of quietly implying a
+complete answer. Hazard rings were correctly never dropped, so the safety path was sound
+throughout — but the debrief number was not. Synthetic fixtures would never have shown it.
+
 #### 🔴 SITL scenario suite is INTERMITTENTLY FAILING on this machine (2026-08-18) — not a code bug
 - **Symptom:** `scenarios.ps1 all` fails 2–4 scenarios per run, with a DIFFERENT set each time.
   Observed sets across four runs: `{bench, link_watchdog, preflight}`, `{link_watchdog,
