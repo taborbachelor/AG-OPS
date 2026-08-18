@@ -103,6 +103,27 @@ def inject_fault(client, fault: str, enable: bool = True, value=None) -> dict:
     return r.json()
 
 
+def guardian(client) -> dict:
+    """Guardian block from telemetry: {state, monitors, warnings, rtl_*}."""
+    return telem(client).get("guardian") or {}
+
+
+def wait_warning(client, needle: str, timeout: float, what: str = "") -> dict:
+    """Wait until a guardian warning containing `needle` is present.
+
+    Returns the telemetry snapshot that carried it. Matching on the warning
+    TEXT is deliberate: the operator-facing string is the product surface —
+    if it stops naming the condition, the scenario should fail.
+    """
+    needle_l = needle.lower()
+    return wait_for(
+        client,
+        lambda t: any(needle_l in w.lower()
+                      for w in ((t.get("guardian") or {}).get("warnings") or [])),
+        timeout, what or f"guardian warning containing {needle!r}",
+        interval=0.3)
+
+
 def set_failsafe(client, **overrides) -> dict:
     """Apply failsafe params through the real safety endpoint (atomic, verified).
     Defaults are benign for fast (speedup>1) scenarios: GCS failsafe OFF so our

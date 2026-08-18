@@ -21,7 +21,20 @@ Originally written 2026-08-14 from a read-only pass over the backend (`guardian.
 `preflight.py`, `vehicle_manager.py`, `eventlog.py`, `backend/tests/sitl/`) while another session
 actively owned the repo.
 
-## Open question that changes everything below (resolve before prioritizing)
+## ~~Open question~~ ANSWERED 2026-08-18: a real spray pass flies **10–25 m AGL**
+Confirmed by the user. `CoverageRequest.alt` still defaults to 100 m, so the default is now known
+to be ~4-10x the real operating altitude — that default is a live decision to revisit, not a
+setting anyone has validated for spray work.
+
+**What that answer reorders:** the low-altitude items below stop being theoretical. At 10–25 m
+the aircraft is inside the wire-strike envelope (rural distribution lines run ~8–12 m, transmission
+~20–45 m), so powerline keepouts and the connector-leg rerouting that goes with them are airframe
+survival, not spray quality. Bank-angle (#4) and terrain/AGL (#8) move up for the same reason: a
+stall-spin at 15 m has no recovery altitude. The data-tracking items keep their value at any
+altitude.
+
+The original framing is kept below for provenance.
+
 `CoverageRequest.alt` defaults to **100 m AGL**. Real ag-spray passes fly much lower (single-digit
 to low-double-digit meters) for coverage/drift reasons — 100 m reads like a value chosen for early
 flight-safety validation (more margin for GPS/autopilot error while nothing below has been proven
@@ -96,9 +109,12 @@ proximity monitor remains the second layer.
    debrief, and a control-margin proxy against item 3's airspeed monitor. Confirm ArduPilot's
    telemetry stream actually includes `WIND` in the requested `MAV_DATA_STREAM` set before
    assuming it's free. Not started.
-7. **Pump/spray-system verification during flight.** Hardware-gated — check with Caleb what
-   sensing the pump path actually has (flow/pressure sensor vs. PWM-only) before designing
-   further. Not started.
+7. **Pump/spray-system verification during flight.** Hardware-gated. Asked 2026-08-18: the pump
+   sensing is **not decided yet**, so this stays out of scope rather than being designed against a
+   guess. Re-ask before starting. The answer is load-bearing: with a flow or pressure sensor,
+   real spray verification and a no-flow abort are buildable; PWM-only means verification can
+   never be more than inferential (commanded state + flight log), and building something that
+   *looks* like confirmation on PWM-only would be worse than leaving it out. Not started.
 8. **Terrain/AGL clearance.** Explicitly deferred (needs camera + companion computer per the
    project TODO). The "Kansas is flat" assumption is implicitly relied on by every monitor here —
    worth making that an explicit documented assumption somewhere central (e.g. `guardian.py`'s
@@ -118,9 +134,42 @@ started; touches `routers/logs.py`, which was in the other session's modified-fi
 
 **C. Verification: new SITL scenarios, same pattern as M4.** Every monitor above needs its own
 `test_scenario_*.py` proving it fires under the exact fault it's meant to catch — mirroring
-`link_loss`/`gps_failure`/`battery_fault`. **No longer blocked** — the concurrent dev SITL that held port 5760 is gone, and
-`backend/tests/sitl/harness.py` (which hardcodes `tcp:127.0.0.1:5760`) runs fine; the full
-10-scenario suite was re-run green on 2026-08-18. Just close any hand-started SITL first. Not started.
+`link_loss`/`gps_failure`/`battery_fault`.
+
+### 2026-08-18 — PARTIALLY DONE. Two of the three monitors are now proven; the third cannot be.
+
+Two new scenarios, two new fault types in `routers/sim.py` (both verified-write, both
+restore-on-clear, same shape as the battery fault):
+
+| Monitor | Scenario | Fault | Result |
+|---|---|---|---|
+| EKF variance | `test_scenario_ekf_variance.py` (`.\scenarios.ps1 ekf-variance`) | `gps_noise` → `SIM_GPS1_HNSE` | **PROVEN.** 10 m of GPS noise drives `pos_horiz_variance` to ~2.5 against the 0.6 threshold, with `ekf_healthy` still True — the drifting-but-not-yet-unhealthy branch the monitor exists for. |
+| Airspeed / stall margin | `test_scenario_airspeed_stall.py` (`.\scenarios.ps1 airspeed-stall`) | `airspeed` → `SIM_ARSPD_FAIL` | **PROVEN.** A pitot pinned to 4 m/s raises `airspeed low (… ) — stall risk` within ~1 s. |
+| Vibration / accel clipping | *none — see below* | *none* | **NOT PROVABLE on this SITL. Still unit-tested only.** |
+
+**The vibration monitor cannot be driven from this SITL build, and that is now a measured fact
+rather than an assumption.** Tried in flight at 80 m across five flights: `SIM_VIB_MOT_MAX`,
+`SIM_VIB_MOT_MULT`, `SIM_VIB_MOT_MASK`, `SIM_VIB_MOT_HMNC`, `SIM_VIB_FREQ_X/Y/Z`,
+`SIM_ACC1_RND`, `SIM_ACCEL1_FAIL`, `SIM_ACC1_SCAL_*`. Every one was verified as actually written
+to the vehicle (M1b echo path) and **not one moved the reported VIBRATION levels** — steady
+flight sits at ~0.17 m/s/s with those params at their extremes exactly as it does with them at
+zero, against a 30 m/s/s threshold. Accelerometer clipping never occurs at all.
+
+Two traps worth recording, because both nearly produced a green test that proved nothing:
+- An early probe appeared to show a 4x response to `SIM_VIB_MOT_MASK=1`. It was **airframe
+  dynamics after takeoff level-off, not the fault** — the same run's clean baseline peaked at
+  0.562, *higher* than any "injected" reading. Only re-testing through the fault endpoint caught
+  it. Correlation, not causation.
+- The first version of this work shipped a `vibration` fault type and a scenario that lowered the
+  guardian threshold to ~1.3x the measured noise floor. Both were **removed**: a fault endpoint
+  that writes params which change nothing would report "fault injected" on a vehicle that is
+  unaffected — the exact silent lie the verified-write path exists to prevent.
+
+`SIM_VIB_MOT_*` appears to model *multicopter* motor vibration; a fixed-wing frame has no motors
+in that list. If the vibration monitor needs live proof, the options are a quadplane/copter SITL
+frame, a replay-based test driving recorded VIBRATION messages into the parser, or real bench
+hardware. `test_m4_sim.py::test_there_is_no_vibration_fault` pins the absence so nobody re-adds
+the endpoint without also adding a scenario that works.
 
 ## Rollout order (updated)
 1. Resolve the altitude question — still unresolved, still reorders priority.

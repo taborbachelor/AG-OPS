@@ -11,11 +11,19 @@ M4 additions for the scenario harness:
     with no eeprom.bin so every scenario starts from firmware defaults WITHOUT
     touching the demo eeprom that lives next to the binary.
   - POST /fault injects/clears faults on the running vehicle:
-      gps      -> SIM_GPS1_ENABLE=0 (4.5+ name) or SIM_GPS_DISABLE=1 (legacy)
-      battery  -> SIM_BATT_VOLTAGE sagged to `value` (restored on clear)
-      gcs_link -> suppress our own 1Hz GCS heartbeat (vehicle sees GCS loss)
+      gps       -> SIM_GPS1_ENABLE=0 (4.5+ name) or SIM_GPS_DISABLE=1 (legacy)
+      battery   -> SIM_BATT_VOLTAGE sagged to `value` (restored on clear)
+      gcs_link  -> suppress our own 1Hz GCS heartbeat (vehicle sees GCS loss)
+      gps_noise -> SIM_GPS1_HNSE raised: the position solution degrades while
+                   the EKF flags stay HEALTHY, which is the only way to drive
+                   the guardian's EKF *variance* monitor (the plain `gps`
+                   fault flips the flags outright and takes the other branch)
+      airspeed  -> SIM_ARSPD_FAIL pins the pitot to a stuck low reading
+                   (blockage/icing), driving the stall-margin monitor
     All param-based faults go through the verified (M1b) write path, so a
     fault that didn't actually reach the vehicle fails loudly.
+
+    THERE IS DELIBERATELY NO `vibration` FAULT. See the note below.
 
 SITL location search order:
   - packaged exe:  <dir of the exe>/sitl/ArduPlane.exe
@@ -46,9 +54,14 @@ SCENARIO_DIR_NAME = "_scenario"
 _proc: subprocess.Popen | None = None
 # Options of the currently running (router-spawned) SITL, for /status.
 _run_info: dict | None = None
-# Active injected faults + the pre-fault battery voltage for restore-on-clear.
-_faults: dict = {"gps": False, "battery": False, "gcs_link": False}
-_batt_prev: float | None = None
+# Active injected faults.
+_faults: dict = {"gps": False, "battery": False, "gcs_link": False,
+                 "gps_noise": False, "airspeed": False}
+# Pre-fault values, keyed by param name, so clearing a fault restores what the
+# vehicle actually had rather than a guessed default. Captured once per fault
+# (re-injecting without clearing must not overwrite the original with a
+# faulted value) and popped on clear.
+_prev: dict[str, float] = {}
 
 # (name, faulted_value, healthy_value) — ArduPilot renamed the GPS-disable
 # knob across firmware versions (same story as SYSID_MYGCS/MAV_GCS_SYSID):
@@ -62,6 +75,42 @@ GPS_FAULT_PARAMS = (
 # the pre-fault voltage was never observed.
 SIM_BATT_HEALTHY_V = 12.6
 DEFAULT_FAULT_BATT_V = 9.8
+
+# GPS horizontal noise (m) for the gps_noise fault. 10 m drives the EKF's
+# reported pos_horiz_variance to ~2-4 (guardian warns at 0.6) while
+# ekf_healthy stays True; 2 m stays UNDER the threshold, which makes it a
+# usable negative control in a scenario. Measured on this SITL 2026-08-18.
+DEFAULT_GPS_NOISE_M = 10.0
+
+# Stuck pitot reading (m/s) for the airspeed fault. Below the guardian's
+# stall floor (8 m/s default) so the monitor is genuinely exercised.
+# NOTE: ArduPilot runs its own airspeed-health check and DISABLES a sensor it
+# judges implausible (~1.4 s in, "Airspeed sensor 1 failure. Disabling"), then
+# re-enables it when the reading returns — so the reported airspeed oscillates
+# rather than sitting low. A scenario can rely on the WARNING appearing, but
+# must not assume a multi-second sustained low reading.
+DEFAULT_FAULT_ARSPD_MS = 4.0
+
+# NO VIBRATION FAULT — measured, not assumed (2026-08-18).
+#
+# The guardian's vibration/clip monitor cannot be driven from this SITL build,
+# so no fault is offered for it: an endpoint that writes params which change
+# nothing would report "fault injected" while the vehicle is unaffected, which
+# is exactly the silent lie the verified-write path exists to prevent.
+#
+# What was tried, in flight at 80 m, across five flights: SIM_VIB_MOT_MAX /
+# MULT / MASK / HMNC, SIM_VIB_FREQ_X/Y/Z, SIM_ACC1_RND, SIM_ACCEL1_FAIL,
+# SIM_ACC1_SCAL_*. Every one verified as WRITTEN and none moved the reported
+# VIBRATION levels: steady flight sits at ~0.17 m/s/s with the params set to
+# their extremes exactly as it does with them at zero. (An apparent 4x
+# response in an early probe turned out to be airframe dynamics after
+# level-off — that same run's clean baseline peaked at 0.562, HIGHER than any
+# "injected" reading.) SIM_VIB_MOT_* appears to model MULTICOPTER motor
+# vibration; a fixed-wing frame has no motors in that list.
+#
+# Accelerometer clipping never occurs either. The monitor therefore stays
+# unit-tested only, recorded as a known gap in SPRAY-FLIGHT-SAFETY.md Part 3C
+# rather than papered over with a scenario that proves nothing.
 
 
 def _sitl_exe() -> Path | None:
@@ -136,11 +185,26 @@ def _running() -> bool:
 def _reset_faults():
     """Forget fault bookkeeping (used on start/stop: a new or dead SITL has no
     injected faults) and make sure our own heartbeat is not left silenced."""
-    global _batt_prev
     for k in _faults:
         _faults[k] = False
-    _batt_prev = None
+    _prev.clear()
     vehicle_manager.set_gcs_heartbeat_suppressed(False)
+
+
+def _remember(name: str, fallback: float) -> None:
+    """Record a param's pre-fault value the FIRST time it is faulted.
+
+    Re-injecting a fault that is already active must not capture the faulted
+    value as the "previous" one — that would make clearing restore the fault.
+    """
+    if name in _prev:
+        return
+    cached = vehicle_manager.cached_value(name)
+    _prev[name] = float(cached) if cached is not None else fallback
+
+
+def _restore(name: str, fallback: float) -> float:
+    return _prev.pop(name, fallback)
 
 
 class SimStartRequest(BaseModel):
@@ -210,9 +274,14 @@ def sim_stop():
 # --- M4 fault injection -----------------------------------------------------
 
 class FaultRequest(BaseModel):
-    fault: Literal["gps", "battery", "gcs_link"]
+    fault: Literal["gps", "battery", "gcs_link", "gps_noise", "airspeed"]
     enable: bool = True
-    # battery only: sagged pack voltage while the fault is active.
+    # Magnitude of the fault, for the faults that take one:
+    #   battery   -> sagged pack voltage (V)
+    #   gps_noise -> GPS horizontal noise (m)
+    #   airspeed  -> stuck pitot reading (m/s)
+    # Each branch range-checks its own value below, and param_meta carries the
+    # authoritative curated range for every SIM_* param actually written.
     value: Optional[float] = Field(None, ge=0, le=100)
 
 
@@ -277,8 +346,14 @@ def _gps_fault_param() -> tuple[str, float, float]:
                               "tried": [n for n, _, _ in GPS_FAULT_PARAMS]})
 
 
+def _check_value(fault: str, value: float, lo: float, hi: float) -> None:
+    """Per-fault magnitude bound (the model's own field bound is the union)."""
+    if not (lo <= value <= hi):
+        raise HTTPException(
+            422, f"{fault} fault value must be in {lo:g}..{hi:g}")
+
+
 def _inject_fault(req: FaultRequest) -> dict:
-    global _batt_prev
     _require_vehicle()
     _require_sitl()
     detail: dict = {}
@@ -290,15 +365,40 @@ def _inject_fault(req: FaultRequest) -> dict:
 
     elif req.fault == "battery":
         if req.enable:
-            if _batt_prev is None:
-                cached = vehicle_manager.cached_value("SIM_BATT_VOLTAGE")
-                _batt_prev = float(cached) if cached is not None else SIM_BATT_HEALTHY_V
             volts = req.value if req.value is not None else DEFAULT_FAULT_BATT_V
+            # Validate BEFORE remembering: a rejected injection must leave no
+            # bookkeeping behind at all.
+            _check_value("battery", volts, 0.0, 100.0)
+            _remember("SIM_BATT_VOLTAGE", SIM_BATT_HEALTHY_V)
         else:
-            volts = _batt_prev if _batt_prev is not None else SIM_BATT_HEALTHY_V
-            _batt_prev = None
+            volts = _restore("SIM_BATT_VOLTAGE", SIM_BATT_HEALTHY_V)
         res = _verified_set("SIM_BATT_VOLTAGE", volts)
         detail = {"param": "SIM_BATT_VOLTAGE", "value": res["accepted"]}
+
+    elif req.fault == "gps_noise":
+        # Degrade the fix WITHOUT killing it: the EKF keeps a position
+        # solution (flags stay healthy) while its reported variance climbs,
+        # which is the branch the `gps` fault can never reach.
+        if req.enable:
+            noise = req.value if req.value is not None else DEFAULT_GPS_NOISE_M
+            _check_value("gps_noise", noise, 0.0, 100.0)
+            _remember("SIM_GPS1_HNSE", 0.0)
+        else:
+            noise = _restore("SIM_GPS1_HNSE", 0.0)
+        res = _verified_set("SIM_GPS1_HNSE", noise)
+        detail = {"param": "SIM_GPS1_HNSE", "value": res["accepted"]}
+
+    elif req.fault == "airspeed":
+        # Pitot pinned to a stuck low reading (blockage/icing). 0 clears it —
+        # that IS the param's healthy value, so there is nothing to restore.
+        if req.enable:
+            speed = (req.value if req.value is not None
+                     else DEFAULT_FAULT_ARSPD_MS)
+            _check_value("airspeed", speed, 0.0, 100.0)
+        else:
+            speed = 0.0
+        res = _verified_set("SIM_ARSPD_FAIL", speed)
+        detail = {"param": "SIM_ARSPD_FAIL", "value": res["accepted"]}
 
     else:  # gcs_link — no param: we silence our own heartbeat.
         vehicle_manager.set_gcs_heartbeat_suppressed(req.enable)

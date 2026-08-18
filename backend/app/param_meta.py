@@ -60,6 +60,9 @@ PARAM_RANGES = {
     "SIM_GPS_DISABLE": (0, 1),
     "SIM_GPS1_ENABLE": (0, 1),
     "SIM_BATT_VOLTAGE": (0, 100),
+    # Guardian-monitor proof faults (M4 / Part 3C).
+    "SIM_GPS1_HNSE": (0, 100),      # GPS horizontal noise, m
+    "SIM_ARSPD_FAIL": (0, 100),     # stuck pitot reading, m/s (0 = healthy)
     # First-flight bundle (bench router). Both param generations covered:
     # older firmware has ARMING_CHECK/ALT_HOLD_RTL(cm), newer (4.8+) has
     # ARMING_SKIPCHK/ARMING_REQUIRE/RTL_ALTITUDE(m).

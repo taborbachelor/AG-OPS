@@ -217,6 +217,85 @@ class TestFaultEndpoint(unittest.TestCase):
             self.assertFalse(vehicle_manager.snapshot()["gcs_hb_suppressed"])
 
 
+class TestGuardianProofFaults(unittest.TestCase):
+    """The three faults added so the merged guardian monitors could be proven
+    against a live telemetry stream (SPRAY-FLIGHT-SAFETY.md Part 3C)."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+        sim._reset_faults()
+
+    def tearDown(self):
+        sim._reset_faults()
+
+    def _fault(self, writes, cached=None, **body):
+        def fake_set(name, value):
+            writes.append((name, value))
+            return {"verified": True, "accepted": value, "requested": value}
+
+        with mock.patch.object(vehicle_manager, "connected", True), \
+             mock.patch.object(vehicle_manager, "get_cached_params",
+                               return_value={"SIM_SPEEDUP": 1.0}), \
+             mock.patch.object(vehicle_manager, "cached_value",
+                               side_effect=lambda n: (cached or {}).get(n)), \
+             mock.patch.object(vehicle_manager, "set_param", side_effect=fake_set):
+            return self.client.post("/api/sim/fault", json=body)
+
+    def test_gps_noise_sets_and_restores_horizontal_noise(self):
+        writes = []
+        r1 = self._fault(writes, cached={"SIM_GPS1_HNSE": 0.0},
+                         fault="gps_noise", enable=True, value=10.0)
+        r2 = self._fault(writes, fault="gps_noise", enable=False)
+        self.assertEqual((r1.status_code, r2.status_code), (200, 200))
+        self.assertEqual(writes, [("SIM_GPS1_HNSE", 10.0),
+                                  ("SIM_GPS1_HNSE", 0.0)])
+
+    def test_airspeed_fault_clears_to_zero(self):
+        """0 IS the healthy value for SIM_ARSPD_FAIL, so clearing writes 0
+        rather than restoring a remembered number."""
+        writes = []
+        r1 = self._fault(writes, fault="airspeed", enable=True, value=4.0)
+        r2 = self._fault(writes, fault="airspeed", enable=False)
+        self.assertEqual((r1.status_code, r2.status_code), (200, 200))
+        self.assertEqual(writes, [("SIM_ARSPD_FAIL", 4.0),
+                                  ("SIM_ARSPD_FAIL", 0.0)])
+
+    def test_there_is_no_vibration_fault(self):
+        """Pins a deliberate ABSENCE. SIM_VIB_MOT_* / SIM_ACC1_RND et al. were
+        measured to have no effect on a plane SITL (see the note in sim.py), so
+        no vibration fault is offered rather than one that lies about
+        injecting. If a future build can drive it, add the fault AND a
+        scenario — do not just re-add the endpoint."""
+        writes = []
+        r = self._fault(writes, fault="vibration", enable=True)
+        self.assertEqual(r.status_code, 422)   # not in the Literal
+        self.assertEqual(writes, [])
+        self.assertNotIn("vibration", sim._faults)
+
+    def test_reinjecting_does_not_overwrite_the_remembered_value(self):
+        """Re-injecting an active fault must not capture the FAULTED value as
+        the restore point — that would make 'clear' restore the fault."""
+        writes = []
+        self._fault(writes, cached={"SIM_GPS1_HNSE": 0.0},
+                    fault="gps_noise", enable=True, value=2.0)
+        # Second injection: cached_value now reports the faulted 2.0.
+        self._fault(writes, cached={"SIM_GPS1_HNSE": 2.0},
+                    fault="gps_noise", enable=True, value=10.0)
+        self._fault(writes, cached={"SIM_GPS1_HNSE": 10.0},
+                    fault="gps_noise", enable=False)
+        self.assertEqual(writes[-1], ("SIM_GPS1_HNSE", 0.0))
+
+    def test_out_of_range_value_is_rejected_per_fault(self):
+        writes = []
+        r = self._fault(writes, fault="airspeed", enable=True, value=500.0)
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(writes, [], "a rejected fault must write nothing")
+
+    def test_new_faults_appear_in_status(self):
+        for name in ("gps_noise", "airspeed"):
+            self.assertIn(name, sim._faults)
+
+
 class TestSimParamRanges(unittest.TestCase):
     def test_fault_params_are_range_guarded(self):
         ok, _ = param_meta.validate("SIM_BATT_VOLTAGE", 999)

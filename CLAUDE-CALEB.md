@@ -28,6 +28,8 @@
 >
 > **State as of 2026-08-18 (commit `43440d5`, pushed, working tree clean, `main` is the only branch local and remote):**
 > - **Backend:** M1a/M1b/M2/M3/M4 + guardian + preflight gate (M6) + bench kit + soak, **plus the 2026-08-15 hardening pass** (~35 audit findings fixed: guardian stands down from RTL during a landing approach, param sync/restore armed-gated, serial links get 4Hz telemetry so a SiK radio isn't saturated, zone planning FAILS CLOSED with an explicit "Plan anyway" opt-out, waterway-ditch keepout corridors, keepout-overflight warnings, never-raise eventlog — full list in the History entry). **264 unit tests + 10 live SITL scenarios green** (`pytest` / `backend\scenarios.ps1 all`, ~4 min) — re-verified 2026-08-18 on the current machine.
+> - ⚠️ **The SITL suite is green ONLY when this machine is quiet — it is not safe to run two sessions against it.** Verified 2026-08-18: **12/12 green in 4:29** (10 existing + 2 new) on an idle machine, matching the documented ~4 min. But three earlier runs that overlapped a second Claude session failed 3, 4 and 5 scenarios with a DIFFERENT set each time and degraded 350s → 490s → 802s. Failures are connection-level (`no heartbeat from vehicle`, WinError 10061/10054) — a scenario connecting to a SITL that hasn't finished dying — never assertion failures. Cause: port 5760 is single-occupancy, `conftest.py` teardown waits on `/api/sim/status` + a flat 1 s without ever proving TCP 5760 is free, and `sim._running()` treats a listening port as "already running". **So: a red scenario during parallel work is far more likely contention than a real regression — re-run it alone before believing it.** The durable fix is Lane D item 3 (parameterize `harness.py`'s hardcoded `tcp:127.0.0.1:5760`) plus a teardown that waits for the port to clear.
+> - 🌿 **IN FLIGHT, not on `main`:** branch `lane-a/guardian-proof` in `.claude/worktrees/lane-b` — guardian Part 3C scenario proof (EKF-variance + airspeed-stall live scenarios, two new sim faults, 270 unit tests). Vibration proven UNPROVABLE on this SITL. Needs review + merge.
 > - **UI:** Vite (1s builds), 3D FLY view default (CesiumJS, key-free, attitude-true aircraft, CHASE/ORBIT/FREE cams; 2D forced for planning/drawing), NavRail progressive disclosure, server preflight verdicts + guardian chip/annunciators, SprayPanel zone-failure opt-in + overflight warnings. 6 UI tests green.
 > - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). **UNBILLED as of 2026-08-18:** the 2026-08-15 hardening session, the 2026-08-15 guardian safety-monitor session, the 2026-08-16 docs/merge session, and the 2026-08-18 session. Note the transcript path changed profiles — see the method note under the billing table.
 > - **`AgOpsGCS.exe` rebuilt 2026-08-15 (53.7MB) with the hardening pass baked in**, smoke-tested: /api/health ok, app served (title AgOps GCS), /cesium Workers+Assets 200, preflight correctly not-ready with no vehicle, NaN request body → clean 422, fault injection refused without a vehicle.
@@ -195,19 +197,30 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
 - CropScape's `GetCDLData` endpoint was retired server-side; `cdl.py` uses `GetCDLFile` — check the WSDL first if field detection breaks again
 
 #### Still TODO (reordered 2026-08-18)
-- **BLOCKING QUESTION for Caleb — ask before prioritizing the safety work:** `CoverageRequest.alt`
-  defaults to **100 m AGL**, but real ag-spray passes fly single-digit to low-double-digit meters.
-  At 100 m over flat Kansas the bank-angle / stall / terrain monitors are near-theoretical; at real
-  spray altitude they are what keeps the airframe intact. The answer reorders everything below.
-  (Also ask: what sensing does the pump path actually have — flow/pressure, or PWM-only?)
+- ~~**BLOCKING QUESTION** about spray altitude~~ **ANSWERED 2026-08-18: a real spray pass flies
+  10–25 m AGL.** `CoverageRequest.alt` still defaults to **100 m**, i.e. ~4-10x the real operating
+  altitude — that default is now a known-wrong placeholder to revisit, not a validated setting.
+  Consequences: at 10–25 m the aircraft is INSIDE the wire-strike envelope (rural distribution
+  lines ~8–12 m, transmission ~20–45 m), so powerline keepouts + connector-leg rerouting are
+  airframe survival rather than spray quality; bank-angle (#4) and terrain/AGL (#8) move up,
+  because a stall-spin at 15 m has no recovery altitude.
+- **Pump sensing: NOT DECIDED YET** (asked 2026-08-18). Spray verification stays out of scope
+  until it is — on a PWM-only path, "verification" can only ever be inferential, and shipping
+  something that looks like confirmation would be worse than shipping nothing. Re-ask.
 - **3D scene eyeball check** (needs the user's eyes, still open): run `start-all.ps1`, FLY view,
   confirm the Cesium scene renders and the aircraft's nose leads its trail; if sideways, adjust the
   heading offset in `MapView3D.jsx`'s `oriProp`.
 - **Software, ready to start now (all specced, repo quiet, nothing blocking):**
-  1. **SITL scenario proof for the three merged guardian monitors** (`SPRAY-FLIGHT-SAFETY.md`
-     Part 3C) — EKF-variance / vibration / airspeed-stall are unit-tested ONLY and have never seen a
-     real telemetry stream. The port contention that blocked this is gone. This is the honest
-     completion of work already called "shipped."
+  1. ~~**SITL scenario proof for the three merged guardian monitors**~~ **2/3 DONE 2026-08-18**
+     (`SPRAY-FLIGHT-SAFETY.md` Part 3C). EKF-variance and airspeed-stall now have live scenarios
+     (`.\scenarios.ps1 ekf-variance` / `airspeed-stall`) driven by two new verified-write faults
+     (`gps_noise` → `SIM_GPS1_HNSE`, `airspeed` → `SIM_ARSPD_FAIL`). **The vibration monitor
+     CANNOT be driven from this SITL build** — nine SIM_* knobs tried across five flights, every
+     one verified as written, none moved the VIBRATION levels off ~0.17 m/s/s against a 30 m/s/s
+     threshold (`SIM_VIB_MOT_*` models multicopter motor vibration; a plane frame has no motors in
+     that list). It stays unit-tested only, and deliberately has NO fault endpoint — one that
+     wrote no-op params would report "fault injected" on an unaffected vehicle. Full evidence, and
+     the two near-misses that almost produced a green test proving nothing, in Part 3C.
   2. **Live keepout-proximity monitor** (`SPRAY-FLIGHT-SAFETY.md` #5) — today only the *planned*
      path is clipped around keepouts; nothing checks the *flown* position in real time. Primitive
      already exists (`dist_to_zone_m`).
@@ -441,6 +454,56 @@ add a new dated entry here rather than editing old ones. Everything above the `-
 - **Next in Lane B:** connector-leg rerouting around keepouts. It just became materially more
   urgent — a transit leg crossing a keepout is still only COUNTED (`keepout_overflights` + amber
   warning), not rerouted, and for a powerline that is a collision rather than a wasted pass.
+#### Guardian monitor SITL proof — Part 3C, 2 of 3 monitors (2026-08-18, Lane A)
+Ran in an isolated worktree (`.claude/worktrees/lane-b`, branch `lane-a/guardian-proof`) while a
+second session worked Lane B (powerline keepouts) in the shared checkout — disjoint file sets, no
+conflicts. NOTE: the worktree needed `sitl/ArduPlane.exe` + the cygwin DLLs copied in, because
+`sitl/*.exe|*.dll` are gitignored and `routers/sim.py` resolves the binary from
+`Path(__file__).parents[3]` — a fresh worktree therefore has no simulator. Ran against the shared
+`backend/venv` (no separate venv needed; deps come from the venv, `app` from the worktree cwd).
+
+**Shipped**
+- Two new verified-write, restore-on-clear faults in `routers/sim.py`: `gps_noise`
+  (`SIM_GPS1_HNSE`) and `airspeed` (`SIM_ARSPD_FAIL`), plus curated `param_meta` ranges for both.
+  Restore bookkeeping generalized from a single `_batt_prev` global to a `_prev` dict, with a
+  guard so re-injecting an active fault can't capture the FAULTED value as the restore point.
+- `test_scenario_ekf_variance.py` + `test_scenario_airspeed_stall.py`, registered in
+  `scenarios.ps1` as `ekf-variance` / `airspeed-stall`. Harness gained `guardian()`,
+  `set_guardian()` and `wait_warning()` (matches on the operator-facing warning TEXT on purpose —
+  if the string stops naming the condition, the scenario fails).
+- 270 unit tests green (264 + 6 new).
+
+**The vibration monitor cannot be proven on this SITL, and now has no fault endpoint.**
+Nine SIM_* knobs across five flights, every write verified by the M1b echo path, none moved the
+reported VIBRATION levels off ~0.17 m/s/s against a 30 m/s/s threshold. `SIM_VIB_MOT_*` models
+multicopter motor vibration and a plane frame has no motors in that list. Full evidence in
+`SPRAY-FLIGHT-SAFETY.md` Part 3C.
+
+**Two process lessons worth keeping** — both nearly produced a green test that proved nothing:
+1. An early probe showed an apparent 4x vibration response and I took it as the fault working. It
+   was airframe dynamics after level-off; that same run's clean baseline peaked HIGHER (0.562)
+   than any "injected" reading. Only re-testing through the finished endpoint exposed it.
+   Sweeping a param and eyeballing a number that moved is not causation.
+2. The first cut shipped a `vibration` fault + a scenario with the guardian threshold lowered to
+   ~1.3x the noise floor. Both were removed. A fault endpoint that writes no-op params reports
+   "fault injected" on an unaffected vehicle — the exact silent lie the verified-write path
+   exists to prevent. `test_m4_sim.py::test_there_is_no_vibration_fault` pins the absence.
+
+**Verification: 12/12 SITL scenarios green in 4:29** (10 existing + 2 new) on an idle machine,
+plus 270 unit tests. Both new scenarios also pass in isolation, run twice each.
+
+**But the suite is only trustworthy when nothing else is using the machine — measured, and worth
+knowing before anyone debugs a phantom regression.** Three earlier full runs, taken while a second
+session worked Lane B, failed 3, 4 and 5 scenarios with a DIFFERENT set each time and degraded
+350s → 490s → 802s. Every failure was connection-level (`connect failed: 500 no heartbeat from
+vehicle`, `[WinError 10061] refused`, `[WinError 10054] forcibly closed`) — never an assertion.
+The control run above, on a quiet machine, was clean. Diagnosis: port 5760 is single-occupancy;
+`conftest.py` teardown waits on `/api/sim/status` plus a flat 1 s, which never proves TCP 5760 is
+actually free; and `sim._running()` treats a listening port as "already running", so a dying SITL
+can be handed straight to the next scenario. The durable fix is Lane D item 3 (parameterize
+`harness.py`'s hardcoded `tcp:127.0.0.1:5760`) plus a teardown that waits for the port to clear.
+Until then: **re-run a red scenario alone before believing it**, and don't run the suite while a
+parallel session is active.
 
 #### Doc reconciliation + full re-verification on a new machine (2026-08-18)
 - **No code changes.** Session was a state audit: read every project doc, verified claims against
