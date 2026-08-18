@@ -1,6 +1,7 @@
 """Guardian layer unit tests: monitor rules, emergency state machine, the
 runner's latch/override/give-up behavior, and the /api/safety/guardian API.
 """
+import math
 import unittest
 from unittest import mock
 
@@ -206,6 +207,61 @@ class TestMonitors(unittest.TestCase):
         evaluate(cfg, _telem(altitude=60.0, airspeed=15.0), mem, now=1001.0)  # recovers
         res = evaluate(cfg, _telem(altitude=60.0, airspeed=5.0), mem, now=1005.0)
         self.assertIsNone(res["action"], "recovery must reset the debounce")
+
+    # --- bank angle ---
+
+    def test_routine_turn_does_not_warn(self):
+        """A normal waypoint/loiter turn sits around 20-30 deg. If the default
+        cried at that, operators would learn to ignore the annunciator."""
+        res = _eval(t=_telem(altitude=60.0, roll=math.radians(28)))
+        self.assertNotIn("bank", " ".join(res["warnings"]))
+        self.assertTrue(res["monitors"]["bank"]["ok"])
+
+    def test_steep_bank_warns_either_direction(self):
+        for sign in (1, -1):
+            res = _eval(t=_telem(altitude=60.0, roll=sign * math.radians(60)))
+            self.assertIn("bank 60 deg", " ".join(res["warnings"]),
+                          f"roll sign {sign} should warn identically")
+            self.assertFalse(res["monitors"]["bank"]["ok"])
+
+    def test_bank_limit_tightens_at_low_altitude(self):
+        """Same bank, two altitudes: below bank_low_alt_m the limit scales
+        down, because that is where a stall-spin has no recovery room. 35 deg
+        is fine at 60 m and a warning at spray altitude."""
+        roll = math.radians(35)
+        high = _eval(t=_telem(altitude=60.0, roll=roll))
+        low = _eval(t=_telem(altitude=15.0, roll=roll))
+        self.assertTrue(high["monitors"]["bank"]["ok"])
+        self.assertFalse(low["monitors"]["bank"]["ok"])
+        self.assertIn("low altitude", " ".join(low["warnings"]))
+        self.assertEqual(low["monitors"]["bank"]["limit_deg"], 31.5)
+
+    def test_bank_on_the_ground_is_not_a_flight_event(self):
+        """Below airborne_alt_m this is a plane on a slope or a takeoff roll."""
+        res = _eval(t=_telem(altitude=1.0, roll=math.radians(60)))
+        self.assertNotIn("bank", " ".join(res["warnings"]))
+
+    def test_bank_rtl_requires_sustained_and_explicit_config(self):
+        cfg = GuardianConfig(bank_action="rtl", bank_sustained_s=2.0)
+        mem = guardian.default_memory()
+        t = _telem(altitude=60.0, roll=math.radians(55))
+        self.assertIsNone(evaluate(cfg, t, mem, 1000.0)["action"],
+                          "a momentary gust bank must not command RTL")
+        res = evaluate(cfg, t, mem, 1003.0)
+        self.assertEqual((res["action"], res["source"]), ("rtl", "bank"))
+
+    def test_bank_recovery_resets_the_clock(self):
+        cfg = GuardianConfig(bank_action="rtl", bank_sustained_s=2.0)
+        mem = guardian.default_memory()
+        evaluate(cfg, _telem(altitude=60.0, roll=math.radians(55)), mem, 1000.0)
+        evaluate(cfg, _telem(altitude=60.0, roll=0.0), mem, 1001.0)  # rolls out
+        res = evaluate(cfg, _telem(altitude=60.0, roll=math.radians(55)), mem, 1005.0)
+        self.assertIsNone(res["action"], "recovery must reset the debounce")
+
+    def test_bank_is_warn_only_by_default(self):
+        cfg = GuardianConfig(bank_sustained_s=0.0)
+        res = _eval(cfg=cfg, t=_telem(altitude=60.0, roll=math.radians(80)))
+        self.assertIsNone(res["action"])
 
     def test_disabled_guardian_never_acts_on_airspeed_either(self):
         cfg = GuardianConfig(enabled=False, airspeed_action="rtl", airspeed_low_s=0.0)

@@ -1,6 +1,25 @@
 # Spray-phase flight safety + data tracking — gap analysis
 
-## Status (updated 2026-08-18)
+## Status (2026-08-18, Lane A) — EVERYTHING IN THIS DOC IS NOW DONE OR EXPLICITLY BLOCKED
+
+| Item | State |
+|---|---|
+| 1-3. EKF variance / vibration / airspeed-stall monitors | Shipped earlier; **now SITL-proven** (2 of 3 — see Part 3C) |
+| 4. Bank angle | **DONE** — `bank` monitor + `bank-angle` scenario |
+| 5. Live keepout proximity | **DONE** — `keepout_watch.py` + `keepout` monitor + `keepout-prox` scenario |
+| 6. Wind | **DONE** — `WIND`/`WIND_COV` parsed; confirmed streamed, no extra subscription |
+| 7. Pump/spray verification | **BLOCKED** — pump sensing undecided (asked 2026-08-18) |
+| 8. Terrain/AGL clearance | **BLOCKED** — needs camera + companion computer |
+| 3A. Flight log widening | Shipped earlier; now also carries wind |
+| 3B. Post-flight scorecard | **DONE** |
+| 3C. SITL scenario proof | **DONE for what can be proven** — vibration is unprovable on this SITL (see Part 3C) |
+
+Verification: **366 backend unit tests + 14 SITL scenarios + 13 frontend tests.**
+The two remaining open items are both hardware-gated. The highest-value software follow-up is no
+longer in this doc — it is the **planning-time turn-geometry constraint in `coverage.py`** (the
+other half of item 4), which the bank-angle measurements below made a lot more urgent.
+
+## Earlier status (kept for provenance — updated 2026-08-18)
 Items 1–3 below (EKF variance, vibration, airspeed/stall-margin monitors) plus Part 3A (flight
 log widening) are **DONE AND MERGED TO `main`** — commits `94c4d76` and `c401628`, which sit
 directly on top of the other session's "Backend hardening" pass (`7bb3f60`). They were built in
@@ -94,21 +113,45 @@ proximity monitor remains the second layer.
 3. ~~Stall/airspeed margin~~ **DONE** (kept operator-configured rather than reading
    `ARSPD_FBW_MIN`/`AIRSPEED_MIN` from the param cache — guardian.py deliberately stays
    param-cache-free; see the comment in `GuardianConfig`).
-4. **Bank/pitch angle during turns near the ground.** `telemetry.roll`/`pitch` already populated.
-   A stall-spin with little altitude to recover is unrecoverable; the mitigation isn't "detect
-   after the fact" (too late) but partly a *planning-time* constraint in `coverage.py`'s turn
-   geometry, and partly a guardian sanity check flagging bank steeper than the plan should ever
-   command (catches wind gusts / control saturation). Not started.
-5. **Live keepout proximity, not just planning-time avoidance.** `coverage.py`/`coverage_multi.py`
-   clip the *planned* path around keepouts, but nothing cross-checks the *actual flown position*
-   against those rings in real time. `gis_zones.py` already has the primitive needed —
-   `dist_to_zone_m(pt, zone)` — cache the mission's keepout rings + buffer at upload time, run it
-   against live position each guardian tick. Lands naturally alongside `POWERLINE-KEEPOUTS.md`,
-   since it reuses the same primitive and keepout data both features need. Not started.
-6. **Wind (`WIND` message — not currently subscribed).** Spray-drift context for the post-flight
-   debrief, and a control-margin proxy against item 3's airspeed monitor. Confirm ArduPilot's
-   telemetry stream actually includes `WIND` in the requested `MAV_DATA_STREAM` set before
-   assuming it's free. Not started.
+4. ~~**Bank/pitch angle during turns near the ground.**~~ **DONE 2026-08-18** — guardian `bank`
+   monitor + `test_scenario_bank_angle.py` (`.\scenarios.ps1 bank-angle`). Default threshold is
+   45 deg, pinned to ArduPlane's own `ROLL_LIMIT_DEG` default rather than picked by feel: past it
+   the aircraft is banking harder than the autopilot should ever command, which is exactly the
+   gust / saturation / stick-input case this catches. The limit tightens automatically below
+   `bank_low_alt_m` (30 m -> x0.7), because that is where a stall-spin has no recovery room.
+   Warn-only by default; `bank_action="rtl"` available with a 2 s debounce so a gust can't trip it.
+
+   **MEASURED FINDING, and the real story here: this airframe banks 50-65 deg during ORDINARY
+   loiter and RTL turns in SITL — past ROLL_LIMIT_DEG.** So the monitor fires on routine turns
+   today. That is a true finding about the aircraft, not a mis-set threshold: a 60 deg bank raises
+   stall speed ~41%, and at the confirmed 10-25 m spray altitude there is no altitude to recover a
+   stall-spin. **This makes the planning-time turn-geometry constraint (the other half of this
+   item, in `coverage.py`) materially more urgent than it looked** — the monitor only makes the
+   problem visible; it cannot make the turns gentler.
+5. ~~**Live keepout proximity, not just planning-time avoidance.**~~ **DONE 2026-08-18** —
+   `app/keepout_watch.py` + guardian `keepout` monitor + `test_scenario_keepout_proximity.py`
+   (`.\scenarios.ps1 keepout-prox`). Rings are supplied by the client via
+   `POST /api/safety/keepouts` (the coverage response's `zones` shape is accepted directly) and
+   checked against live position every guardian tick using `gis_zones.dist_to_zone_m` — imported,
+   never reimplemented, because two copies of point-in-polygon that disagree is how you get a wire
+   strike. Design points worth keeping:
+   - Only **hazard** kinds (powerlines) warn. Water/trees/buildings distance is measured and
+     reported for the debrief but never annunciated — overflying a pond with the sprayer off costs
+     nothing, and warning every pass would train the operator to ignore the annunciator. Same
+     hazard/keepout split `reroute.py` uses.
+   - `known` is reported separately from `ok`: **no zone data must never render as a green tick.**
+   - **Mission upload CLEARS the cached rings.** Rings from the previous field are worse than none
+     — they read as a confident all-clear over ground nobody surveyed. The client must re-arm the
+     monitor after every upload.
+   - Warn-only by default on purpose: an RTL turns the aircraft toward home, which could steer it
+     ACROSS the very line it is close to. The operator decides.
+6. ~~**Wind (`WIND` message — not currently subscribed).**~~ **DONE 2026-08-18.** The doc asked to
+   confirm ArduPilot actually streams it before assuming it was free — **it does**: verified live
+   with `SIM_WIND_SPD=12 / SIM_WIND_DIR=270`, `telemetry.wind_speed` tracked it 0.1 -> 12.0 m/s at
+   bearing 270 under the existing `MAV_DATA_STREAM_ALL` request, no extra subscription needed.
+   Both `WIND` (speed/direction) and `WIND_COV` (NED components, converted) are parsed to the same
+   two fields. Carried in the flight log and the scorecard: without it, a low-airspeed or
+   high-bank sample in the log can't be told apart from a gust.
 7. **Pump/spray-system verification during flight.** Hardware-gated. Asked 2026-08-18: the pump
    sensing is **not decided yet**, so this stays out of scope rather than being designed against a
    guess. Re-ask before starting. The answer is load-bearing: with a flow or pressure sensor,
@@ -123,14 +166,27 @@ proximity monitor remains the second layer.
 ## Part 3 — data tracking
 **A. Flight log widened.** **DONE** — see Part 1.
 
-**B. No computed "how close did we come" summary yet — only raw replay.** `routers/logs.py`
-serves raw samples for `LogsPanel` playback. Missing: a post-flight scorecard generated once on
-disarm (mirrors how `_close_log` already runs at that moment) — minimum distance achieved to any
-keepout ring, minimum RTL energy margin observed, max bank angle, any EKF variance spikes even if
-they stayed under the warn threshold, guardian warning count by type, vibration clip count. This
-is what turns "did it crash" into a trend you can watch degrade before it becomes a crash. Not
-started; touches `routers/logs.py`, which was in the other session's modified-files set as of
-2026-08-14, so check that file's current shape before starting.
+**B. Post-flight scorecard.** **DONE 2026-08-18.** Generated once on disarm, in `_close_log`
+(the only moment "the flight" is a finished thing that can be summarised), written as
+`flight_<stamp>.scorecard.json` beside the log and served on `GET /api/logs/{name}` as
+`scorecard` (the list view carries `has_scorecard`). Also emitted to the event log.
+
+Carries: min distance to any hazard ring and to any keepout ring, min RTL energy margin, max bank
+angle, max EKF pos/vel variance, max vibration + clip events, max wind, min airspeed, min battery
+voltage, flight duration, and **guardian warning counts per monitor**.
+
+Two decisions worth keeping:
+- **Every extreme starts as `None`, never 0.** "No wind data this flight" and "zero wind this
+  flight" are different facts, and a scorecard reporting `0 m` to the nearest powerline when no
+  rings were ever loaded would be a dangerous lie.
+- **Warnings are counted per EPISODE (rising edge), not per tick.** A tick count on a 1 Hz sampler
+  reports how *long* a condition held while looking like how *often* it happened.
+
+The point is the near miss: an EKF variance that peaked at 0.55 against a 0.6 threshold never
+warns and leaves no trace in the event log — but three flights of that in a row is a degradation
+trend you want to see before it becomes an incident. A scorecard is absent (`null`) for flights
+recorded before this existed and for any flight the backend never saw disarm, so callers must
+treat missing as "not available", never as "nothing to report".
 
 **C. Verification: new SITL scenarios, same pattern as M4.** Every monitor above needs its own
 `test_scenario_*.py` proving it fires under the exact fault it's meant to catch — mirroring
@@ -171,14 +227,22 @@ frame, a replay-based test driving recorded VIBRATION messages into the parser, 
 hardware. `test_m4_sim.py::test_there_is_no_vibration_fault` pins the absence so nobody re-adds
 the endpoint without also adding a scenario that works.
 
-## Rollout order (updated)
-1. Resolve the altitude question — still unresolved, still reorders priority.
-2. ~~EKF variance, vibration, flight-log widening~~ **DONE.** ~~Airspeed/stall margin~~ **DONE.**
-3. Live keepout-proximity monitor (#5) — pairs naturally with `POWERLINE-KEEPOUTS.md`.
-4. Bank-angle monitor (#4), wind (#6).
-5. Post-flight scorecard (Part 3B).
-6. SITL scenario proof (Part 3C) — **UNBLOCKED, and arguably now item 2**: the three merged
-   monitors are unit-tested only, so this is what turns "shipped" into "proven."
-7. Pump verification and terrain/AGL — hardware-gated, need Caleb's input first.
+## Rollout order — COMPLETE except the hardware-gated items
+1. ~~Resolve the altitude question~~ **ANSWERED: 10-25 m AGL.**
+2. ~~EKF variance, vibration, flight-log widening, airspeed/stall margin~~ **DONE.**
+3. ~~Live keepout-proximity monitor (#5)~~ **DONE.**
+4. ~~Bank-angle monitor (#4), wind (#6)~~ **DONE.**
+5. ~~Post-flight scorecard (Part 3B)~~ **DONE.**
+6. ~~SITL scenario proof (Part 3C)~~ **DONE** for the two monitors that can be driven; vibration
+   is unprovable on this SITL build and is recorded as such rather than faked.
+7. Pump verification and terrain/AGL — hardware-gated, still need Caleb's input.
 8. ~~Merge `worktree-spray-safety-monitors` into `main`~~ **DONE 2026-08-16** (`94c4d76`,
    `c401628`); branch and worktree deleted.
+
+## What this doc no longer covers — the next thing worth doing
+The bank-angle work turned up the one finding that should drive the next piece of software:
+**the aircraft banks 50-65 deg in ordinary autopilot turns, and a real spray pass flies at
+10-25 m.** In-flight detection is now in place, but detection cannot make a turn gentler. The
+mitigation is the **planning-time turn-geometry constraint in `coverage.py`** — cap the commanded
+bank the serpentine turn geometry can produce at spray altitude. That lives in the planner
+(Lane B's file set), not here, and it is the natural successor to this document.

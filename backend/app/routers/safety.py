@@ -144,6 +144,56 @@ class GuardianConfigUpdate(BaseModel):
     airspeed_action: Optional[Literal["warn", "rtl"]] = None
     airspeed_low_s: Optional[float] = Field(None, ge=0, le=60)
     airborne_alt_m: Optional[float] = Field(None, ge=0, le=100)
+    # Bank angle. Capped at 90: past vertical the number stops meaning
+    # "a steep turn" and the monitor would never fire again.
+    bank_warn_deg: Optional[float] = Field(None, ge=5, le=90)
+    bank_action: Optional[Literal["warn", "rtl"]] = None
+    bank_sustained_s: Optional[float] = Field(None, ge=0, le=60)
+    bank_low_alt_m: Optional[float] = Field(None, ge=0, le=200)
+    bank_low_alt_factor: Optional[float] = Field(None, gt=0, le=1)
+    keepout_action: Optional[Literal["warn", "rtl"]] = None
+    keepout_sustained_s: Optional[float] = Field(None, ge=0, le=60)
+
+
+class KeepoutLoad(BaseModel):
+    """Rings the current mission was planned against, for the live proximity
+    monitor. Accepts the coverage response's `zones` shape directly, so the UI
+    can forward what it already has instead of reshaping it."""
+    # dict (kind -> [zone]) or a flat list of zones; validated in keepout_watch.
+    zones: object
+    hazard_buffer_m: float = Field(20.0, ge=0, le=500)
+
+
+@router.get("/keepouts")
+def get_keepouts():
+    """What the live proximity monitor is armed with. `known: false` means it
+    cannot judge — which the UI must show as unknown, never as clear."""
+    return vehicle_manager.keepout_status()
+
+
+@router.post("/keepouts")
+def load_keepouts(req: KeepoutLoad):
+    """Arm the monitor with this mission's zones.
+
+    Deliberately NOT part of mission upload: the aircraft can fly a mission
+    the GCS didn't plan, and pretending we know the zones in that case would
+    be worse than admitting we don't. Mission upload CLEARS these instead.
+    """
+    try:
+        prepared = vehicle_manager.set_mission_keepouts(
+            req.zones, req.hazard_buffer_m)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {"status": "ok", "hazards": prepared["n_hazards"],
+            "keepouts": prepared["n_keepouts"],
+            "dropped": prepared["dropped"],
+            "hazard_buffer_m": prepared["hazard_buffer_m"]}
+
+
+@router.delete("/keepouts")
+def clear_keepouts():
+    vehicle_manager.clear_mission_keepouts(reason="operator")
+    return {"status": "cleared"}
 
 
 @router.get("/guardian")

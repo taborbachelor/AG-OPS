@@ -16,6 +16,17 @@ This module is PURE LOGIC — evaluate()/derive_state() have no side effects and
 no locks, so every rule is unit-testable with plain dicts. The 1Hz runner
 thread, config storage, and the actual RTL command live in vehicle_manager.
 
+LOAD-BEARING ASSUMPTION — "KANSAS IS FLAT" (SPRAY-FLIGHT-SAFETY.md #8):
+every monitor here treats altitude as height above the LAUNCH point, because
+that is what `GLOBAL_POSITION_INT.relative_alt` gives us. There is no terrain
+model in this stack. So `airborne_alt_m`, the bank monitor's low-altitude
+tightening, and the RTL energy margin are all only as true as the ground being
+level with home. Over the flat Kansas fields this is being built for that holds;
+fly it into rolling ground and "15 m AGL" may be 15 m above the launch field
+while the aircraft is much closer to — or below — a rise ahead of it. Terrain
+awareness is explicitly a later phase (needs a camera + companion computer).
+Until then this assumption is stated, not silently relied on.
+
 Design choices worth remembering:
   - Monitors only judge while ARMED: a bench vehicle with no GPS and a dead
     pack is normal, not an emergency.
@@ -103,6 +114,42 @@ class GuardianConfig:
     airspeed_action: str = "warn"     # "warn" | "rtl"
     airspeed_low_s: float = 3.0       # shorter than battery — stall risk develops fast
     airborne_alt_m: float = 5.0       # below this, treat as ground ops, not flight
+    # Bank angle. A steep bank raises stall speed (stall_speed / sqrt(cos(bank))
+    # — 45 deg costs ~19%) while cutting the vertical lift component, and a
+    # stall-spin entered in a spray turn has no altitude to recover in. The
+    # real mitigation is planning-time turn geometry in coverage.py; this is
+    # the in-flight sanity check that catches what the plan didn't command —
+    # a gust, control saturation, or an operator stick input.
+    #
+    # 45 deg default = ArduPlane's own ROLL_LIMIT_DEG default. The threshold is
+    # deliberately pinned to the autopilot's limit rather than picked by feel:
+    # past it, the aircraft is banking harder than anything the autopilot
+    # should be commanding, which is the gust / saturation / stick-input case
+    # this monitor exists to catch.
+    #
+    # MEASURED 2026-08-18, and worth knowing before tuning this: this airframe
+    # in SITL peaks at 50-65 deg of roll during ORDINARY loiter and RTL turns —
+    # past ROLL_LIMIT_DEG. So this monitor does fire on routine turns today.
+    # That is a true finding, not noise: a 60 deg bank raises stall speed ~41%
+    # and at a 10-25 m spray altitude there is no room to recover a stall-spin.
+    # The fix is the planning-time turn-geometry constraint
+    # (SPRAY-FLIGHT-SAFETY.md #4) — this monitor is what makes the problem
+    # visible until that lands. Operators flying low should set this DOWN.
+    bank_warn_deg: float = 45.0
+    bank_action: str = "warn"         # "warn" | "rtl"
+    bank_sustained_s: float = 2.0     # a momentary gust-induced bank is not news
+    # Low-altitude multiplier: below this height the same bank is far more
+    # dangerous, so the monitor tightens automatically rather than relying on
+    # the operator to remember. 0 disables the tightening.
+    bank_low_alt_m: float = 30.0
+    bank_low_alt_factor: float = 0.7  # 45 deg -> 31.5 deg below 30 m
+    # Live keepout proximity. The planner already routes around hazards, so
+    # this fires only when the aircraft is NOT where the plan put it — wind,
+    # a mode change, an operator input, or a plan flown against stale zones.
+    # Warn-only by default: an RTL that turns the aircraft toward home could
+    # steer it ACROSS the very line it is close to, so the operator decides.
+    keepout_action: str = "warn"      # "warn" | "rtl"
+    keepout_sustained_s: float = 0.0  # 0 = warn immediately; a wire is not a debounce
 
 
 def default_memory() -> dict:
@@ -110,7 +157,8 @@ def default_memory() -> dict:
     return {"batt_low_since": None, "margin_low_since": None,
             "rtl_commanded_for": None, "standdown_for": None,
             "vibe_high_since": None, "clip_baseline": None,
-            "airspeed_low_since": None}
+            "airspeed_low_since": None, "bank_steep_since": None,
+            "keepout_breach_since": None}
 
 
 def _dist_home_m(t: dict) -> float | None:
@@ -133,6 +181,17 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
     armed = bool(t.get("armed"))
     monitors: dict = {}
     warnings: list[str] = []
+    # Same warnings, tagged with the monitor that produced them. The flat
+    # `warnings` list stays exactly as it was (scenarios and the event log
+    # match on its text), but the UI needs a STABLE key per warning: keyed by
+    # monitor it can show every active warning with its own dismiss state,
+    # instead of rendering warnings[0] and hiding the rest — which is a real
+    # failure mode now that several monitors can warn at once.
+    warning_items: list[dict] = []
+
+    def _warn(monitor: str, text: str) -> None:
+        warnings.append(text)
+        warning_items.append({"monitor": monitor, "text": text})
     action = None
     reason = None
     source = None  # which monitor demanded the action (latch/standdown key)
@@ -144,7 +203,7 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
         and _LINK_LEVEL_ORDER.get(level, 0) >= _LINK_LEVEL_ORDER[cfg.link_warn_level])
     monitors["link"] = {"ok": not link_warn, "level": level}
     if link_warn:
-        warnings.append(f"link {level} (heartbeats thinning)")
+        _warn("link", f"link {level} (heartbeats thinning)")
 
     # --- gps ---
     fix, sats = t.get("gps_fix", 0), t.get("gps_satellites", 0)
@@ -152,11 +211,11 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
     gps_thin = armed and not gps_bad and sats < cfg.gps_min_sats
     monitors["gps"] = {"ok": not (gps_bad or gps_thin), "fix": fix, "sats": sats}
     if gps_bad:
-        warnings.append(f"GPS fix lost (fix={fix})")
+        _warn("gps", f"GPS fix lost (fix={fix})")
         if cfg.gps_action == "rtl":
             action, reason, source = "rtl", f"GPS fix lost (fix={fix})", "gps"
     elif gps_thin:
-        warnings.append(f"GPS thin ({sats} sats < {cfg.gps_min_sats})")
+        _warn("gps", f"GPS thin ({sats} sats < {cfg.gps_min_sats})")
 
     # --- battery voltage ---
     volts = t.get("battery_voltage") or 0.0
@@ -172,7 +231,7 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
     monitors["battery"] = {"ok": not batt_warn, "volts": volts,
                            "low_sustained": batt_low_sustained}
     if batt_warn:
-        warnings.append(f"battery {volts:.1f}V below warn {cfg.batt_warn_volt:.1f}V")
+        _warn("battery", f"battery {volts:.1f}V below warn {cfg.batt_warn_volt:.1f}V")
     if batt_low_sustained and cfg.batt_action == "rtl" and action is None:
         action, source = "rtl", "battery"
         reason = (f"battery {volts:.1f}V below RTL threshold "
@@ -197,7 +256,7 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
         if margin_s < 0:
             if mem["margin_low_since"] is None:
                 mem["margin_low_since"] = now
-            warnings.append(
+            _warn("rtl_margin", 
                 f"RTL margin negative ({margin_s:.0f}s): "
                 f"{time_left:.0f}s of battery vs {time_home:.0f}s home + "
                 f"{cfg.margin_reserve_s:.0f}s reserve")
@@ -222,11 +281,11 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
                        "healthy": ekf_healthy,
                        "pos_var": round(pos_var, 3), "vel_var": round(vel_var, 3)}
     if ekf_bad:
-        warnings.append(f"EKF unhealthy (flags={t.get('ekf_flags', 0)})")
+        _warn("ekf", f"EKF unhealthy (flags={t.get('ekf_flags', 0)})")
         if cfg.ekf_action == "rtl" and action is None:
             action, reason, source = "rtl", "EKF unhealthy", "ekf"
     elif ekf_drifting:
-        warnings.append(
+        _warn("ekf", 
             f"EKF variance rising (pos={pos_var:.2f}, vel={vel_var:.2f} "
             f">= {cfg.ekf_var_warn:.2f})")
 
@@ -250,10 +309,10 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
     monitors["vibration"] = {"ok": not (vibe_high or clip_high),
                              "peak_ms2": round(vibe, 1), "new_clips": new_clips}
     if vibe_high:
-        warnings.append(f"vibration high ({vibe:.0f} m/s/s >= "
+        _warn("vibration", f"vibration high ({vibe:.0f} m/s/s >= "
                         f"{cfg.vibe_warn_ms2:.0f})")
     if clip_high:
-        warnings.append(f"accelerometer clipping ({new_clips} events this flight)")
+        _warn("vibration", f"accelerometer clipping ({new_clips} events this flight)")
     if (vibe_sustained or clip_high) and cfg.vibe_action == "rtl" and action is None:
         action, source = "rtl", "vibration"
         reason = (f"sustained high vibration/clipping "
@@ -275,7 +334,7 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
     monitors["airspeed"] = {"ok": not as_warn, "airspeed": round(airspeed, 1),
                             "airborne": airborne}
     if as_warn:
-        warnings.append(
+        _warn("airspeed", 
             f"airspeed low ({airspeed:.1f} m/s < warn {cfg.airspeed_warn_ms:.1f})"
             + (" — stall risk" if as_low else ""))
     if as_low_sustained and cfg.airspeed_action == "rtl" and action is None:
@@ -283,10 +342,72 @@ def evaluate(cfg: GuardianConfig, t: dict, mem: dict, now: float) -> dict:
         reason = (f"airspeed {airspeed:.1f} m/s below stall-risk floor "
                   f"{cfg.airspeed_min_ms:.1f} m/s for {cfg.airspeed_low_s:.0f}s")
 
+    # --- bank angle ---
+    # Reuses the airborne gate: a plane sitting on a slope, or banking during
+    # the takeoff roll, is not a flight-safety event.
+    roll_deg = abs(math.degrees(t.get("roll") or 0.0))
+    bank_limit = cfg.bank_warn_deg
+    low_and_slow = (cfg.bank_low_alt_m > 0 and alt < cfg.bank_low_alt_m)
+    if low_and_slow:
+        bank_limit *= cfg.bank_low_alt_factor
+    bank_steep = airborne and roll_deg >= bank_limit
+    if bank_steep:
+        if mem["bank_steep_since"] is None:
+            mem["bank_steep_since"] = now
+    else:
+        mem["bank_steep_since"] = None
+    bank_sustained = (mem["bank_steep_since"] is not None
+                      and now - mem["bank_steep_since"] >= cfg.bank_sustained_s)
+    monitors["bank"] = {"ok": not bank_steep, "roll_deg": round(roll_deg, 1),
+                        "limit_deg": round(bank_limit, 1),
+                        "low_alt": bool(low_and_slow)}
+    if bank_steep:
+        _warn("bank", 
+            f"bank {roll_deg:.0f} deg past {bank_limit:.0f}"
+            + (" (tightened: low altitude)" if low_and_slow else ""))
+    if bank_sustained and cfg.bank_action == "rtl" and action is None:
+        action, source = "rtl", "bank"
+        reason = (f"bank angle {roll_deg:.0f} deg held past {bank_limit:.0f} "
+                  f"for {cfg.bank_sustained_s:.0f}s")
+
+    # --- live keepout / hazard proximity ---
+    # The distance itself is computed by keepout_watch and injected under
+    # t["keepout"] — this module stays pure geometry-free logic. "known" is
+    # reported separately from "ok" ON PURPOSE: no zone data means we cannot
+    # judge, which must never render as a green tick.
+    prox = t.get("keepout") or {}
+    known = bool(prox.get("known"))
+    haz_dist = prox.get("hazard_dist_m")
+    breach = bool(prox.get("breach")) and armed
+    if breach:
+        if mem["keepout_breach_since"] is None:
+            mem["keepout_breach_since"] = now
+    else:
+        mem["keepout_breach_since"] = None
+    breach_sustained = (mem["keepout_breach_since"] is not None
+                        and now - mem["keepout_breach_since"] >= cfg.keepout_sustained_s)
+    monitors["keepout"] = {
+        "ok": not breach, "known": known,
+        "hazard_dist_m": (round(haz_dist, 1) if haz_dist is not None else None),
+        "hazard_kind": prox.get("hazard_kind"),
+        "keepout_dist_m": (round(prox["keepout_dist_m"], 1)
+                           if prox.get("keepout_dist_m") is not None else None),
+    }
+    if breach:
+        _warn("keepout", 
+            f"{prox.get('hazard_kind') or 'hazard'} {haz_dist:.0f} m away — "
+            f"inside the {prox.get('buffer_m', 0):.0f} m clearance")
+    if breach_sustained and cfg.keepout_action == "rtl" and action is None:
+        action, source = "rtl", "keepout"
+        reason = (f"inside the clearance of a "
+                  f"{prox.get('hazard_kind') or 'hazard'} keepout "
+                  f"({haz_dist:.0f} m)")
+
     if not cfg.enabled:
         action, reason, source = None, None, None
 
     return {"monitors": monitors, "warnings": warnings,
+            "warning_items": warning_items,
             "action": action, "reason": reason, "source": source, "mem": mem}
 
 

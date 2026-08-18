@@ -29,7 +29,8 @@
 > **State as of 2026-08-18 (commit `43440d5`, pushed, working tree clean, `main` is the only branch local and remote):**
 > - **Backend:** M1a/M1b/M2/M3/M4 + guardian + preflight gate (M6) + bench kit + soak, **plus the 2026-08-15 hardening pass** (~35 audit findings fixed: guardian stands down from RTL during a landing approach, param sync/restore armed-gated, serial links get 4Hz telemetry so a SiK radio isn't saturated, zone planning FAILS CLOSED with an explicit "Plan anyway" opt-out, waterway-ditch keepout corridors, keepout-overflight warnings, never-raise eventlog — full list in the History entry). **264 unit tests + 10 live SITL scenarios green** (`pytest` / `backend\scenarios.ps1 all`, ~4 min) — re-verified 2026-08-18 on the current machine.
 > - ⚠️ **The SITL suite is green ONLY when this machine is quiet — it is not safe to run two sessions against it.** Verified 2026-08-18: **12/12 green in 4:29** (10 existing + 2 new) on an idle machine, matching the documented ~4 min. But three earlier runs that overlapped a second Claude session failed 3, 4 and 5 scenarios with a DIFFERENT set each time and degraded 350s → 490s → 802s. Failures are connection-level (`no heartbeat from vehicle`, WinError 10061/10054) — a scenario connecting to a SITL that hasn't finished dying — never assertion failures. Cause: port 5760 is single-occupancy, `conftest.py` teardown waits on `/api/sim/status` + a flat 1 s without ever proving TCP 5760 is free, and `sim._running()` treats a listening port as "already running". **So: a red scenario during parallel work is far more likely contention than a real regression — re-run it alone before believing it.** The durable fix is Lane D item 3 (parameterize `harness.py`'s hardcoded `tcp:127.0.0.1:5760`) plus a teardown that waits for the port to clear.
-> - 🌿 **IN FLIGHT, not on `main`:** branch `lane-a/guardian-proof` in `.claude/worktrees/lane-b` — guardian Part 3C scenario proof (EKF-variance + airspeed-stall live scenarios, two new sim faults, 270 unit tests). Vibration proven UNPROVABLE on this SITL. Needs review + merge.
+> - 🌿 **IN FLIGHT, not on `main`:** branch `lane-a/guardian-proof` in `.claude/worktrees/lane-b` — **Lane A complete**: guardian Part 3C scenario proof (EKF-variance + airspeed-stall, two new sim faults; vibration proven UNPROVABLE on this SITL), plus the bank-angle monitor, wind, the live keepout-proximity monitor, the post-flight scorecard, and the alert-threshold unification. **366 backend unit tests + 14 SITL scenarios + 13 frontend tests.** Rebased onto Lane B's powerline + reroute commits. Needs review + merge.
+> - 🔥 **Next highest-value safety item, surfaced by that work:** the aircraft banks **50-65 deg in ordinary loiter/RTL turns** (measured), past `ROLL_LIMIT_DEG`, while a real spray pass flies at **10-25 m** — where a 60 deg bank has no recovery altitude. Detection now exists; the fix is a **turn-geometry bank constraint in `coverage.py`** so the planner stops commanding them.
 > - **UI:** Vite (1s builds), 3D FLY view default (CesiumJS, key-free, attitude-true aircraft, CHASE/ORBIT/FREE cams; 2D forced for planning/drawing), NavRail progressive disclosure, server preflight verdicts + guardian chip/annunciators, SprayPanel zone-failure opt-in + overflight warnings. 6 UI tests green.
 > - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). **UNBILLED as of 2026-08-18:** the 2026-08-15 hardening session, the 2026-08-15 guardian safety-monitor session, the 2026-08-16 docs/merge session, and the 2026-08-18 session. Note the transcript path changed profiles — see the method note under the billing table.
 > - **`AgOpsGCS.exe` rebuilt 2026-08-15 (53.7MB) with the hardening pass baked in**, smoke-tested: /api/health ok, app served (title AgOps GCS), /cesium Workers+Assets 200, preflight correctly not-ready with no vehicle, NaN request body → clean 422, fault injection refused without a vehicle.
@@ -221,24 +222,25 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
      that list). It stays unit-tested only, and deliberately has NO fault endpoint — one that
      wrote no-op params would report "fault injected" on an unaffected vehicle. Full evidence, and
      the two near-misses that almost produced a green test proving nothing, in Part 3C.
-  2. **Live keepout-proximity monitor** (`SPRAY-FLIGHT-SAFETY.md` #5) — today only the *planned*
-     path is clipped around keepouts; nothing checks the *flown* position in real time. Primitive
-     already exists (`dist_to_zone_m`).
-  3. **Powerline keepouts** (`POWERLINE-KEEPOUTS.md`) — OSM `power=line`/`minor_line` corridors,
-     additive to `gis_zones.py` + both coverage routers + `MapView`/`MapView3D`/`SprayPanel`.
-     Protects the airframe, not spray quality — treat as a hazard in the UI.
-  4. **Post-flight scorecard** (`SPRAY-FLIGHT-SAFETY.md` Part 3B) — min keepout distance, min RTL
-     margin, max bank, sub-threshold variance spikes, clip counts, guardian warning counts, emitted
-     on disarm alongside `_close_log`.
-  5. **Bank-angle monitor** (#4) and **wind** (#6 — `WIND` is not currently subscribed; confirm it's
-     in the requested `MAV_DATA_STREAM` set first).
-  6. **M5** mission model/persistence/resume + connector-leg rerouting around keepouts (crossings
-     are currently only *counted* as `keepout_overflights` with an amber warning).
-  7. **M7 layer restructure** — `vehicle_manager.py` is **1,866 lines** (was 815 when the directive
-     was adopted). Biggest architectural debt in the repo; strangler moves only, never big-bang.
-  8. **Alert-threshold unification** (last M6 slice) — `AlertCenter`'s client-side thresholds vs
-     `guardian` config are two sources of truth for when to warn.
-  9. Config management (still ABSENT per `GAP-ANALYSIS.md`); customer-site 3D field/flight preview.
+  2. ~~**Live keepout-proximity monitor**~~ **DONE 2026-08-18** — `app/keepout_watch.py` +
+     guardian `keepout` monitor + `POST /api/safety/keepouts` + `keepout-prox` scenario.
+  3. ~~**Powerline keepouts**~~ **DONE 2026-08-18** (Lane B, `79d54a4`).
+  4. ~~**Post-flight scorecard**~~ **DONE 2026-08-18** — written on disarm, served on
+     `GET /api/logs/{name}`.
+  5. ~~**Bank-angle monitor** (#4) and **wind** (#6)~~ **DONE 2026-08-18.** Wind IS streamed under
+     the existing `MAV_DATA_STREAM_ALL` request — verified live, no extra subscription needed.
+  6. **🔥 Turn-geometry bank constraint in `coverage.py`** — NEW, and now the highest-value
+     safety item in the project. Measured 2026-08-18: **this airframe banks 50-65 deg in ORDINARY
+     loiter/RTL turns**, past `ROLL_LIMIT_DEG`, while a real spray pass flies at 10-25 m where a
+     60 deg bank (stall speed +41%) has no recovery altitude. The new in-flight monitor makes this
+     visible but cannot make a turn gentler — the planner has to stop commanding them.
+  7. **M5** mission model/persistence/resume. (Connector-leg rerouting around keepouts is
+     **DONE** — Lane B, `e480c35`.)
+  8. **M7 layer restructure** — `vehicle_manager.py` is now **~2,000 lines** (was 815 when the
+     directive was adopted). Biggest architectural debt in the repo; strangler moves only.
+  9. ~~**Alert-threshold unification**~~ **DONE 2026-08-18** — `AlertCenter` renders guardian
+     verdicts and holds no in-flight thresholds of its own.
+  10. Config management (still ABSENT per `GAP-ANALYSIS.md`); customer-site 3D field/flight preview.
 - **Ops / verification items, small and low-collision (surfaced 2026-08-18):**
   - **`AgOpsGCS.exe` does not exist on this machine** and the last built exe predates the guardian
     monitor merge — a Cube bench day would have nothing to run. Rebuild per README (frontend bundle
@@ -347,6 +349,53 @@ add a new dated entry here rather than editing old ones. Everything above the `-
 - **Standing lesson for this project:** GIS features must be validated against real OSM data
   before they are called done. Synthetic rings are too well-behaved — they are compact, isolated,
   and conveniently sized, and every one of those three assumptions was false in the field.
+#### Lane A COMPLETE — spray-flight safety monitors, scorecard, alert unification (2026-08-18)
+Finishes every software item in `SPRAY-FLIGHT-SAFETY.md`. Only the two hardware-gated ones (pump
+verification, terrain/AGL) remain open, and both are blocked on hardware, not on us.
+Branch `lane-a/guardian-proof`, rebased onto Lane B's powerline + reroute commits.
+
+**Shipped**
+- **Bank-angle monitor** (item 4). Default 45 deg = ArduPlane's own `ROLL_LIMIT_DEG` default,
+  pinned to the autopilot's limit rather than picked by feel. Tightens automatically below 30 m
+  (x0.7) because that is where a stall-spin has no recovery room. Warn-only by default.
+- **Wind** (item 6). `WIND`/`WIND_COV` parsed into `wind_speed`/`wind_direction`, in the flight
+  log and scorecard. The doc asked whether ArduPilot streams it before assuming — **it does**,
+  verified live (`SIM_WIND_SPD=12/DIR=270` -> telemetry tracked 0.1 -> 12.0 m/s at 270), no extra
+  subscription needed.
+- **Live keepout proximity** (item 5). New pure module `app/keepout_watch.py` + guardian
+  `keepout` monitor + `POST/GET/DELETE /api/safety/keepouts`. Only HAZARD kinds (powerline) warn;
+  water/trees/buildings distance is measured for the debrief but never annunciated. `known` is
+  reported separately from `ok` so missing zone data can't render as a green tick. **Mission
+  upload clears the cached rings** — stale rings from the previous field would read as a
+  confident all-clear over unsurveyed ground.
+- **Post-flight scorecard** (Part 3B). Written on disarm beside the flight log, served on
+  `GET /api/logs/{name}`. Extremes start as `None` not 0 (a scorecard saying "0 m to the nearest
+  powerline" when no rings were loaded would be a dangerous lie); warnings counted per EPISODE,
+  not per tick.
+- **Alert-threshold unification** (the last open M6 slice). `AlertCenter.jsx` now holds NO
+  in-flight thresholds — it renders the guardian's verdicts. It previously carried its own
+  battery-percent and GPS-fix rules, so the UI could disagree with the guardian (which judges
+  battery on VOLTAGE and GPS on fix AND sat count). Guardian results gained `warning_items`
+  (each warning tagged with the monitor that raised it) so the UI shows EVERY active warning with
+  its own dismiss state — the old code rendered `warnings[0]` and hid the rest, which became a
+  real defect the moment bank and keepout monitors could warn alongside something else. Client
+  keeps only what the backend structurally cannot judge: LINK LOST/RECONNECTING (guardian
+  verdicts freeze when telemetry stops), RTL ENGAGED, and a disarmed pre-arm pack advisory.
+
+**Verification:** 366 backend unit tests, 14 SITL scenarios, 13 frontend tests. Two new live
+scenarios: `bank-angle` and `keepout-prox`.
+
+**The finding that should drive the next piece of work:** the bank monitor was built with a 35 deg
+default, then re-based to 45 after measuring that **this airframe banks 50-65 deg during ORDINARY
+loiter and RTL turns** — past `ROLL_LIMIT_DEG`. At the confirmed 10-25 m spray altitude a 60 deg
+bank (stall speed +41%) has no recovery room. The monitor makes it visible but cannot make turns
+gentler; the fix is the **planning-time turn-geometry constraint in `coverage.py`** (Lane B's
+files). That is now the highest-value software item in the project's safety chain.
+
+**One test bug worth remembering:** the bank scenario first failed comparing the guardian's
+`roll_deg` (54.2) against a telemetry read taken moments later (51.0). The guardian ticks at 1 Hz
+while the aircraft rolls continuously — cross-checks against live attitude have to compare a
+RANGE over a window, never two instants.
 
 #### 🔴 SITL scenario suite is INTERMITTENTLY FAILING on this machine (2026-08-18) — not a code bug
 - **Symptom:** `scenarios.ps1 all` fails 2–4 scenarios per run, with a DIFFERENT set each time.

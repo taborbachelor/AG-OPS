@@ -8,13 +8,16 @@
 #   .\scenarios.ps1 link-watchdog
 #   .\scenarios.ps1 ekf-variance    # guardian EKF-variance monitor, live
 #   .\scenarios.ps1 airspeed-stall  # guardian stall-margin monitor, live
+#   .\scenarios.ps1 bank-angle      # guardian bank-angle monitor, live
+#   .\scenarios.ps1 keepout-prox    # live keepout/hazard proximity
 #   .\scenarios.ps1 all             # full scenario suite (~10-20 min)
 # Each scenario spawns the bundled SITL itself — close any hand-started SITL first.
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("field-test", "link-loss", "gps-failure", "battery-fault",
                  "rtl-recovery", "link-watchdog", "guardian", "preflight",
-                 "ekf-variance", "airspeed-stall",
+                 "ekf-variance", "airspeed-stall", "bank-angle",
+                 "keepout-prox",
                  "bench", "soak", "all")]
     [string]$Scenario
 )
@@ -29,6 +32,8 @@ $map = @{
     "guardian"      = "tests\sitl\test_scenario_guardian.py"
     "ekf-variance"   = "tests\sitl\test_scenario_ekf_variance.py"
     "airspeed-stall" = "tests\sitl\test_scenario_airspeed_stall.py"
+    "bank-angle"     = "tests\sitl\test_scenario_bank_angle.py"
+    "keepout-prox"   = "tests\sitl\test_scenario_keepout_proximity.py"
     "preflight"     = "tests\sitl\test_scenario_preflight.py"
     "bench"         = "tests\sitl\test_scenario_bench.py"
     "soak"          = "tests\sitl\test_scenario_soak.py"

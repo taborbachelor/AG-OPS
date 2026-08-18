@@ -45,6 +45,12 @@ def upload_mission(mission: MissionUpload):
     result = vehicle_manager.upload_mission(items)
     if not result.get("ok"):
         raise HTTPException(500, f"Mission upload failed: {result}")
+    # A new mission means the cached keepout rings describe the PREVIOUS
+    # field. Stale rings are worse than none — they read as a confident
+    # all-clear over ground nobody surveyed — so the live proximity monitor
+    # goes back to "unknown" until the client re-arms it via
+    # POST /api/safety/keepouts.
+    vehicle_manager.clear_mission_keepouts(reason="mission_upload")
     return result
 
 

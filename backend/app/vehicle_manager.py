@@ -11,7 +11,7 @@ from pymavlink import mavutil
 
 from app.eventlog import log_event
 from app import config
-from app import guardian
+from app import guardian, keepout_watch
 from app import param_meta
 
 # Flight logs live next to the app package.
@@ -27,6 +27,28 @@ _EKF_UNINITIALIZED = getattr(mavutil.mavlink, "EKF_UNINITIALIZED", 1024)
 
 # SYS_STATUS sensor bits we surface by name when a sensor is enabled but
 # reporting unhealthy (MAV_SYS_STATUS_SENSOR_* / MAV_SYS_STATUS_* enums).
+def _new_flight_stats(now: float) -> dict:
+    """Empty post-flight scorecard (Part 3B).
+
+    Every extreme starts as None rather than 0: "no wind data this flight" and
+    "zero wind this flight" are different facts, and a scorecard that reports
+    0 m to the nearest powerline when no rings were ever loaded would be a
+    dangerous lie. Keys prefixed "_" are working state and are not serialized.
+    """
+    return {
+        "started": now, "ended": now, "samples": 0,
+        "max_bank_deg": None,
+        "max_ekf_pos_var": None, "max_ekf_vel_var": None,
+        "max_vibe_ms2": None, "clip_events": None,
+        "max_wind_ms": None,
+        "min_airspeed_ms": None, "min_battery_v": None,
+        "min_rtl_margin_s": None,
+        "min_hazard_dist_m": None, "min_keepout_dist_m": None,
+        "warnings": {},
+        "_warning_active": {},
+    }
+
+
 _SENSOR_BITS = {
     "gyro": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_3D_GYRO", 1),
     "accel": getattr(mavutil.mavlink, "MAV_SYS_STATUS_SENSOR_3D_ACCEL", 2),
@@ -145,6 +167,13 @@ class TelemetryData:
     clip_0: int = 0
     clip_1: int = 0
     clip_2: int = 0
+    # Wind estimate (WIND / WIND_COV). Speed m/s; direction is the bearing the
+    # wind is coming FROM, degrees. Spray-drift context for the debrief and a
+    # cross-check on the airspeed monitor: airspeed minus a headwind component
+    # is what the wing actually has, so a stall warning in a 12 m/s wind reads
+    # very differently from one in still air.
+    wind_speed: float = 0.0
+    wind_direction: float = 0.0
 
 
 class VehicleManager:
@@ -242,9 +271,18 @@ class VehicleManager:
         self.guardian_config = guardian.GuardianConfig()
         self._guardian_lock = threading.Lock()
         self._guardian = {"state": guardian.NORMAL, "monitors": {},
-                          "warnings": [], "rtl_source": None,
-                          "rtl_reason": None}
+                          "warnings": [], "warning_items": [],
+                          "rtl_source": None, "rtl_reason": None}
         self._guardian_thread = None
+        # Keepout rings the CURRENT mission was planned against, set via
+        # /api/safety/keepouts and cleared on every mission upload so a new
+        # field can never be flown against the previous field's zones.
+        self._keepout_lock = threading.Lock()
+        self._keepouts: dict | None = None
+        # Post-flight scorecard accumulator (Part 3B). Reset on the arm edge,
+        # written out on disarm next to the flight log.
+        self._flight_stats: dict | None = None
+        self._log_path: Path | None = None
         self._guardian_mem = guardian.default_memory()
         self._guardian_prev_armed = False
         self._guardian_rtl_attempts = 0
@@ -556,9 +594,19 @@ class VehicleManager:
             self._landing_seen_auto = False
             self._landing_rtl_suppressed_logged = False
             self._guardian_rtl_attempts = 0
+            self._flight_stats = _new_flight_stats(now)
         self._guardian_prev_armed = t["armed"]
 
+        # Live keepout proximity: computed here (stateful cache + geometry) and
+        # injected so guardian.evaluate stays pure-logic and dict-testable.
+        with self._keepout_lock:
+            prepared = self._keepouts
+        t["keepout"] = keepout_watch.nearest(prepared, t.get("lat") or 0.0,
+                                             t.get("lon") or 0.0)
+
         res = guardian.evaluate(cfg, t, mem, now)
+        if t["armed"]:
+            self._accumulate_flight_stats(t, res, now)
         action, source, reason = res["action"], res["source"], res["reason"]
         mode = t.get("mode")
 
@@ -640,9 +688,125 @@ class VehicleManager:
             self._guardian = {
                 "state": state, "monitors": res["monitors"],
                 "warnings": res["warnings"],
+                # Per-monitor keying so the UI can annunciate EVERY active
+                # warning with its own dismiss state, not just warnings[0].
+                "warning_items": res.get("warning_items") or [],
                 "rtl_source": mem["rtl_commanded_for"],
                 "rtl_reason": reason if mem["rtl_commanded_for"] else None,
             }
+
+    def _accumulate_flight_stats(self, t: dict, res: dict, now: float) -> None:
+        """Fold one guardian tick into the post-flight scorecard.
+
+        Tracks WORST-CASE approaches, not just breaches: a flight where the
+        EKF variance peaked at 0.55 against a 0.6 threshold never warned and is
+        invisible in the event log, but three flights of that in a row is a
+        trend worth seeing before it becomes an incident.
+        """
+        s = self._flight_stats
+        if s is None:
+            s = self._flight_stats = _new_flight_stats(now)
+        s["samples"] += 1
+        s["ended"] = now
+
+        def _max(key, value):
+            if value is None:
+                return
+            if s[key] is None or value > s[key]:
+                s[key] = value
+
+        def _min(key, value):
+            if value is None:
+                return
+            if s[key] is None or value < s[key]:
+                s[key] = value
+
+        _max("max_bank_deg", abs(math.degrees(t.get("roll") or 0.0)))
+        _max("max_ekf_pos_var", t.get("ekf_pos_var"))
+        _max("max_ekf_vel_var", t.get("ekf_vel_var"))
+        _max("max_vibe_ms2", max(t.get("vibration_x") or 0.0,
+                                 t.get("vibration_y") or 0.0,
+                                 t.get("vibration_z") or 0.0))
+        _max("max_wind_ms", t.get("wind_speed"))
+        _min("min_airspeed_ms", t.get("airspeed"))
+        _min("min_battery_v", t.get("battery_voltage") or None)
+
+        monitors = res.get("monitors") or {}
+        margin = (monitors.get("rtl_margin") or {}).get("margin_s")
+        _min("min_rtl_margin_s", margin)
+
+        kp = monitors.get("keepout") or {}
+        _min("min_hazard_dist_m", kp.get("hazard_dist_m"))
+        _min("min_keepout_dist_m", kp.get("keepout_dist_m"))
+
+        vib = monitors.get("vibration") or {}
+        _max("clip_events", vib.get("new_clips"))
+
+        # Warning EPISODES per monitor, counted on the rising edge. Counting
+        # ticks instead would just report "how long", which a 1 Hz sampler
+        # already conflates with severity.
+        prev = s["_warning_active"]
+        for name, mon in monitors.items():
+            bad = mon.get("ok") is False
+            if bad and not prev.get(name):
+                s["warnings"][name] = s["warnings"].get(name, 0) + 1
+            prev[name] = bad
+
+    def _write_scorecard(self) -> None:
+        """Emit the scorecard next to the flight log, once, on disarm."""
+        s, path = self._flight_stats, self._log_path
+        self._flight_stats = None
+        if not s or s["samples"] <= 0:
+            return
+        card = {k: v for k, v in s.items() if not k.startswith("_")}
+        card["duration_s"] = round(max(0.0, (s.get("ended") or 0) - s["started"]), 1)
+        for k, v in list(card.items()):
+            if isinstance(v, float):
+                card[k] = round(v, 3)
+        card.pop("started", None)
+        card.pop("ended", None)
+        log_event("guardian", "scorecard", **{
+            k: v for k, v in card.items() if k != "warnings"},
+            warnings=card.get("warnings") or {})
+        if path is None:
+            return
+        try:
+            path.with_suffix(".scorecard.json").write_text(
+                json.dumps(card, indent=2), encoding="utf-8")
+        except Exception:
+            pass  # a scorecard is a nice-to-have; never break the disarm path
+
+    def set_mission_keepouts(self, zones, hazard_buffer_m: float) -> dict:
+        """Arm the live proximity monitor with the rings this mission was
+        planned against. Raises ValueError on malformed geometry."""
+        prepared = keepout_watch.prepare(zones, hazard_buffer_m)
+        with self._keepout_lock:
+            self._keepouts = prepared
+        log_event("guardian", "keepouts_loaded",
+                  hazards=prepared["n_hazards"], keepouts=prepared["n_keepouts"],
+                  buffer_m=hazard_buffer_m, dropped=prepared["dropped"])
+        return prepared
+
+    def clear_mission_keepouts(self, reason: str = "cleared") -> None:
+        """Forget the cached rings. Called on every mission upload: rings from
+        the previous field would be worse than none — they'd read as a
+        confident all-clear over ground nobody surveyed."""
+        with self._keepout_lock:
+            had = self._keepouts is not None
+            self._keepouts = None
+        if had:
+            log_event("guardian", "keepouts_cleared", reason=reason)
+
+    def keepout_status(self) -> dict:
+        """What the monitor is currently armed with (counts, not geometry)."""
+        with self._keepout_lock:
+            k = self._keepouts
+        if not k:
+            return {"known": False, "n_hazards": 0, "n_keepouts": 0}
+        return {"known": True, "n_hazards": k["n_hazards"],
+                "n_keepouts": k["n_keepouts"],
+                "hazard_buffer_m": k["hazard_buffer_m"],
+                "dropped": k["dropped"]}
 
     def set_guardian_config(self, updates: dict) -> dict:
         """Apply operator-tuned guardian settings (already schema-validated by
@@ -867,6 +1031,25 @@ class VehicleManager:
                 self.telemetry.ekf_pos_var = float(getattr(msg, "pos_horiz_variance", 0.0))
                 self.telemetry.ekf_vel_var = float(getattr(msg, "velocity_variance", 0.0))
 
+            elif msg_type in ("WIND", "WIND_COV"):
+                # Spray-drift context and a control-margin cross-check against
+                # the airspeed monitor. WIND (legacy) carries speed/direction
+                # directly; WIND_COV carries NED components, so derive the same
+                # two numbers from wind_x/wind_y rather than storing a second
+                # shape the UI would have to branch on.
+                if msg_type == "WIND":
+                    # direction is where the wind is coming FROM, degrees.
+                    self.telemetry.wind_speed = float(getattr(msg, "speed", 0.0))
+                    self.telemetry.wind_direction = float(
+                        getattr(msg, "direction", 0.0)) % 360.0
+                else:
+                    wx = float(getattr(msg, "wind_x", 0.0))   # north
+                    wy = float(getattr(msg, "wind_y", 0.0))   # east
+                    self.telemetry.wind_speed = math.hypot(wx, wy)
+                    # Blowing-toward vector -> coming-from bearing.
+                    self.telemetry.wind_direction = (
+                        math.degrees(math.atan2(wy, wx)) + 180.0) % 360.0
+
             elif msg_type == "VIBRATION":
                 self.telemetry.vibration_x = float(msg.vibration_x)
                 self.telemetry.vibration_y = float(msg.vibration_y)
@@ -1034,6 +1217,9 @@ class VehicleManager:
             "clip": [t.clip_0, t.clip_1, t.clip_2],
             "sensor_errors": t.sensor_errors,
             "wp_seq": t.mission_seq, "wp_dist": round(t.wp_dist, 1),
+            # Wind at the same timestamp: without it a low-airspeed or
+            # high-bank sample in the log can't be told apart from a gust.
+            "wind": [round(t.wind_speed, 1), round(t.wind_direction, 0)],
         }
         try:
             self._log_fh.write(json.dumps(rec) + "\n")
@@ -1045,7 +1231,8 @@ class VehicleManager:
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             name = "flight_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".jsonl"
-            self._log_fh = open(LOG_DIR / name, "w", encoding="utf-8")
+            self._log_path = LOG_DIR / name
+            self._log_fh = open(self._log_path, "w", encoding="utf-8")
             self._log_start = time.time()
             self._last_sample = 0.0
             # Header line carries flight metadata (marked with "meta").
@@ -1064,6 +1251,10 @@ class VehicleManager:
             except Exception:
                 pass
             self._log_fh = None
+        # Same moment the flight ends, same reason: this is the only point
+        # where "the flight" is a finished thing that can be summarised.
+        self._write_scorecard()
+        self._log_path = None
 
     def set_mode(self, mode: str) -> bool:
         """Command a flight-mode change and wait for the vehicle's COMMAND_ACK.

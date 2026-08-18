@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 from fastapi import APIRouter, HTTPException
 from app.eventlog import recent_events
@@ -55,6 +56,8 @@ def list_logs():
                 "duration": _duration(samples),
                 "samples": len(samples),
                 "size_kb": round(p.stat().st_size / 1024, 1),
+                # Presence only — the list view shouldn't parse every card.
+                "has_scorecard": p.with_suffix(".scorecard.json").exists(),
             })
         except Exception:
             continue
@@ -70,6 +73,22 @@ def get_events(limit: int = 100):
     return {"events": recent_events(min(max(limit, 1), 500))}
 
 
+def _scorecard_for(path: Path) -> dict | None:
+    """The post-flight scorecard written alongside a flight log, if any.
+
+    Absent for flights recorded before scorecards existed, and for a flight
+    the backend never saw disarm (a crash, a killed process) — so callers must
+    treat None as "not available", never as "nothing to report".
+    """
+    card = path.with_suffix(".scorecard.json")
+    if not card.exists():
+        return None
+    try:
+        return json.loads(card.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 @router.get("/{name}")
 def get_log(name: str):
     if not NAME_RE.match(name):
@@ -79,4 +98,5 @@ def get_log(name: str):
         raise HTTPException(404, "Log not found")
     meta, samples = _read_log(path)
     return {"name": name, "meta": meta, "samples": samples,
-            "duration": _duration(samples)}
+            "duration": _duration(samples),
+            "scorecard": _scorecard_for(path)}
