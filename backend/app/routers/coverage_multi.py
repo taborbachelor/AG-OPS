@@ -23,6 +23,8 @@ class MultiRequest(BaseModel):
     water_buffer: float = Field(15, ge=0, le=200)
     tree_buffer: float = Field(10, ge=0, le=200)
     building_buffer: float = Field(10, ge=0, le=200)
+    # Airframe clearance, not drift margin — see gis_zones' module docstring.
+    powerline_buffer: float = Field(20, ge=0, le=200)
     home: Optional[LatLon] = None
     # Caller-supplied keepouts (e.g. detected in-field holes: farmsteads,
     # ponds). Merged with the OSM zone keepouts; honored even when the zone
@@ -96,12 +98,21 @@ def plan_multi_endpoint(req: MultiRequest):
 
     zones = {}
     zones_unavailable = False
-    buf = max(req.water_buffer, req.tree_buffer, req.building_buffer)
+    buffers = {"water": req.water_buffer, "trees": req.tree_buffer,
+               "buildings": req.building_buffer,
+               "powerline": req.powerline_buffer}
+    # Presence-aware, matching plan_auto: raise the clip buffer only for kinds
+    # actually found in the area. This used to be an unconditional max() over
+    # every per-kind field, which meant adding the (wider) powerline default
+    # would have silently widened EVERY keepout in EVERY multi-field job by
+    # 5 m even where no line exists — losing real acreage to a hazard that
+    # isn't there. User keepouts keep the water default, as in plan_auto.
+    buf = req.water_buffer if user_keepouts else 0.0
     keepouts = list(user_keepouts)
     try:
         z = fetch_zones(clat, clon, radius)
         zones = z
-        for kind in ("water", "trees", "buildings"):
+        for kind in ("water", "trees", "buildings", "powerline"):
             for zone in z.get(kind, []) or []:
                 ring = list(zone.get("coords", []))
                 if len(ring) >= 2 and ring[0] == ring[-1]:
@@ -114,6 +125,7 @@ def plan_multi_endpoint(req: MultiRequest):
                                    "complex to clip — shrink the job area",
                         "error": "zone_too_complex"})
                 keepouts.append(ring)
+                buf = max(buf, buffers[kind])
         if len(keepouts) > _MAX_ZONE_RINGS:
             # Never silently drop keepouts (dropping = spraying them).
             raise HTTPException(400, {
@@ -121,7 +133,9 @@ def plan_multi_endpoint(req: MultiRequest):
                            "too many to clip; shrink the job area",
                 "error": "too_many_zones"})
         # Same conservative choice as plan_auto: clip with the largest of the
-        # per-kind buffers (over-standoff never sprays a keepout).
+        # per-kind buffers actually present (over-standoff never sprays a
+        # keepout; see plan_auto's docstring for the accepted consequence
+        # that a nearby power line widens the other kinds too).
     except ValueError as e:
         raise HTTPException(422, str(e))
     except RuntimeError as e:

@@ -277,6 +277,39 @@ Newest first isn't required — kept chronological. This section is an append-on
 add a new dated entry here rather than editing old ones. Everything above the `---` is the
 "living" reference — keep that current and reorganize freely.
 
+#### Lane B item 1 — powerline keepouts SHIPPED (2026-08-18)
+- **OSM `power=line` / `power=minor_line` buffer keepouts, end to end**, per
+  `POWERLINE-KEEPOUTS.md` (that doc is now marked SHIPPED and carries the full detail).
+  Backend: one added Overpass clause in the SAME round-trip, `powerline` classify branch with an
+  `location=underground` exclusion, `_LINEAR_KEYS` generalizing the waterway corridor branch, a
+  `powerline` zone bucket (always present), power relations skipped. Routers: `powerline_buffer`
+  default **20 m** — lateral FLIGHT clearance, not spray drift, because this is the one keepout
+  kind that protects the airframe rather than the crop. Frontend: hazard-yellow rendering in both
+  maps, a buffer control, legend entry, and an always-on OSM-incompleteness warning.
+  **281 backend tests** (+17, `test_zones_powerline.py`), 6 frontend tests, frontend builds.
+- **Three defects found while implementing, all fixed in the same pass:**
+  1. **The waterway corridor path had NO unit tests at all** — `_corridor_ring` and the linear
+     branch shipped in the 2026-08-15 hardening pass uncovered, so the design doc's "test it like
+     the existing waterway tests" had nothing to copy. Both are now covered.
+  2. **`plan_multi`'s clip buffer was an unconditional `max()`** over every per-kind field (only
+     `plan_auto` was presence-aware). Adding the wider powerline default there would have silently
+     widened EVERY keepout in EVERY multi-field job by 5 m even with no line in the area. Now
+     presence-aware, matching `plan_auto`; two tests pin it.
+  3. **No-spray zones never rendered in the 3D view** — `MapView3D`'s zone loop read
+     `poly.polygon` (the sprayFields shape) while zones arrive as `{kind, coords, tags}`, so every
+     zone was silently skipped. Live whenever the operator finished drawing and the app returned
+     to 3D. Fixed; corridors now draw as ground polylines (a zero-area ring renders nothing as a
+     polygon) and get real stroke weight in 2D as well, where ditch corridors were 1px and
+     effectively invisible.
+- **Operational finding — the demo site has no mapped lines.** Live Overpass at Sabetha
+  (39.9042, -95.7997, 5 km): water 54, buildings 205, trees 2, **powerline 0**. Correct but inert
+  there; will not show in the flagship demo. Verified working against real data elsewhere (Topeka
+  KS: 29 lines). This is the sparse-rural-OSM failure mode this project already hit with parcel
+  boundaries, and why the "absence of a mapped line is not evidence of no line" note is always-on.
+- **Next in Lane B:** connector-leg rerouting around keepouts. It just became materially more
+  urgent — a transit leg crossing a keepout is still only COUNTED (`keepout_overflights` + amber
+  warning), not rerouted, and for a powerline that is a collision rather than a wasted pass.
+
 #### Doc reconciliation + full re-verification on a new machine (2026-08-18)
 - **No code changes.** Session was a state audit: read every project doc, verified claims against
   the repo, re-ran the whole verification suite, and fixed the doc drift that had accumulated.

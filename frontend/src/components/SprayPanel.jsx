@@ -60,6 +60,9 @@ function SprayPanel({
   const [bufWater, setBufWater] = useState(15);
   const [bufTrees, setBufTrees] = useState(10);
   const [bufBuildings, setBufBuildings] = useState(10);
+  // Lateral FLIGHT clearance, not a spray-drift margin — hence the wider
+  // default. Backend mirrors this (routers/coverage*.py powerline_buffer).
+  const [bufPowerline, setBufPowerline] = useState(20);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [zonesNote, setZonesNote] = useState('');
@@ -205,6 +208,7 @@ function SprayPanel({
           fields: jobFields.map((f) => f.polygon),
           swath, alt,
           water_buffer: bufWater, tree_buffer: bufTrees, building_buffer: bufBuildings,
+          powerline_buffer: bufPowerline,
           home: homePos || undefined,
           keepouts: holeKeepouts.length ? holeKeepouts : undefined,
           allow_missing_zones: allowMissingZones || undefined,
@@ -237,12 +241,15 @@ function SprayPanel({
         setZonesNote(holeKeepouts.length
           ? 'Zone service down — only detected in-field holes are avoided'
           : 'Zones unavailable — paths do not avoid no-spray areas');
-        setZones(holesAsZones.length ? { water: [], trees: [], buildings: [], holes: holesAsZones } : null);
+        setZones(holesAsZones.length
+          ? { water: [], trees: [], buildings: [], powerline: [], holes: holesAsZones }
+          : null);
       } else if (data.zones && data.zones.water) {
         setZones({
           water: data.zones.water || [],
           trees: data.zones.trees || [],
           buildings: data.zones.buildings || [],
+          powerline: data.zones.powerline || [],
           holes: holesAsZones,
         });
       }
@@ -422,6 +429,10 @@ function SprayPanel({
           <NumField label="Water buf" value={bufWater} unit="m" onChange={setBufWater} />
           <NumField label="Tree buf" value={bufTrees} unit="m" onChange={setBufTrees} />
           <NumField label="Bldg buf" value={bufBuildings} unit="m" onChange={setBufBuildings} />
+          <NumField label="Powerline buf" value={bufPowerline} unit="m" onChange={setBufPowerline} />
+          <div className="spray-hint" style={{ textAlign: 'left' }}>
+            Powerline standoff is lateral flight clearance, not spray drift.
+          </div>
         </div>
 
         <button className="control-btn success" onClick={() => generate()}
@@ -470,7 +481,19 @@ function SprayPanel({
             <div className="spray-hint" style={{ textAlign: 'left' }}>
               Legend: <span style={{ color: '#00e5ff' }}>■ spray</span> ·{' '}
               <span style={{ color: '#ff9100' }}>■ transit</span> ·{' '}
-              <span style={{ color: '#b388ff' }}>■ home legs</span>
+              <span style={{ color: '#b388ff' }}>■ home legs</span> ·{' '}
+              <span style={{ color: '#3b82f6' }}>■ water</span> ·{' '}
+              <span style={{ color: '#00e676' }}>■ trees</span> ·{' '}
+              <span style={{ color: '#ffd600' }}>■ powerline</span>
+            </div>
+            {/* ALWAYS on, not only on lookup failure: the dangerous case here
+                is "the query succeeded but under-counted". OSM coverage of
+                rural distribution lines is inconsistent — this project already
+                hit that exact failure mode with parcel boundaries near
+                Sabetha. Absence of a mapped line is NOT evidence of no line. */}
+            <div className="spray-note" style={{ textAlign: 'left' }}>
+              Powerline keepouts are OSM-sourced and may be incomplete —
+              confirm the field visually before flight.
             </div>
           </div>
         )}

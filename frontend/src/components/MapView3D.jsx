@@ -36,7 +36,14 @@ const ZONE_COLOR = {
   trees: GREEN,
   buildings: ORANGE,
   holes: RED,
+  // Hazard yellow: a powerline keepout protects the airframe, not the crop.
+  powerline: Cesium.Color.fromCssColorString('#ffd600'),
 };
+
+// Linear features (waterways, power lines) arrive as zero-area corridor
+// rings; a Cesium polygon over them renders nothing at all. Draw a ground
+// polyline instead so the keepout is actually visible in the 3D view.
+const isCorridor = (z) => !!(z && z.tags && (z.tags.waterway || z.tags.power));
 
 const LEG_STYLE = {
   spray: { color: CYAN, width: 3 },
@@ -293,8 +300,22 @@ export default function MapView3D({
         const color = ZONE_COLOR[kind];
         if (!color || !Array.isArray(polys)) continue;
         for (const poly of polys) {
-          const ring = (poly.polygon || poly);
+          // Zones come from the API as {kind, coords, tags}. This used to
+          // read poly.polygon (the sprayFields shape), which is undefined
+          // here — so NO no-spray zone has ever rendered in the 3D view.
+          const ring = (poly.coords || poly.polygon || poly);
           if (!Array.isArray(ring) || ring.length < 3) continue;
+          if (isCorridor(poly)) {
+            add({
+              polyline: {
+                positions: ring.map((p) => cart(p.lat, p.lon, 0)),
+                width: 4,
+                material: color,
+                clampToGround: true,
+              },
+            });
+            continue;
+          }
           add({
             polygon: {
               hierarchy: new Cesium.PolygonHierarchy(

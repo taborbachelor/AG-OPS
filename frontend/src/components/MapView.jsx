@@ -56,8 +56,26 @@ const CMD_COLOR = {
 };
 
 // No-spray zone tints: water blue, trees green, buildings orange, and
-// detected in-field holes (farmsteads/ponds) red.
-const ZONE_COLOR = { water: '#3b82f6', trees: '#00e676', buildings: '#ff9100', holes: '#ff5c5c' };
+// detected in-field holes (farmsteads/ponds) red. Powerlines are hazard
+// yellow ON PURPOSE — every other zone protects spray quality, a powerline
+// protects the airframe, so it must not read as another soft tint.
+const ZONE_COLOR = {
+  water: '#3b82f6', trees: '#00e676', buildings: '#ff9100',
+  holes: '#ff5c5c', powerline: '#ffd600',
+};
+
+// Linear features (waterway ditches/streams, power lines) come back as
+// ZERO-AREA corridor rings — the line traced out and back — so a fill
+// renders nothing and a 1px stroke is nearly invisible on imagery. Draw
+// them as real strokes instead, or the operator cannot see the keepout the
+// planner just routed around.
+const isCorridor = (z) => !!(z && z.tags && (z.tags.waterway || z.tags.power));
+
+const zoneStyle = (kind, z) => (isCorridor(z)
+  ? { color: ZONE_COLOR[kind], weight: 3, opacity: 0.95,
+      dashArray: kind === 'powerline' ? '10 5' : undefined, fillOpacity: 0 }
+  : { color: ZONE_COLOR[kind], weight: 1, opacity: 0.7,
+      fillColor: ZONE_COLOR[kind], fillOpacity: 0.25 });
 
 // Whole-job flight legs: spray-on solid, in-field hops faint, inter-field
 // transit orange, home legs purple — the operator sees the ENTIRE flight.
@@ -276,13 +294,12 @@ function MapView({
         <FitJob fields={sprayFields} area={sprayArea} drawing={sprayDrawing} />
 
         {/* No-spray zones (semi-transparent tints under everything else) */}
-        {zones && ['water', 'trees', 'buildings', 'holes'].map((kind) =>
+        {zones && ['water', 'trees', 'buildings', 'holes', 'powerline'].map((kind) =>
           (zones[kind] || []).map((z, i) => (
             <Polygon
               key={`${kind}-${i}`}
               positions={z.coords.map((c) => [c.lat, c.lon])}
-              pathOptions={{ color: ZONE_COLOR[kind], weight: 1, opacity: 0.7,
-                fillColor: ZONE_COLOR[kind], fillOpacity: 0.25 }}
+              pathOptions={zoneStyle(kind, z)}
             />
           )))}
 

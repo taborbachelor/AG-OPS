@@ -6,9 +6,15 @@ stdlib-only (urllib) so the backend keeps its tiny dependency footprint.
 
 A "zone" is a closed polygon ring in the shape:
 
-    {"kind": "water"|"trees"|"buildings",
+    {"kind": "water"|"trees"|"buildings"|"powerline",
      "coords": [{"lat": ..., "lon": ...}, ...],   # first point == last point
      "tags": {...}}                               # raw OSM tags for the UI
+
+NOTE ON "powerline": water/trees/buildings are SPRAY-QUALITY keepouts (don't
+contaminate the pond, don't waste chemical on canopy). A powerline keepout is
+an AIRFRAME keepout — a low pass clipping a line is a crash, not a wasted
+pass. Same geometry, different stakes; the UI must render it as a hazard, and
+its default buffer is lateral flight clearance, not drift margin.
 """
 
 import json
@@ -70,6 +76,19 @@ def _prune_cache(now: float) -> None:
 # produces a keepout corridor of the configured water buffer around them.
 _WATERWAY_RE = "^(stream|ditch|drain|river|canal|riverbank)$"
 
+# Overhead power lines are ways too, and get the same corridor treatment.
+# power=minor_line is the tag that actually matters for rural Kansas ag
+# fields (distribution / farm feeders); power=line is transmission. Point
+# features (pole/tower) and power=cable are deliberately NOT queried: a
+# corridor needs a line, and underground cable carries no collision risk.
+_POWERLINE_RE = "^(line|minor_line)$"
+
+# Tag keys whose ways are LINEAR features — traced out-and-back into a
+# zero-area corridor ring rather than chord-closed into a polygon. Kept as a
+# set so adding a future linear kind is a one-line change in three places
+# (query, classify, parse) rather than a new branch.
+_LINEAR_KEYS = {"waterway", "power"}
+
 
 def _build_query(lat: float, lon: float, radius_m: float) -> str:
     """Build the Overpass QL query for all three zone kinds at once."""
@@ -84,6 +103,9 @@ def _build_query(lat: float, lon: float, radius_m: float) -> str:
     parts.append(f'way["building"]{around};')
     # Linear waterways (see _WATERWAY_RE above).
     parts.append(f'way["waterway"~"{_WATERWAY_RE}"]{around};')
+    # Overhead power lines (see _POWERLINE_RE above). Same single Overpass
+    # round-trip — no extra network cost, no cache-key change.
+    parts.append(f'way["power"~"{_POWERLINE_RE}"]{around};')
     body = "".join(parts)
     # 'out geom;' inlines per-node coordinates so we never need a second
     # request to resolve node references.
@@ -146,6 +168,12 @@ def _classify(tags: dict) -> str | None:
         for key, val in pairs:
             if tags.get(key) == val:
                 return kind
+    if tags.get("power") in ("line", "minor_line"):
+        # Buried lines can't be hit. Tagging them as a keepout would carve
+        # real sprayable acreage out of a field for no safety benefit.
+        if tags.get("location") == "underground":
+            return None
+        return "powerline"
     if "waterway" in tags:
         return "water"
     if "building" in tags:
@@ -220,7 +248,8 @@ def _stitch_outer_rings(members: list) -> list[list[dict]]:
 
 def _parse_overpass(payload: dict) -> dict:
     """Turn an Overpass 'out geom' response into kind-bucketed zones."""
-    zones: dict[str, list] = {"water": [], "trees": [], "buildings": []}
+    zones: dict[str, list] = {"water": [], "trees": [], "buildings": [],
+                             "powerline": []}
     for el in payload.get("elements", []):
         tags = el.get("tags") or {}  # explicit "tags": null happens in the wild
         kind = _classify(tags)
@@ -228,15 +257,20 @@ def _parse_overpass(payload: dict) -> dict:
             continue
         if el.get("type") == "way":
             geom = el.get("geometry") or []
-            if "waterway" in tags and not (
+            if (_LINEAR_KEYS & tags.keys()) and not (
                     len(geom) > 1 and geom[0] == geom[-1]):
-                # Linear waterway: corridor ring instead of chord-closing.
+                # Linear feature (waterway or power line): corridor ring
+                # instead of chord-closing across the field.
                 ring = _corridor_ring(geom)
             else:
                 ring = _close_ring(geom)
             if ring:
                 zones[kind].append({"kind": kind, "coords": ring, "tags": tags})
-        elif el.get("type") == "relation" and kind != "buildings":
+        elif (el.get("type") == "relation"
+              and kind not in ("buildings", "powerline")):
+            # Power is queried as ways only, so a power relation should never
+            # arrive; if one does, outer-ring stitching is the wrong shape for
+            # a linear feature, so skip rather than invent a polygon.
             for chain in _stitch_outer_rings(el.get("members", [])):
                 ring = _close_ring(chain)
                 if ring:
@@ -246,10 +280,10 @@ def _parse_overpass(payload: dict) -> dict:
 
 
 def fetch_zones(lat: float, lon: float, radius_m: float = 2000) -> dict:
-    """Fetch no-spray zones (water/trees/buildings) around a point.
+    """Fetch no-spray zones (water/trees/buildings/powerline) around a point.
 
     Returns {"water": [zone], "trees": [zone], "buildings": [zone],
-    "source": "overpass"}. Radius is capped at MAX_RADIUS_M and results
+    "powerline": [zone], "source": "overpass"}. Radius is capped at MAX_RADIUS_M and results
     are cached for CACHE_TTL_S. Raises ValueError for a non-finite or
     non-positive radius (client error) and RuntimeError if Overpass is
     unreachable after one retry (upstream error).

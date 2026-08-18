@@ -60,6 +60,10 @@ class AutoCoverageRequest(BaseModel):
     water_buffer: float = Field(15.0, ge=0)
     tree_buffer: float = Field(10.0, ge=0)
     building_buffer: float = Field(10.0, ge=0)
+    # Powerlines are the one keepout kind that protects the AIRFRAME rather
+    # than spray quality, so the default is lateral flight clearance (wider)
+    # rather than a drift margin. See gis_zones' module docstring.
+    powerline_buffer: float = Field(20.0, ge=0)
     # Caller-supplied keepouts (e.g. CDL-detected in-field holes), merged
     # with the OSM zones and honored even when the zone service is down.
     keepouts: Optional[list[Annotated[list[LatLon],
@@ -130,6 +134,14 @@ def plan_auto(req: AutoCoverageRequest):
     side of not spraying — never the reverse (a tree buffered like water
     wastes a little chemical; the opposite would contaminate the pond).
 
+    KNOWN CONSEQUENCE (accepted, not a bug): powerline_buffer defaults
+    wider than the rest, so when a power line is anywhere in the fetch
+    radius, water/tree/building keepouts get buffered at the powerline
+    distance too for that request. Over-conservative, never unsafe, and
+    consistent with the largest-buffer-wins choice above. The fix, if it
+    ever costs real acreage, is per-ring buffers in plan_coverage's
+    clipping step — a contained refactor, deliberately not done here.
+
     FAIL-CLOSED: if the zone lookup fails (Overpass down / rate-limited /
     query timed out), the request is refused with a 502 naming the problem —
     a normal-looking plan with zero keepouts must never be the silent
@@ -175,10 +187,11 @@ def plan_auto(req: AutoCoverageRequest):
         return {**degraded, "zones": {}, "zones_unavailable": True}
 
     buffers = {"water": req.water_buffer, "trees": req.tree_buffer,
-               "buildings": req.building_buffer}
+               "buildings": req.building_buffer,
+               "powerline": req.powerline_buffer}
     keepouts: list[list[dict]] = list(user_keepouts)
     max_buffer = req.water_buffer if user_keepouts else 0.0
-    for kind in ("water", "trees", "buildings"):
+    for kind in ("water", "trees", "buildings", "powerline"):
         for zone in zones.get(kind, []):
             ring = zone["coords"]
             if len(ring) > 1 and ring[0] == ring[-1]:

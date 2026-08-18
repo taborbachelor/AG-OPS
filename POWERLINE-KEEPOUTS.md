@@ -1,19 +1,58 @@
-# Powerline keepouts — design spec (not implemented)
+# Powerline keepouts — design spec (SHIPPED 2026-08-18)
 
-## Status (2026-08-15; re-confirmed 2026-08-18 — still not started, still unblocked, repo quiet)
-Not started, but **unblocked** — written 2026-08-14 from a read-only pass over the backend while
-another session actively owned the repo mid-refactor. That work landed on `main` as `7bb3f60`
-("Backend hardening") and touched exactly the files this doc targets: `gis_zones.py` gained
-waterway-corridor/multipolygon-stitching fixes, `coverage.py`/`coverage_multi.py` and both
-coverage routers gained the fail-closed zone-service handling and keepout-overflight tracking.
-**The design here still holds** — the corridor-ring pattern (`_corridor_ring`, the linear-tag
-branch in `_parse_overpass`) that this doc leans on is exactly what `gis_zones.py` extended for
-waterways in that same hardening pass, so the "generalize the waterway branch to also cover
-`power`" approach is, if anything, more clearly the right move now. Re-read the current file
-contents before implementing (this doc no longer cites line numbers for that reason), but the
-structural approach below is unchanged. See `SPRAY-FLIGHT-SAFETY.md` item 5 (live
-keepout-proximity monitor) — that item reuses the same keepout data and geometry primitive this
-feature needs, so the two pair naturally.
+## Status (2026-08-18) — IMPLEMENTED
+Shipped end-to-end, backend + frontend, following the design below. 281 backend tests green
+(+17 new in `backend/tests/test_zones_powerline.py`), 6 frontend tests green, frontend builds.
+
+**What landed:**
+- `gis_zones.py`: one added Overpass clause (same round-trip), `_classify` returns `"powerline"`
+  for `power=line|minor_line` and `None` for `location=underground`, `_LINEAR_KEYS = {"waterway",
+  "power"}` generalizes the corridor branch, `zones` gained a `"powerline"` bucket (always
+  present, even empty), and power relations are skipped (we query ways only).
+- `routers/coverage.py` + `routers/coverage_multi.py`: `powerline_buffer` (default 20 m).
+- `MapView.jsx` / `MapView3D.jsx` / `SprayPanel.jsx`: hazard-yellow rendering, a buffer control,
+  legend entry, and the always-on OSM-incompleteness warning.
+
+**Three things found while implementing that the design did not anticipate:**
+
+1. **There were NO existing waterway tests to copy.** This doc said to unit-test powerline "the
+   same way the existing waterway tests already fake one" — but `_corridor_ring` and the linear
+   waterway branch shipped in the 2026-08-15 hardening pass with zero unit coverage. The new test
+   file covers both, so the corridor path that ditches and power lines share is now pinned.
+
+2. **`plan_multi`'s clip buffer was an UNCONDITIONAL `max()`** over every per-kind field, not
+   presence-aware as this doc assumed ("both routers already pick max() across whichever kinds are
+   present"). That is true of `plan_auto` only. Adding the wider powerline default to the
+   unconditional max would have silently widened EVERY keepout in EVERY multi-field job by 5 m
+   even where no line exists — losing real acreage to a hazard that isn't there. `plan_multi` is
+   now presence-aware, matching `plan_auto`. Two tests pin it.
+
+3. **No-spray zones never rendered in the 3D view at all.** `MapView3D`'s zone loop read
+   `poly.polygon` (the `sprayFields` shape); zones arrive as `{kind, coords, tags}`, so
+   `Array.isArray` failed and every zone was skipped. Live whenever the operator finished drawing
+   in SPRAY view and the app returned to 3D. Fixed in the same pass (`poly.coords` first), and
+   corridors now draw as ground polylines because a zero-area ring renders nothing as a polygon.
+   The same zero-area problem made waterway corridors nearly invisible in 2D at 1px — corridors
+   now get real stroke weight in both views.
+
+## Operational finding — READ BEFORE DEMOING THIS
+Live Overpass query, 5 km radius around the Sabetha demo/home point (39.9042, -95.7997):
+**water 54, buildings 205, trees 2, powerline 0.** There are no mapped overhead lines near the
+demo site, so this feature is correct but INERT there and will not appear in the flagship demo.
+The pipeline is confirmed working against real data elsewhere — Topeka KS returns 29
+(23 `line`, 6 `minor_line`). This is exactly the sparse-rural-OSM failure mode the project already
+hit with parcel boundaries near Sabetha, and exactly why the "absence of a mapped line is not
+evidence of no line" warning is always-on rather than shown only on lookup failure.
+
+Second, smaller live finding: a 5 km query over a built-up area (Lincoln NE) trips the existing
+`MAX_RESPONSE_BYTES` 30 MB cap and fails closed with a 502. Adding the power clause grows the
+payload slightly, so an area that previously sat just under the cap could now tip over. The
+direction is safe (refuse to plan, never silently drop zones), but if it bites, the fix is a
+tighter radius or a per-kind query split, not a bigger cap.
+
+---
+
+## Original design (kept for provenance — implemented as written unless noted above)
 
 ## Why this is next on the roadmap
 Known gap already logged in this project's notes: "powerlines not in CDL — future: OSM
