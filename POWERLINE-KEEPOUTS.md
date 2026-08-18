@@ -1,6 +1,6 @@
 # Powerline keepouts — design spec (not implemented)
 
-## Status (2026-08-15)
+## Status (2026-08-15; re-confirmed 2026-08-18 — still not started, still unblocked, repo quiet)
 Not started, but **unblocked** — written 2026-08-14 from a read-only pass over the backend while
 another session actively owned the repo mid-refactor. That work landed on `main` as `7bb3f60`
 ("Backend hardening") and touched exactly the files this doc targets: `gis_zones.py` gained

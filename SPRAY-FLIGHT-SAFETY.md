@@ -1,26 +1,25 @@
 # Spray-phase flight safety + data tracking — gap analysis
 
-## Status (2026-08-15)
+## Status (updated 2026-08-18)
 Items 1–3 below (EKF variance, vibration, airspeed/stall-margin monitors) plus Part 3A (flight
-log widening) are **DONE** — implemented, unit-tested, and committed on branch
-`worktree-spray-safety-monitors` (commits `94c4d76`, `c401628`), built in an isolated git
-worktree while another session owned `main`'s working tree. The other session's "Backend
-hardening" pass landed on `main` as `7bb3f60` (also touched `vehicle_manager.py`, but in
-different functions — `_request_data_streams`, `_guardian_tick`'s landing-RTL suppression,
-`snapshot()`'s NaN scrubbing — none of which overlap the TelemetryData fields / message-parsing /
-`_maybe_log` regions this work touches). This branch has already been **rebased cleanly onto
-`7bb3f60`** (no conflicts) and **264 backend tests pass** — it's ready for a fast-forward merge
-into `main` whenever that's wanted; nobody has to resolve anything by hand.
+log widening) are **DONE AND MERGED TO `main`** — commits `94c4d76` and `c401628`, which sit
+directly on top of the other session's "Backend hardening" pass (`7bb3f60`). They were built in
+an isolated git worktree while that session owned `main`'s working tree, rebased cleanly (the two
+sessions touched `vehicle_manager.py` in disjoint functions), and merged on 2026-08-16. The
+worktree and the `worktree-spray-safety-monitors` branch no longer exist; `main` is the only
+branch local and on GitHub. **264 backend tests pass** — re-verified 2026-08-18.
+
+**The important caveat on that "DONE":** those three monitors have **unit tests only**. Nothing
+drives them against a real telemetry stream. That was blocked on SITL port 5760 being held by a
+concurrent dev instance — **that contention is gone**, so Part 3C (scenario proof) is the honest
+completion of items 1–3, not optional polish.
 
 Everything below item 3, and all of Part 3B/3C, is still **not implemented** — this file remains
 a hand-off spec for that remaining work.
 
-Originally written 2026-08-14 from a read-only pass over the current backend (`guardian.py`,
+Originally written 2026-08-14 from a read-only pass over the backend (`guardian.py`,
 `preflight.py`, `vehicle_manager.py`, `eventlog.py`, `backend/tests/sitl/`) while another session
-actively owned the repo (uncommitted changes in `vehicle_manager.py`, both coverage routers,
-`mission.py`, `vehicle.py`, dev servers up on :8000/:3000, SITL bound to the default port 5760 —
-which is also why the new monitors are unit-tested only, not yet proven against a live SITL run;
-that needs its own SITL instance once the shared one is free).
+actively owned the repo.
 
 ## Open question that changes everything below (resolve before prioritizing)
 `CoverageRequest.alt` defaults to **100 m AGL**. Real ag-spray passes fly much lower (single-digit
@@ -58,7 +57,7 @@ the data-tracking items, which matter at any altitude.
 - **M4 SITL scenario harness** (`backend/tests/sitl/`): `test_scenario_{link_loss, gps_failure,
   battery_fault, rtl_recovery, link_watchdog, guardian, preflight, field_test, bench, soak}.py`.
   **Still no scenario exercises anything spray-pass-specific or proves the three new monitors
-  against a real telemetry stream** — Part 3C, still pending, blocked on the shared SITL port.
+  against a real telemetry stream** — Part 3C, still pending, no longer blocked (port is free).
 
 ## Part 2 — in-flight monitor gaps
 1. ~~EKF variance~~ **DONE.**
@@ -103,10 +102,9 @@ started; touches `routers/logs.py`, which was in the other session's modified-fi
 
 **C. Verification: new SITL scenarios, same pattern as M4.** Every monitor above needs its own
 `test_scenario_*.py` proving it fires under the exact fault it's meant to catch — mirroring
-`link_loss`/`gps_failure`/`battery_fault`. Blocked right now on the shared SITL port (5760); the
-existing harness (`backend/tests/sitl/harness.py`) hardcodes `tcp:127.0.0.1:5760`, which the other
-session's live instance holds. Do this once that's free, or by running a second SITL instance on
-non-default ports if that becomes worth the setup effort. Not started.
+`link_loss`/`gps_failure`/`battery_fault`. **No longer blocked** — the concurrent dev SITL that held port 5760 is gone, and
+`backend/tests/sitl/harness.py` (which hardcodes `tcp:127.0.0.1:5760`) runs fine; the full
+10-scenario suite was re-run green on 2026-08-18. Just close any hand-started SITL first. Not started.
 
 ## Rollout order (updated)
 1. Resolve the altitude question — still unresolved, still reorders priority.
@@ -114,8 +112,8 @@ non-default ports if that becomes worth the setup effort. Not started.
 3. Live keepout-proximity monitor (#5) — pairs naturally with `POWERLINE-KEEPOUTS.md`.
 4. Bank-angle monitor (#4), wind (#6).
 5. Post-flight scorecard (Part 3B).
-6. SITL scenario proof (Part 3C) — as soon as the shared port is free.
+6. SITL scenario proof (Part 3C) — **UNBLOCKED, and arguably now item 2**: the three merged
+   monitors are unit-tested only, so this is what turns "shipped" into "proven."
 7. Pump verification and terrain/AGL — hardware-gated, need Caleb's input first.
-8. ~~Merge `worktree-spray-safety-monitors` into `main`~~ — branch is rebased on `main` and
-   green, ready to merge whenever wanted; not yet done as of this writing (ask before merging —
-   it's the first thing this branch does that touches shared state).
+8. ~~Merge `worktree-spray-safety-monitors` into `main`~~ **DONE 2026-08-16** (`94c4d76`,
+   `c401628`); branch and worktree deleted.

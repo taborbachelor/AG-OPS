@@ -9,40 +9,40 @@
 
 ### Relevyn
 - Status: In progress
-- Location: See **CLAUDE-RELEVYN.md** (C:\Users\tabor\CLAUDE-RELEVYN.md) — full context lives there
+- Location: See **CLAUDE-RELEVYN.md** (`~\CLAUDE-RELEVYN.md`) — full context lives there
 - Description: AI brand-visibility SaaS + X/social marketing automation — completely separate from RC Plane project
 
 ### RC Plane GCS (Friend's Project)
 - **VISION:** an autonomous **field-spraying drone business**. Customer website (order → select field → schedule → pay via Stripe → confirmed + updates) + auto field selection w/ boundary snap + auto coverage flight paths + terrain intelligence (field/tree/water recognition & avoidance). GCS = operator side, website = customer side. Reality flags given to user: needs Stripe account, and commercial spraying = FAA Part 137 + chemical licensing (their homework, not blocking software).
 - Status: **Full ag-ops platform + directive milestones M1–M3 shipped, all SITL-validated** (last commit `256bbed`, 2026-07-24). Ag platform: GCS + customer website + zone-aware multi-field job planner + USDA imagery field auto-detection + 20-defect refinement audit. Directive M1–M3: observability/event-log, verified param writes, link identity (sysid/state-machine/RX-filter), parameter engine (cache/sync/validation/atomic). **All 4 hardware-blocking findings cleared.** Remaining work is hardware-gated (Cube bench test, Stripe keys, powerline data), roadmap M4+, or new ideas.
-- Location: C:\Users\tabor\rc-plane-app (custom app)
+- Location: `~\rc-plane-app` (custom app). **Paths in this file are profile-relative** — the working machine has changed at least once (was `C:\Users\tabor`, was `C:\Users\jacks` as of 2026-08-18); never hardcode a profile name.
 - GitHub: https://github.com/taborbachelor/caleb-rc-project (branch `main`) — THIS is the project repo
-- Reference: C:\Users\tabor\rc-plane (Mission Planner fork, read-only reference; separate repo taborcaleb)
+- Reference: `~\rc-plane` (Mission Planner fork, read-only reference; separate repo taborcaleb — public). NOT cloned on every machine; re-clone from GitHub if a machine lacks it.
 - Description: Custom ground control station for a friend's 3D-printed RC plane/drone
 - UI Style: DJI Agriculture UI/UX — futuristic, HUD overlays, glassmorphic panels
 - **Engineering standards: `rc-plane-app\ARCHITECTURE.md`** — UAV architecture directive adopted 2026-07-22 (professional ArduPilot/MAVLink/Mission Planner practices; read before structural changes; report changes against its final-instruction checklist)
 - Note: Completely separate from Relevyn
 
 > ### ▶ RESUME HERE (start of next session)
-> **Mission context: airframe fully printed, internals imminent. Backend flight-readiness (A1–A5), UI overhaul (B1–B3), AND a full-backend hardening audit are ALL SHIPPED and SITL-validated.** Remaining software work is small (one eyeball check + merging the safety-monitor branch); everything else pre-first-flight is hardware-gated.
+> **Mission context: airframe fully printed, internals imminent. Backend flight-readiness (A1–A5), UI overhaul (B1–B3), a full-backend hardening audit, AND the guardian safety-monitor expansion are ALL SHIPPED and on `main`.** Remaining pre-first-flight work is one eyeball check plus hardware-gated items; everything else is new feature work off the roadmap below.
 >
-> **State as of 2026-08-15 (commit `7bb3f60`, pushed, working tree clean):**
-> - **Backend:** M1a/M1b/M2/M3/M4 + guardian + preflight gate (M6) + bench kit + soak, **plus the 2026-08-15 hardening pass** (~35 audit findings fixed: guardian stands down from RTL during a landing approach, param sync/restore armed-gated, serial links get 4Hz telemetry so a SiK radio isn't saturated, zone planning FAILS CLOSED with an explicit "Plan anyway" opt-out, waterway-ditch keepout corridors, keepout-overflight warnings, never-raise eventlog — full list in the History entry). **250 unit tests + 10 live SITL scenarios green** (`pytest` / `backend\scenarios.ps1 all`, ~4 min).
+> **State as of 2026-08-18 (commit `43440d5`, pushed, working tree clean, `main` is the only branch local and remote):**
+> - **Backend:** M1a/M1b/M2/M3/M4 + guardian + preflight gate (M6) + bench kit + soak, **plus the 2026-08-15 hardening pass** (~35 audit findings fixed: guardian stands down from RTL during a landing approach, param sync/restore armed-gated, serial links get 4Hz telemetry so a SiK radio isn't saturated, zone planning FAILS CLOSED with an explicit "Plan anyway" opt-out, waterway-ditch keepout corridors, keepout-overflight warnings, never-raise eventlog — full list in the History entry). **264 unit tests + 10 live SITL scenarios green** (`pytest` / `backend\scenarios.ps1 all`, ~4 min) — re-verified 2026-08-18 on the current machine.
 > - **UI:** Vite (1s builds), 3D FLY view default (CesiumJS, key-free, attitude-true aircraft, CHASE/ORBIT/FREE cams; 2D forced for planning/drawing), NavRail progressive disclosure, server preflight verdicts + guardian chip/annunciators, SprayPanel zone-failure opt-in + overflight warnings. 6 UI tests green.
-> - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). The 2026-08-15 hardening/billing session is the only unbilled work.
+> - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). **UNBILLED as of 2026-08-18:** the 2026-08-15 hardening session, the 2026-08-15 guardian safety-monitor session, the 2026-08-16 docs/merge session, and the 2026-08-18 session. Note the transcript path changed profiles — see the method note under the billing table.
 > - **`AgOpsGCS.exe` rebuilt 2026-08-15 (53.7MB) with the hardening pass baked in**, smoke-tested: /api/health ok, app served (title AgOps GCS), /cesium Workers+Assets 200, preflight correctly not-ready with no vehicle, NaN request body → clean 422, fault injection refused without a vehicle.
 >
 > **Next-work menu:**
 > 1. **3D scene eyeball check (user's eyes required):** run `start-all.ps1`, FLY view, confirm the Cesium scene renders and the aircraft's nose leads its trail — if it flies sideways, adjust the heading offset in `MapView3D.jsx`'s `oriProp`.
 > 2. **Real Cube bench day** whenever hardware returns (Caleb's telemetry radio + receiver still pending): follow the `bench` scenario sequence — params backup → surface/servo tests → calibrations → first-flight bundle `POST /api/bench/first-flight-params {cells, apply:true}`. Data-USB → COM (115200); **PROP OFF; flight battery only after.**
 > 3. Software ideas, none started: M5 mission model/resume + connector-leg rerouting around keepouts (deliberately deferred from the audit — M5-scale), powerline keepouts (OSM power=line), customer-site 3D field preview, alert-threshold unification, Stripe keys (Caleb).
-> 4. **Guardian safety-monitor expansion — built on a branch, ready to merge, not yet merged.** A parallel session added EKF-variance / vibration / airspeed-stall-margin monitors to `guardian.py` + widened the flight log, in an isolated worktree (`rc-plane-app\.claude\worktrees\spray-safety-monitors`, branch `worktree-spray-safety-monitors`) while this session owned `main`. Already rebased clean onto `7bb3f60` (zero conflicts — disjoint files/functions), **264 tests green**. `git merge worktree-spray-safety-monitors` whenever wanted. Two new hand-off design docs at repo root from that session: **`SPRAY-FLIGHT-SAFETY.md`** (remaining monitor gaps: bank-angle, live keepout-proximity, wind, pump verification, terrain/AGL, post-flight debrief scorecard, SITL scenario proof — blocked on the shared SITL port) and **`POWERLINE-KEEPOUTS.md`** (OSM power=line buffer keepouts — now unblocked, reuses the waterway-corridor pattern this session's hardening pass just landed in `gis_zones.py`). Full detail in the History entry below.
+> 4. **Guardian safety-monitor expansion — MERGED into `main`, done.** EKF-variance / vibration / airspeed-stall-margin monitors in `guardian.py` + a widened flight log, built by a parallel session in an isolated worktree and landed as `94c4d76` + `c401628` on top of `7bb3f60`. The worktree and its branch are gone; `main` is the only branch. **264 unit tests green.** **Caveat that is still open:** those three monitors are unit-tested ONLY — no SITL scenario exercises them against a real telemetry stream (that was blocked on the shared SITL port, which is now free). See `SPRAY-FLIGHT-SAFETY.md` Part 3C. Two hand-off design docs from that session live at repo root: **`SPRAY-FLIGHT-SAFETY.md`** (remaining monitor gaps: bank-angle, live keepout-proximity, wind, pump verification, terrain/AGL, post-flight debrief scorecard, SITL scenario proof) and **`POWERLINE-KEEPOUTS.md`** (OSM power=line buffer keepouts — unblocked, reuses the waterway-corridor pattern the hardening pass landed in `gis_zones.py`). Full detail in the History entry below.
 >
 > **Get running — one command:** `.\start-all.ps1` from `rc-plane-app\` (see **Quick start** below). First run needs deps installed once (`pip install -r requirements.txt`, `npm install` ×2) — see the script's header comment or README.md.
 >
 > **Flagship demo (30 seconds):** SPRAY → Area → box some farmland near Sabetha → **Detect fields in area** (USDA traces the real fields, crop-labeled) → Generate Spray Plan (whole job: spray + orange transits + purple home legs) → Upload → FLY view → ARM & TAKEOFF.
 >
-> **Commit lineage** since the ag-platform baseline `e248499`: `2d2bc84` (M1a+exe+M1b) → `6fcf8d9` (M2) → `256bbed` (M3) → 2026-08-14 series: `8d3d629` (M4 harness) → `543400b` (guardian) → `eef43d8` (preflight gate) → `517d53f` (bench kit) → `bfd4da7` (soak) → `8e9de0c` (B1 Vite) → `9b50002` (B2 3D view) → `ba10eda` (B3 redesign) → `7bb3f60` (backend hardening, HEAD).
+> **Commit lineage** since the ag-platform baseline `e248499`: `2d2bc84` (M1a+exe+M1b) → `6fcf8d9` (M2) → `256bbed` (M3) → 2026-08-14 series: `8d3d629` (M4 harness) → `543400b` (guardian) → `eef43d8` (preflight gate) → `517d53f` (bench kit) → `bfd4da7` (soak) → `8e9de0c` (B1 Vite) → `9b50002` (B2 3D view) → `ba10eda` (B3 redesign) → `7bb3f60` (backend hardening) → `94c4d76` + `c401628` (guardian EKF/vibration/airspeed monitors, merged from the worktree branch) → `b46350a` (hand-off design docs) → `b0122e6` (track CLAUDE-CALEB.md) → `43440d5` (README exe/Python notes, HEAD).
 >
 > Read **"Dev loop"** + **"Real-hardware bench testing"** below before touching the backend/SITL.
 
@@ -194,10 +194,64 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
 - USDA CDL despeckle can bridge a 1px pinch between two adjacent fields — delete+redraw if separation matters
 - CropScape's `GetCDLData` endpoint was retired server-side; `cdl.py` uses `GetCDLFile` — check the WSDL first if field detection breaks again
 
-#### Still TODO
-- **3D scene eyeball check** (only open software item from 2026-08-14): run `start-all.ps1`, confirm the Cesium view renders and the aircraft's nose leads its trail; if sideways, adjust the heading offset in MapView3D's oriProp.
-- **Hardware-gated:** Cube bench day (script = the `bench` scenario sequence: backup → surface/servo tests → calibrations → `POST /api/bench/first-flight-params {cells, apply:true}`); telemetry radio + receiver (Caleb's task); Stripe live keys (Caleb); WebRTC/HLS video (needs HD video hardware); terrain intelligence phase 2 (needs camera + companion computer).
-- **Software next-ideas (not started):** M5 mission model & resume; powerline keepouts (OSM power=line buffers); customer-site 3D field/flight preview; alert-threshold unification (AlertCenter vs guardian config). Billing table updated 2026-08-15 (covers through the 2026-08-14 session; the 2026-08-15 session itself is the only unbilled one).
+#### Still TODO (reordered 2026-08-18)
+- **BLOCKING QUESTION for Caleb — ask before prioritizing the safety work:** `CoverageRequest.alt`
+  defaults to **100 m AGL**, but real ag-spray passes fly single-digit to low-double-digit meters.
+  At 100 m over flat Kansas the bank-angle / stall / terrain monitors are near-theoretical; at real
+  spray altitude they are what keeps the airframe intact. The answer reorders everything below.
+  (Also ask: what sensing does the pump path actually have — flow/pressure, or PWM-only?)
+- **3D scene eyeball check** (needs the user's eyes, still open): run `start-all.ps1`, FLY view,
+  confirm the Cesium scene renders and the aircraft's nose leads its trail; if sideways, adjust the
+  heading offset in `MapView3D.jsx`'s `oriProp`.
+- **Software, ready to start now (all specced, repo quiet, nothing blocking):**
+  1. **SITL scenario proof for the three merged guardian monitors** (`SPRAY-FLIGHT-SAFETY.md`
+     Part 3C) — EKF-variance / vibration / airspeed-stall are unit-tested ONLY and have never seen a
+     real telemetry stream. The port contention that blocked this is gone. This is the honest
+     completion of work already called "shipped."
+  2. **Live keepout-proximity monitor** (`SPRAY-FLIGHT-SAFETY.md` #5) — today only the *planned*
+     path is clipped around keepouts; nothing checks the *flown* position in real time. Primitive
+     already exists (`dist_to_zone_m`).
+  3. **Powerline keepouts** (`POWERLINE-KEEPOUTS.md`) — OSM `power=line`/`minor_line` corridors,
+     additive to `gis_zones.py` + both coverage routers + `MapView`/`MapView3D`/`SprayPanel`.
+     Protects the airframe, not spray quality — treat as a hazard in the UI.
+  4. **Post-flight scorecard** (`SPRAY-FLIGHT-SAFETY.md` Part 3B) — min keepout distance, min RTL
+     margin, max bank, sub-threshold variance spikes, clip counts, guardian warning counts, emitted
+     on disarm alongside `_close_log`.
+  5. **Bank-angle monitor** (#4) and **wind** (#6 — `WIND` is not currently subscribed; confirm it's
+     in the requested `MAV_DATA_STREAM` set first).
+  6. **M5** mission model/persistence/resume + connector-leg rerouting around keepouts (crossings
+     are currently only *counted* as `keepout_overflights` with an amber warning).
+  7. **M7 layer restructure** — `vehicle_manager.py` is **1,866 lines** (was 815 when the directive
+     was adopted). Biggest architectural debt in the repo; strangler moves only, never big-bang.
+  8. **Alert-threshold unification** (last M6 slice) — `AlertCenter`'s client-side thresholds vs
+     `guardian` config are two sources of truth for when to warn.
+  9. Config management (still ABSENT per `GAP-ANALYSIS.md`); customer-site 3D field/flight preview.
+- **Ops / verification items, small and low-collision (surfaced 2026-08-18):**
+  - **`AgOpsGCS.exe` does not exist on this machine** and the last built exe predates the guardian
+    monitor merge — a Cube bench day would have nothing to run. Rebuild per README (frontend bundle
+    first, then PyInstaller), after any in-flight backend work lands.
+  - **Mission Planner compatibility checklist (`ARCHITECTURE.md`) is largely unverified.** M2's own
+    note says SITL's separate ports (5760/5762) cannot reproduce a *shared-endpoint* co-GCS
+    collision, so cross-GCS sysid filtering is covered by unit tests only. Needs a real co-connect
+    test and a run through the ten-item checklist.
+  - **`backend/tests/sitl/harness.py` hardcodes `tcp:127.0.0.1:5760`.** That is what makes SITL
+    single-occupancy and blocks two sessions from running scenarios concurrently. Parameterizing it
+    is a small change that unblocks real parallel work.
+  - **Connector-leg rerouting gets materially more urgent the moment powerline keepouts land** —
+    a transit leg crossing a keepout is currently only *counted* (`keepout_overflights` + amber
+    warning), not rerouted. For a water/tree keepout that is a wasted pass; for a powerline it is a
+    collision. Sequence the two together.
+  - **The "Kansas is flat" assumption is implicit in every guardian monitor.** `SPRAY-FLIGHT-SAFETY.md`
+    #8 asks for it to be written down explicitly (e.g. `guardian.py`'s module docstring). Not
+    hardware-gated; anyone can do it.
+- **Parallelism note (2026-08-18):** the safety/telemetry work (`guardian.py`, `vehicle_manager.py`,
+  `routers/safety.py`, `routers/logs.py`, `tests/sitl/`) and the planner/GIS/hazard-UI work
+  (`gis_zones.py`, both coverage routers, `MapView*.jsx`, `SprayPanel.jsx`) are file-disjoint and
+  can run as two concurrent sessions via `EnterWorktree`. **M7 and M5 cannot** — `vehicle_manager.py`
+  is 1,866 lines with 63 functions and 8 of 10 routers import it, so any extraction or mission-model
+  change collides with everything. Run those solo.
+- **Hardware-gated:** Cube bench day (script = the `bench` scenario sequence: backup → surface/servo tests → calibrations → `POST /api/bench/first-flight-params {cells, apply:true}`); telemetry radio + receiver (Caleb's task); Stripe live keys (Caleb); WebRTC/HLS video (needs HD video hardware); terrain intelligence phase 2 (needs camera + companion computer); pump/spray-system verification (needs Caleb's answer on sensing).
+- **Billing:** table covers through the 2026-08-14 session. UNBILLED: 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16 (docs/merge), 2026-08-18.
 
 #### Design ideas (proposed, NOT implemented; user hasn't picked yet)
 - Tier 1 (recommended as one "flight safety & feedback" release — mostly now shipped, see History "List-finish session"): pre-flight checklist card gating ARM (with override); aviation-style alerts/annunciators + optional voice callouts; post-flight summary card on disarm; "RTL margin" can-I-get-home indicator
@@ -214,7 +268,7 @@ Running log of Claude Code token-usage cost, computed at Anthropic API list-pric
 
 **Cumulative:** cost basis **$1,327.68**, with margin **$1,593.22**.
 
-**To extend this table in a future session:** re-run the same transcript-parsing method for any *new* session(s) since the last logged period (check `~/.claude/projects/C--Users-tabor-rc-plane-app/` for the current session ID, and `~/.claude/projects/C--Users-tabor/<session-id>.jsonl` + its `subagents/` dir for token usage), add a new row, and keep a running cumulative total if useful.
+**To extend this table in a future session:** re-run the same transcript-parsing method for any *new* session(s) since the last logged period (check `~/.claude/projects/<profile>-rc-plane-app/` for the current session ID, and `~/.claude/projects/<profile>/<session-id>.jsonl` + its `subagents/` dir for token usage — the `<profile>` segment encodes whatever Windows profile that machine used, e.g. `C--Users-tabor` or `C--Users-jacks`), add a new row, and keep a running cumulative total if useful.
 
 ---
 
@@ -223,7 +277,40 @@ Newest first isn't required — kept chronological. This section is an append-on
 add a new dated entry here rather than editing old ones. Everything above the `---` is the
 "living" reference — keep that current and reorganize freely.
 
-#### Guardian safety-monitor expansion (2026-08-15) — SHIPPED on branch, not yet merged
+#### Doc reconciliation + full re-verification on a new machine (2026-08-18)
+- **No code changes.** Session was a state audit: read every project doc, verified claims against
+  the repo, re-ran the whole verification suite, and fixed the doc drift that had accumulated.
+- **Re-verified green on the current machine** (profile `C:\Users\jacks`, Python 3.13.12,
+  Node v24.15.0): **264 backend unit tests** (12.5s), **10/10 live SITL scenarios**
+  (`scenarios.ps1 all`, 4m05s — battery-fault, bench, field-test, gps-failure, guardian,
+  link-loss, link-watchdog, preflight, rtl-recovery, soak), **6 frontend tests** (Vitest).
+  Environment was already fully installed here (venv, both node_modules, sitl binaries);
+  `backend/dist/AgOpsGCS.exe` is not built on this machine.
+- **Three stale doc claims corrected:**
+  1. **The guardian safety-monitor branch was described as "ready to merge, not yet merged" in
+     both the RESUME block and `SPRAY-FLIGHT-SAFETY.md` — it had actually been merged.** `94c4d76`
+     and `c401628` sit on `main` on top of `7bb3f60`; the worktree and the
+     `worktree-spray-safety-monitors` branch are gone, and `main` is the only branch local and on
+     GitHub. The 264-test count is the post-merge number. Corrected in both places, with the real
+     remaining gap called out: those three monitors are **unit-tested only** and still have no SITL
+     scenario driving them (`SPRAY-FLIGHT-SAFETY.md` Part 3C) — and the port contention that
+     blocked that work is gone, so it is now the top of the queue rather than a blocked item.
+  2. **`GAP-ANALYSIS.md` M7 still cited `vehicle_manager.py` at 815 lines. It is 1,866** — the
+     module more than doubled while the strangler extraction stayed unstarted. Noted there and in
+     Still TODO as the largest architectural debt in the repo.
+  3. **Windows profile paths were hardcoded to `C:\Users\tabor`** throughout this file (the machine
+     has changed at least twice). Made profile-relative, including the billing-table transcript
+     method note, which encodes the profile in its `~/.claude/projects/<profile>/` path.
+- **Still TODO rewritten and reordered** into a start-now list (SITL scenario proof → live
+  keepout-proximity → powerline keepouts → post-flight scorecard → bank-angle/wind → M5 → M7 →
+  alert-threshold unification), with the two blocking questions for Caleb promoted to the top:
+  the real spray altitude (`CoverageRequest.alt` still defaults to 100m AGL, which reorders every
+  low-altitude safety item) and what sensing the pump path actually has.
+- **Billing state corrected:** the resume block claimed 2026-08-15 was the only unbilled session.
+  Four are unbilled — 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16
+  (docs/merge), 2026-08-18 (this one).
+
+#### Guardian safety-monitor expansion (2026-08-15) — SHIPPED; MERGED to `main` 2026-08-16
 - **Two Claude Code sessions ran in parallel on the same repo** — this one and the session that
   shipped the "Backend hardening" entry below. Kept safe via a **git worktree**
   (`rc-plane-app\.claude\worktrees\spray-safety-monitors`, branch `worktree-spray-safety-monitors`)
@@ -267,8 +354,12 @@ add a new dated entry here rather than editing old ones. Everything above the `-
   above real crop-dusting altitude — worth confirming the actual target spray altitude with
   Caleb, since it reorders which remaining monitor gaps (bank-angle, terrain/AGL) are urgent
   versus theoretical for a while yet.
-- **Not yet merged to `main`** — branch is rebased onto `7bb3f60`, tested, and ready;
-  `git merge worktree-spray-safety-monitors` whenever wanted.
+- **MERGED to `main`** (verified 2026-08-18): the work landed as `94c4d76` + `c401628` directly
+  on top of `7bb3f60`; the worktree and the `worktree-spray-safety-monitors` branch are both gone,
+  and `main` is the only branch local and on GitHub. 264 unit tests green on the current machine.
+  **Still open from this work:** the three new monitors have unit tests only — no SITL scenario
+  drives them against a live telemetry stream yet (`SPRAY-FLIGHT-SAFETY.md` Part 3C; the port
+  contention that blocked it is gone).
 
 #### Backend hardening audit + fixes (2026-08-15) — full-backend defect sweep SHIPPED
 - **Full audit of every backend module** (~5,000 lines; core read line-by-line, planning/GIS + orders/logging swept by parallel reviewers): ~35 findings, all actionable ones fixed same session. Themes: silent fail-open paths, concurrency around the link lock, SITL-vs-real-hardware differences.
@@ -421,4 +512,4 @@ add a new dated entry here rather than editing old ones. Everything above the `-
 ## Notes
 - Git configured globally: taborbachelor@gmail.com / "Tabor Bachelor"
 - Node.js v24.18.0 installed at C:\Program Files\nodejs (needs PATH export in bash)
-- Python 3.13 at C:\Users\tabor\AppData\Local\Programs\Python\Python313
+- Python 3.13 at `~\AppData\Local\Programs\Python\Python313` (3.13.12 on the 2026-08-18 machine; `backend\venv` is the interpreter the exe is built against)
