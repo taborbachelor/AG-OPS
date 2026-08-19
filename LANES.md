@@ -101,16 +101,46 @@ what you're actually building, which the registry can't know.
 
 ### AIR — onboard enforcement
 *Goal: the aircraft survives and obeys with **zero link**.*
-- **Session:** `1681cef0` (alpha) · **Working on:** item 1, polygon exclusion fences uploaded to the
-  FC. **AIR is live now, so S2/S3 have an owner** — bravo, don't wait on your proposed numbers, I'll
-  accept or supersede them in the decisions log and say so here.
+- **Session:** `1681cef0` (alpha) — **CLOSED 2026-08-19, all work pushed, claims released.**
+- **Shipped:** item 1 (polygon exclusion fences) + the MAVLink 2 migration that item 1 turned out to
+  require. `45faa48` `0a928c7` `54ce0d9`. S2 accepted, S3 semantic ruled — see the decisions log.
+- **Verification state:** 320 unit tests green, **15 SITL scenarios green in 5:10** (all 14
+  pre-existing ones re-proven on MAVLink 2, plus the new `onboard-fence` scenario).
+
+> #### 📋 FOR WHOEVER WRITES `CLAUDE-CALEB.md`'s RESUME HERE (charlie holds DOCS)
+> AIR could not edit that file — DOCS was claimed. These are the facts it needs:
+>
+> 1. **The link is now MAVLink 2.** `vehicle_manager` calls `mavutil.set_dialect()` at import.
+>    `mission_type` is a MAVLink 2 message extension; on the old v10 bindings a fence or rally
+>    transfer is accepted as a **regular mission** and silently overwrites the flight plan while
+>    reporting success at every step. **Do not revert** — rally points need this too.
+> 2. **Exclusion fences ship hazard rings to the FC**, built from the same `keepout_watch.prepare()`
+>    rings the proximity monitor uses, so hard fence and soft monitor cannot diverge. Only HAZARDS
+>    are fenced; the ring goes up raw; overflow refuses rather than truncates; home inside or within
+>    30 m of an exclusion is refused. New: `app/onboard_fence.py`, `upload_fence`/`download_fence`/
+>    `clear_fence`, `GET /api/safety/exclusions`, and `push_to_vehicle` on `POST /api/safety/keepouts`.
+> 3. 🔴 **CORRECTION — `terrain/N39W096.DAT` IS A 0-BYTE PLACEHOLDER.** Both `CLAUDE-CALEB.md` and
+>    this file previously described it as terrain data "sitting unused", which reads as *we have the
+>    data, just wire it up*. **We do not have it.** There is no terrain data in the repo and no
+>    `TERRAIN_*` handling in the backend. Terrain following needs the `TERRAIN_REQUEST`/`TERRAIN_DATA`
+>    protocol implemented in the GCS **plus a real SRTM data source** — comparable in size to the
+>    fence work, and it needs a bundle-vs-fetch decision from Tabor. Please fix this wording wherever
+>    it appears; it is actively misleading about how much work item 2 is.
+> 4. **Rally points are now unblocked** by the MAVLink 2 change and are the recommended next AIR
+>    item — a link-loss RTL currently flies a straight line home, possibly straight through the
+>    powerline corridor we just fenced. Fences stop the aircraft entering; rally points give it
+>    somewhere correct to go. That pairing is the whole link-loss story.
+> 5. **`AgOpsGCS.exe` still does not exist on this machine** and now also predates the MAVLink 2
+>    change. A bench day still has nothing to run.
 
 1. **Polygon exclusion fences uploaded to the FC.** Greenfield, verified 2026-08-19: nothing sets
    `FENCE_TYPE` bit 4 (`FENCE_TYPE_CIRCLE_ALT = 3` is alt+circle only), and keepouts exist *only*
    in the GCS. Upload the plan's keepout polygons over `MISSION_TYPE_FENCE` so they're enforced
    onboard with no link. Consume the payload in **Seam S1**; wire the caller in `routers/mission.py`.
-2. **Terrain following.** Also greenfield — `guardian.py`'s docstring says outright there's no
-   terrain awareness, and `terrain/N39W096.DAT` sits unused. At 10–25 m AGL this is not optional.
+2. **Terrain following.** Bigger than it looks — see the correction above. `terrain/N39W096.DAT`
+   is **0 bytes**; there is no terrain data and no `TERRAIN_*` handling. Needs the
+   `TERRAIN_REQUEST`/`TERRAIN_DATA` protocol in the GCS plus an SRTM source (Tabor's call:
+   bundle tiles or fetch). Still not optional at 10–25 m AGL — just not a small job.
 3. **Rally points** — so a link-loss RTL diverts to a safe alternate instead of flying home
    *through* a mapped powerline. Only the `mission_rally` capability bit is decoded today.
 4. A SITL scenario proving each of the above with the link deliberately dead.
@@ -300,3 +330,55 @@ Newest at the bottom. One row per decision no session may silently reverse. Reve
 4. Update `CLAUDE-CALEB.md`'s `▶ RESUME HERE` — re-read it immediately before writing, since another
    session may have just restructured it. (`DOCS` area — claim it or coordinate.)
 5. `py tools\claim.py release --session <id>`, drop any resources, commit and push.
+
+---
+
+## Findings from the first three-session run (2026-08-19, bravo)
+
+Written for the coordination redesign, not as a complaint about this one. This board plus the
+registry did work — three sessions shipped four features into one repo with no lost edits and no
+merge conflicts. These are the things the next design should account for, in rough order of how
+much they cost.
+
+1. **The guard binds to the session's project directory, not to the repo.** `.claude/settings.json`
+   is project-level, so a session started from `C:\Users\jacks` never loads it even while working
+   `rc-plane-app`. **Two of the three sessions today ran unguarded** and did not know it until they
+   tried the `CLAIM_WHOAMI` handshake and got nothing back. It was patched mid-session with a
+   home-level wrapper hook — which lives in machine config, so it protects this machine and travels
+   to no other. A design that assumes the hook is present needs to *verify* it is present, and say
+   so loudly when it is not, because the failure is silent and looks exactly like working normally.
+
+2. **Heartbeats renew through the hook, so an unguarded session's claim decays while it works.**
+   90 minutes in, its area is free for someone else to claim out from under it. Renewing by hand
+   (re-running `claim`, which is idempotent) works, but only if you know you have to.
+
+3. **All three sessions shared ONE working tree.** The registry stops overlapping *edits*; nothing
+   stops overlapping *files*. `git add -A` stages other lanes' work in progress — alpha had four
+   files staged in the index at the moment bravo committed, and only an explicit pathspec
+   (`git commit -- <paths>`) kept them out. Test runs are the same story: "419 green" included two
+   other lanes' uncommitted code, so a suite result is not evidence about your own change alone.
+   Per-session worktrees would make both problems structural rather than procedural — with the
+   `node_modules` junction warning in rule 6 still applying.
+
+4. **The guard blocks read-only commands, including the one that fixes your claim.** `MUTATORS`
+   treats any `>` not followed by `&` as a redirect, so a Python one-liner containing the two
+   characters `-` and `>` reads as a write; `PATHISH` then extracts every `.py` on the line and
+   checks each one. That blocked a diagnostic that wrote nothing. Worse, once `tools/` was claimed,
+   `py tools\claim.py claim ...` was itself blocked — **the command you need in order to hold a
+   claim requires you to already hold one.** Any redesign wants an explicit always-allowed list for
+   its own control commands.
+
+5. **The seam register carried the value; file locking was the cheap part.** File-disjointness was
+   settled in minutes and never contended. Everything genuinely hard was a cross-lane *agreement*
+   the registry cannot represent: S2 (two bank numbers that must not disagree), S5 and S6 (planner
+   surfaces whose safety value only exists once UI renders them). If only one mechanism survives
+   the redesign, keep this one.
+
+6. **Areas are disjoint by file but not by concept.** PLANNER's commanded-bank ceiling and AIR's
+   measured-bank monitor are two constants in two lanes that must agree; nothing about the file
+   split hints at that. The seam register caught it because a human wrote it down, not because the
+   tooling could infer it. Concept-level ownership — "who owns *bank*" — is the gap.
+
+7. **What never came up:** `sitl-5760` was never contended (neither planner item needed it), and no
+   session ever asked Tabor for an overlap grant. The lock machinery is fine; it just was not the
+   binding constraint on a day when the work happened to split cleanly.
