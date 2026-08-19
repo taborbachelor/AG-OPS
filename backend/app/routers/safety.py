@@ -241,6 +241,25 @@ def clear_keepouts(clear_fence: bool = False):
     return out
 
 
+@router.get("/exclusions")
+def get_exclusions():
+    """Polygon exclusion fence points the VEHICLE actually holds.
+
+    Distinct from `/geofence`, which is the circular FENCE_* parameter set
+    (radius + max altitude). This is the MISSION_TYPE_FENCE point list: the
+    hazard rings pushed down by `POST /keepouts`, enforced onboard with no
+    link.
+
+    Read back off the vehicle rather than reported from local state -- a send
+    is not proof that the FC holds it, which is the lesson M1b already paid
+    for with parameter writes.
+    """
+    supported, why = vehicle_manager.fence_transfer_supported()
+    items = vehicle_manager.download_fence() if vehicle_manager.connected else []
+    return {"supported": supported, "reason": why or None,
+            "points": len(items), "items": items}
+
+
 @router.get("/guardian")
 def get_guardian():
     """Guardian config + live verdicts. Works without a vehicle (config is

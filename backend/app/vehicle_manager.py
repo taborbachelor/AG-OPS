@@ -1,5 +1,6 @@
 import inspect
 import math
+import os
 import threading
 import time
 import json
@@ -9,6 +10,28 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from pymavlink import mavutil
+
+# --- MAVLink 2 dialect selection. Must run before ANY module-level constant
+# below is captured, and before the first mavlink_connection() call.
+#
+# pymavlink defaults to the v10 (MAVLink 1) dialect, where `mission_type` --
+# a MAVLink 2 message EXTENSION -- does not exist on MISSION_COUNT/
+# MISSION_ITEM_INT/MISSION_ACK at all. On those bindings every mission
+# message is implicitly type 0 (MISSION), which means a FENCE or RALLY
+# transfer is accepted by the vehicle as a regular mission and silently
+# overwrites the flight plan. That failure reports success at every step,
+# which is what makes it dangerous rather than merely broken.
+#
+# set_dialect() is used rather than only setting MAVLINK20 in the environment
+# because it rebinds mavutil.mavlink deterministically no matter which module
+# imported pymavlink first -- config.py, param_meta.py and routers/bench.py
+# all import mavutil too, and their order is not guaranteed.
+#
+# ArduPilot 4.x speaks MAVLink 2 natively and still parses v1 frames, so this
+# is the protocol the vehicle already expects. Cost is a 12-byte frame header
+# instead of 8, which matters only on a slow SiK link.
+os.environ.setdefault("MAVLINK20", "1")
+mavutil.set_dialect(os.environ.get("MAVLINK_DIALECT", "ardupilotmega"))
 
 from app.eventlog import log_event
 from app import config
@@ -2161,6 +2184,47 @@ class VehicleManager:
     def clear_fence(self) -> dict:
         """Remove every fence point from the vehicle (count 0 transfer)."""
         return self.upload_fence([])
+
+    def download_fence(self) -> list[dict]:
+        """Read the fence back off the vehicle.
+
+        Read-back is the only way to know the FC actually holds what we think
+        it holds -- the same reason M1b made param writes verify their echo
+        instead of trusting a send. Returns [] when the protocol is
+        unsupported rather than raising, since callers treat this as a check.
+        """
+        if not self.connection:
+            return []
+        ok_proto, _ = self.fence_transfer_supported()
+        if not ok_proto:
+            return []
+        conn = self.connection
+        ftype = getattr(mavutil.mavlink, "MAV_MISSION_TYPE_FENCE", 1)
+        out = []
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.mission_request_list_send(
+                    conn.target_system, conn.target_component, mission_type=ftype)
+            count_msg = self._recv_blocking(conn, "MISSION_COUNT", 5)
+            if not count_msg or getattr(count_msg, "mission_type", ftype) != ftype:
+                return []
+            for i in range(count_msg.count):
+                with self._send_lock:
+                    conn.mav.mission_request_int_send(
+                        conn.target_system, conn.target_component, i,
+                        mission_type=ftype)
+                item = self._recv_blocking(
+                    conn, ["MISSION_ITEM_INT", "MISSION_ITEM"], 5)
+                if item is None or getattr(item, "mission_type", ftype) != ftype:
+                    continue
+                out.append({"seq": item.seq, "command": item.command,
+                            "lat": item.x / 1e7, "lon": item.y / 1e7,
+                            "vertex_count": int(item.param1)})
+            with self._send_lock:
+                conn.mav.mission_ack_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_MISSION_ACCEPTED, mission_type=ftype)
+        return out
 
 
 def _json_sanitize(obj):

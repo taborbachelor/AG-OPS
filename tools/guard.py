@@ -29,12 +29,44 @@ CLAIM = os.path.join(HERE, "claim.py")
 
 # Bash/PowerShell is only inspected when the command actually mutates something.
 # Read-only greps and cats over another lane's files are fine and common.
+#
+# The redirect clause deliberately excludes two things that look like writes and
+# are not: fd duplication (`2>&1`, `>&2`) and `/dev/null`. Without those
+# exclusions a plain `pytest ... 2>&1 | tail` reads as a mutation, and every
+# path mentioned anywhere on the line gets checked -- which blocked a read-only
+# test run on this very repo.
 MUTATORS = re.compile(
     r"(^|[\s;|&])(sed\s+-i|rm\b|mv\b|cp\b|tee\b|truncate\b|dd\b|"
     r"npm\s+(run\s+)?build|pyinstaller|git\s+(checkout|restore|reset|clean|apply|revert))"
-    r"|>>?\s*\S", re.I)
+    r"|>>?\s*(?!&)(?!/dev/null)(?!NUL)\S", re.I)
 
 PATHISH = re.compile(r"[\w./\\-]+\.(py|jsx|js|ts|tsx|css|html|ps1|sh|json|md|spec)\b")
+
+
+def _strip_heredocs(cmd: str) -> str:
+    """Drop heredoc BODIES before scanning.
+
+    A heredoc body is data, not command: `git commit -F - <<'EOF' ... EOF`
+    carries a commit message that may name any number of files it is merely
+    describing. Scanning it produced confident, wrong blocks -- a commit
+    message mentioning config.py read as an attempt to write config.py.
+    Only the command line itself decides what is being touched.
+    """
+    out, lines = [], cmd.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        out.append(lines[i])
+        m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", lines[i])
+        if m:
+            tag = m.group(2)
+            i += 1
+            while i < n and lines[i].strip() != tag:
+                i += 1          # body: skipped entirely
+            if i < n:
+                i += 1          # and the terminator
+            continue
+        i += 1
+    return "\n".join(out)
 
 
 def _targets(tool, ti):
@@ -43,7 +75,7 @@ def _targets(tool, ti):
         p = ti.get("file_path") or ti.get("notebook_path")
         return [p] if p else []
     if tool in ("Bash", "PowerShell"):
-        cmd = ti.get("command") or ""
+        cmd = _strip_heredocs(ti.get("command") or "")
         if not MUTATORS.search(cmd):
             return []
         return list(dict.fromkeys(m.group(0) for m in PATHISH.finditer(cmd)))
