@@ -13,6 +13,7 @@ the others what they need to know, and stop. Read the board freely and recommend
 when asked.
 
 Where things live:
+- **`.agops/RUNBOOK.md`** — how a work session actually runs, start to finish.
 - **`.agops/README.md`** — how coordination works, and every command. Read it if
   anything below is unclear.
 - **`CLAUDE-CALEB.md`** — the project brain: current state, resume notes, dev
