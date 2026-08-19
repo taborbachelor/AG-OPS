@@ -5,7 +5,7 @@
 | Item | State |
 |---|---|
 | 1-3. EKF variance / vibration / airspeed-stall monitors | Shipped earlier; **now SITL-proven** (2 of 3 — see Part 3C) |
-| 4. Bank angle | **DONE** — `bank` monitor + `bank-angle` scenario |
+| 4. Bank angle | **DONE, BOTH HALVES** — in-flight: `bank` monitor + `bank-angle` scenario. Planning-time: the turn-geometry constraint in `coverage.py` (2026-08-19) |
 | 5. Live keepout proximity | **DONE** — `keepout_watch.py` + `keepout` monitor + `keepout-prox` scenario |
 | 6. Wind | **DONE** — `WIND`/`WIND_COV` parsed; confirmed streamed, no extra subscription |
 | 7. Pump/spray verification | **BLOCKED** — pump sensing undecided (asked 2026-08-18) |
@@ -15,9 +15,9 @@
 | 3C. SITL scenario proof | **DONE for what can be proven** — vibration is unprovable on this SITL (see Part 3C) |
 
 Verification: **366 backend unit tests + 14 SITL scenarios + 13 frontend tests.**
-The two remaining open items are both hardware-gated. The highest-value software follow-up is no
-longer in this doc — it is the **planning-time turn-geometry constraint in `coverage.py`** (the
-other half of item 4), which the bank-angle measurements below made a lot more urgent.
+The two remaining open items are both hardware-gated. The highest-value software follow-up used to
+live outside this doc — the **planning-time turn-geometry constraint in `coverage.py`** (the other
+half of item 4) — and it **shipped 2026-08-19**; see the closing section.
 
 ## Earlier status (kept for provenance — updated 2026-08-18)
 Items 1–3 below (EKF variance, vibration, airspeed/stall-margin monitors) plus Part 3A (flight
@@ -250,10 +250,39 @@ the endpoint without also adding a scenario that works.
 8. ~~Merge `worktree-spray-safety-monitors` into `main`~~ **DONE 2026-08-16** (`94c4d76`,
    `c401628`); branch and worktree deleted.
 
-## What this doc no longer covers — the next thing worth doing
-The bank-angle work turned up the one finding that should drive the next piece of software:
+## The successor to this doc — SHIPPED 2026-08-19 (`coverage.py`)
+The bank-angle work turned up the one finding that drove the next piece of software:
 **the aircraft banks 50-65 deg in ordinary autopilot turns, and a real spray pass flies at
-10-25 m.** In-flight detection is now in place, but detection cannot make a turn gentler. The
-mitigation is the **planning-time turn-geometry constraint in `coverage.py`** — cap the commanded
-bank the serpentine turn geometry can produce at spray altitude. That lives in the planner
-(Lane B's file set), not here, and it is the natural successor to this document.
+10-25 m.** In-flight detection could see it but could not make a turn gentler. The mitigation — the
+**planning-time turn-geometry constraint in `coverage.py`** — is now in.
+
+**What the planner was actually asking for.** A 180 between passes `d` apart is a half-circle of
+radius `d/2`, and a coordinated turn needs `R = V²/(g·tanφ)`. Turning onto the ADJACENT pass at a
+20 m swath means R = 10 m, which at 18 m/s is **73.2 deg of bank**. That is past what the airframe
+can fly — so the 50-65 deg this doc measured was not the aircraft choosing a steep turn, it was
+**the autopilot saturating its roll limit while failing to track a plan that was never flyable.**
+That reframes the finding: the plan was the fault, not the tuning.
+
+**The fix** is the crop-duster answer: do not turn onto the neighbour. Fly every Nth line and fill
+the gaps on later sweeps, so each reversal has `2·R_min` of room. Every line is still flown exactly
+once — **coverage is bit-identical, only the order changes**. Default ceiling 25 deg
+(`coverage.DEFAULT_MAX_BANK_DEG`), which sits under this doc's own low-altitude monitor threshold
+of 31.5 deg with margin for L1 overshoot and gusts. Measured on real field shapes: **73.2 → 25.3 deg
+on a 40-acre Sabetha-shaped field, at +38% path length**; +19% on 400×200 m; +26% on 800×800 m.
+Flight time is what safety costs here, and the planner spends it by default.
+
+**Two honest limits, both reported in `stats.turn_*` rather than hidden.** A field narrower than
+`2·R_min` cannot satisfy the limit by ordering alone; the planner flies the widest turns the field
+allows, sets `turn_bank_ok: false`, and returns `turn_max_speed_ms` — the speed that would meet the
+limit, since R falls with V². And detour corners around hazard hulls are not constrained; the pass
+turnaround is the one that repeats hundreds of times per job at 15 m AGL.
+
+**What the `bank` monitor is for now.** It stops being the thing that catches routine turns and
+becomes what its own comments always said it should be: the check on what the plan did NOT command
+— a gust, control saturation, or a stick input. If it keeps firing on a constrained plan, the
+aircraft is not flying the plan, and that is a different and more interesting problem.
+
+**Next, if anyone wants to go further:** the planner does not command speed (`speed_ms` is an
+estimate input), and slowing the turn buys more than reordering does. A per-field speed
+recommendation, or turn waypoints synthesised outside the field boundary, are both real follow-ups.
+

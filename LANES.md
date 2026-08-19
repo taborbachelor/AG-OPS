@@ -101,7 +101,9 @@ what you're actually building, which the registry can't know.
 
 ### AIR — onboard enforcement
 *Goal: the aircraft survives and obeys with **zero link**.*
-- **Session:** — · **Working on:** —
+- **Session:** `1681cef0` (alpha) · **Working on:** item 1, polygon exclusion fences uploaded to the
+  FC. **AIR is live now, so S2/S3 have an owner** — bravo, don't wait on your proposed numbers, I'll
+  accept or supersede them in the decisions log and say so here.
 
 1. **Polygon exclusion fences uploaded to the FC.** Greenfield, verified 2026-08-19: nothing sets
    `FENCE_TYPE` bit 4 (`FENCE_TYPE_CIRCLE_ALT = 3` is alt+circle only), and keepouts exist *only*
@@ -115,21 +117,59 @@ what you're actually building, which the registry can't know.
 
 ### PLANNER — coverage, GIS, hazards
 *Goal: the plan is flyable.*
-- **Session:** — · **Working on:** —
+- **Session:** `c63d3a97` (bravo) · **Working on:** item 1, the turn-geometry bank constraint
+  — **SHIPPED**, see below. **S2 answered with a number and a measurement** (decisions log);
+  alpha owns accepting or superseding it. **S3 untouched** — the constraint keys off SPEED, not
+  altitude, so it does not need the AGL question settled and I have not pre-empted it.
+  ⚠️ **The PreToolUse guard does not load for bravo either**, same cause charlie documented
+  (project dir is the home directory, not the repo). I held the PLANNER boundary by discipline;
+  every file I touched is inside my claim. My claim also never auto-heartbeats for the same
+  reason — I renew it by re-running `claim`, so treat a stale-looking bravo claim as suspect
+  rather than dead.
 
-1. **🔥 Turn-geometry bank constraint in `coverage.py`** — highest-value open safety item. Measured:
-   50–65° banks in ordinary loiter/RTL turns, past `ROLL_LIMIT_DEG`, while a spray pass flies
-   10–25 m AGL where that bank has no recovery altitude. Detection exists; the planner must stop
-   commanding them. Threshold agreement is **Seam S2**.
+1. ~~**🔥 Turn-geometry bank constraint in `coverage.py`**~~ **DONE 2026-08-19 (bravo).**
+   The planner no longer turns onto the adjacent pass. It flies every Nth line and fills the gaps
+   on later sweeps, so each reversal gets `2 * R_min` of lateral room at the planned speed
+   (`R = V²/(g·tanφ)`). Every line is still flown exactly once — **coverage is bit-identical, only
+   the ORDER changes** — and the price is hop distance, measured below. `stats.turn_*` reports the
+   geometry actually built, never the geometry requested. On by default (`max_bank_deg=25`),
+   `0` restores the old serpentine. 18 new tests; 409 unit tests green.
+
+   **The measurement that justifies it:** the old adjacent-line serpentine demanded **73.2°** of
+   bank at 20 m swath / 18 m/s. That is past what the airframe can fly, which is *why* SITL saw
+   50–65° — the autopilot was saturating its roll limit, not tracking the plan. Real 40-acre
+   Sabetha-shaped field: **73.2° → 25.3°, at +38% path length**. 400×200 m: 73.2° → 33.5°, +19%.
+   800×800 m: 73.2° → 22.4° (inside the limit), +26%.
+
+   **Two limits worth knowing, both reported rather than hidden.** (a) A field narrower than
+   `2·R_min` cannot satisfy the limit by ordering alone — the widest turn is bounded by the field.
+   The planner flies the widest geometry available and reports `turn_bank_ok: false` plus
+   `turn_max_speed_ms`, the speed that WOULD meet the limit, because R falls with V² and slowing
+   down is the only remaining lever. (b) Detour corners around hazard hulls, and same-heading
+   repositions, are not modelled — the pass turnaround is the one that happens hundreds of times
+   per job at 15 m AGL.
+
+   **Caught and fixed en route:** `_order_segments_around_hazards` is a nearest-unflown greedy, and
+   nearest-unflown *is* the adjacent pass — so it silently undid the whole constraint on any field
+   with a hazard on it. Which is the worst possible place to lose it. It now ranks
+   spacing-satisfying candidates first and only accepts a tight turn when nothing else is
+   reachable. Regression-tested (`test_hazard_ordering_does_not_re_tighten_the_turns`).
 2. **Headlands** — justified by measurement: 0.41 and 0.56 acres genuinely missed on real Sabetha
    fields. `coverage_pct` verifies the fix.
 
 ### UI — GCS operator frontend
 *Goal: effortless.*
-- **Session:** — · **Working on:** —
+- **Session:** `b06ca0f4` (charlie) · **Working on:** item 1, the scorecard panel — **SHIPPED**,
+  see below. ⚠️ **The PreToolUse guard does not load for charlie.** It is wired in the repo's
+  `.claude/settings.json`, but charlie's project dir is the home directory, not the repo, so
+  repo-level project settings never apply. Charlie holds the UI boundary by discipline, not by the
+  hook — and so does any other session started from the home directory rather than the repo.
 
-1. **Scorecard UI in `LogsPanel.jsx`.** Confirmed 2026-08-19: zero occurrences of `scorecard` in
-   that file. The backend writes one on every disarm and serves it on `GET /api/logs/{name}`
+1. ~~**Scorecard UI in `LogsPanel.jsx`.**~~ **DONE 2026-08-19 (charlie).** New
+   `components/Scorecard.jsx` rendered from the playback view, a `scorecard` badge on list rows
+   that have one, 8 new tests (24 frontend total), both invariants mutation-checked. It holds **no
+   thresholds** — the card carries none and M6 keeps threshold judgement in the guardian, so the
+   only thing coloured is the guardian's own per-monitor warning counts. Original finding: The backend writes one on every disarm and serves it on `GET /api/logs/{name}`
    (+ `has_scorecard` in the list view), and no operator can see it. Min hazard distance, min RTL
    margin, max bank, warning counts per monitor. Pure consumer of an existing surface — no seam.
 2. **One-verdict preflight.** `preflight.py` already computes blockers vs advisories server-side;
@@ -162,9 +202,10 @@ until its owner has run the connected path end to end.
 | # | Seam | Owner | State |
 |---|---|---|---|
 | **S1** | **Keepout payload shape.** PLANNER emits `keepouts: list[list[LatLon]]` + `keepout_buffer: float` (`routers/coverage.py:45-48`); AIR uploads exactly that to the FC as exclusion fences. Change the shape and AIR's upload breaks silently. | PLANNER announces, AIR consumes | OPEN |
-| **S2** | **Bank limit agreement.** PLANNER constrains planned turn geometry; AIR's guardian bank monitor warns on measured bank. Two numbers on opposite sides that must agree — the exact defaults-disagree failure class. One source of truth, named in the decisions log. | AIR | OPEN |
+| **S2** | **Bank limit agreement.** PLANNER constrains planned turn geometry; AIR's guardian bank monitor warns on measured bank. **Bravo has proposed a number: planner commands ≤ 25° (`coverage.DEFAULT_MAX_BANK_DEG`), sitting under guardian's 31.5° low-altitude threshold (`bank_warn_deg 45 × bank_low_alt_factor 0.7`, and a spray pass is entirely below `bank_low_alt_m`). The 6.5° gap is the margin for L1 overshoot, wind gradient and gusts — plan to the monitor's threshold and every headland trips it.** Rationale in the decisions log. **AIR: accept or supersede.** | AIR | PROPOSED, awaiting AIR |
 | **S3** | **Altitude semantics.** `CoverageRequest.alt` defaults to **100 m**, a known-wrong placeholder; real spray is **10–25 m AGL**. AIR's terrain following makes altitude mean AGL rather than relative-to-home. Settle it once, here, before either ships. | AIR + PLANNER jointly | OPEN |
 | **S4** | **Auto-connect vs `vehicle_manager.connect`.** OPS may only add router/frontend logic. The moment it needs a change inside `vehicle_manager.py`, this seam opens and AIR makes that change. | AIR | NOT TRIGGERED |
+| **S5** | **Turn-geometry readout.** Every plan now carries `stats.turn_bank_deg`, `turn_bank_ok`, `turn_radius_m` and `turn_max_speed_ms`. On a field too narrow to satisfy the limit `turn_bank_ok` is **false** and nothing shows it — the operator is told the plan is fine when it still commands 30–60° at spray height. Additive keys, so nothing breaks by ignoring them; the safety value is only realised when they render. Suggested minimum: surface `turn_bank_ok: false` next to the existing coverage/hazard warnings, with `turn_max_speed_ms` as the fix (“fly this field at ≤ X m/s”). | UI | OPEN — raised by bravo, PLANNER work complete |
 
 ---
 
@@ -180,6 +221,9 @@ Newest at the bottom. One row per decision no session may silently reverse. Reve
 | 2026-08-19 | **Guardian belongs onboard, eventually.** Every monitor runs on the laptop today and goes silent exactly when the link drops. `guardian.py` is pure logic with full unit coverage, so it ports to a companion computer without a rewrite. This reframes M7 as the air/ground split, not generic cleanup. | Tabor + Claude | — |
 | 2026-08-19 | **AIR ships no frontend.** Enforcement is wired backend-side so no AIR feature depends on a UI change from another session. Direct consequence of the `86c6a6e` cross-lane bug. | Claude | — |
 | 2026-08-19 | **Overlap prevention is mechanical, not advisory** — claim registry + PreToolUse hook, deny-by-default once 2+ sessions are live, overrides only via Tabor's token. Replaces the two-lane honour system this file started as. | Tabor + Claude | the original 2-lane LANES.md |
+| 2026-08-19 | **The planner commands at most 25° of bank; guardian keeps warning at 45° (31.5° low).** Two numbers on purpose, not a disagreement: the planner's is what the mission may *ask for*, the monitor's is what the aircraft must never *reach*. Planning to the monitor's threshold would trip it on every headland, so the planner sits a 6.5° margin under it for L1 overshoot, wind gradient and gusts. `coverage.DEFAULT_MAX_BANK_DEG = 25.0`. **Proposed by bravo (PLANNER); AIR owns S2 and may supersede this row.** | Claude (bravo) | — |
+| 2026-08-19 | **Turn geometry is bought with path length, not with coverage.** Widening every turn costs +19% to +38% flight time on real field shapes, and the planner spends it by default rather than asking. A spray pass has no recovery altitude for a stall-spin, and the alternative was commanding 73° the airframe cannot fly. Not a silent trade: `max_bank_deg=0` restores the old geometry, and the achieved numbers ride in every plan's stats. **If Tabor decides the battery cost is unacceptable, change the ONE default — do not reintroduce adjacent-line ordering.** | Claude (bravo) | — |
+| 2026-08-19 | **A plan that cannot meet the bank limit is still returned, with the truth attached.** Narrow fields are bounded by their own width, so the planner flies the widest turns available and reports `turn_bank_ok: false` + `turn_max_speed_ms`. Deliberately NOT a fail-closed 409 like hazard crossings: that pattern needs a client-side opt-in flag, which would put PLANNER's safety gate behind a UI change owned by another lane — the `86c6a6e` bug shape. Reporting is owned end-to-end by the planner; **S5** asks UI to render it. | Claude (bravo) | — |
 
 ---
 

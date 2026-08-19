@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.coverage import DEFAULT_MAX_BANK_DEG
 from app.coverage_multi import plan_multi
 from app.gis_zones import fetch_zones
 
@@ -37,6 +38,9 @@ class MultiRequest(BaseModel):
     # See routers/coverage.py — a leg that still crosses a powerline corridor
     # is a path through the conductor, not a statistic.
     allow_hazard_crossings: bool = False
+    # Turn-geometry bank ceiling, per field. See routers/coverage.py and
+    # coverage.py's turn-geometry section; 0 restores the plain serpentine.
+    max_bank: float = Field(DEFAULT_MAX_BANK_DEG, ge=0, lt=90)
 
 
 # Zone-derived keepout rings are bounded like caller keepouts — but instead of
@@ -170,6 +174,7 @@ def plan_multi_endpoint(req: MultiRequest):
             home=home, speed_ms=req.speed,
             hazards=(hazards or None),
             hazard_buffer_m=req.powerline_buffer,
+            max_bank_deg=req.max_bank,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

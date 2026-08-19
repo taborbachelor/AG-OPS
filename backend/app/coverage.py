@@ -27,6 +27,21 @@ EARTH_RADIUS_M = 6371008.8
 
 _M2_PER_ACRE = 4046.8564224
 
+_G_MS2 = 9.80665
+
+# Planner-side commanded-bank ceiling, in degrees. NOT the same number as
+# guardian's bank_warn_deg (45 deg = ArduPlane's ROLL_LIMIT_DEG default), and
+# deliberately well under guardian's LOW-ALTITUDE threshold of 31.5 deg
+# (45 * bank_low_alt_factor 0.7, applied below 30 m -- i.e. the whole of a spray
+# pass). The gap between 25 and 31.5 is the margin the aircraft needs to not
+# trip its own monitor on every turn: L1 overshoot, wind gradient and gusts all
+# add bank on top of what the geometry commands. Planning to the monitor's
+# threshold would guarantee a warning on every headland.
+# See LANES.md seam S2 -- AIR owns the final agreement between these two numbers.
+DEFAULT_MAX_BANK_DEG = 25.0
+
+# Full rationale, physics and limits: the turn-geometry section further down.
+
 
 def plan_coverage(
     polygon: list[dict],
@@ -39,6 +54,7 @@ def plan_coverage(
     work_budget: Optional[list] = None,
     hazards: Optional[list[list[dict]]] = None,
     hazard_buffer_m: float = 0.0,
+    max_bank_deg: float = DEFAULT_MAX_BANK_DEG,
 ) -> dict:
     """Plan a serpentine spray pattern over a lat/lon polygon.
 
@@ -75,6 +91,14 @@ def plan_coverage(
             stats.hazard_overflights so the operator is warned rather than
             being shown a plan that silently still crosses a line.
         hazard_buffer_m: lateral flight clearance around hazards (>= 0).
+        max_bank_deg: ceiling on the bank the plan is allowed to COMMAND in a
+            turn (0 disables the constraint and restores the plain
+            adjacent-line serpentine). Passes are ordered so each direction
+            reversal has 2 * R_min of lateral room at speed_ms; see the
+            turn-geometry section. The achieved geometry is always reported in
+            stats.turn_* -- on a field too narrow to satisfy the limit the
+            planner flies the widest turns available and says so, rather than
+            failing a plan the operator needs.
 
     Returns:
         {"waypoints": [{"lat", "lon", "alt"}, ...],  # segment endpoints in flight order
@@ -121,6 +145,10 @@ def plan_coverage(
         raise ValueError("keepout_buffer_m must be >= 0")
     if not (math.isfinite(hazard_buffer_m) and hazard_buffer_m >= 0.0):
         raise ValueError("hazard_buffer_m must be >= 0")
+    # NaN would disable the comparison and silently drop the constraint; 90 deg
+    # is a vertical bank (infinite load factor), not a limit.
+    if not (math.isfinite(max_bank_deg) and 0.0 <= max_bank_deg < 90.0):
+        raise ValueError("max_bank_deg must be a finite value in [0, 90)")
     if hazards is not None:
         for i, hz in enumerate(hazards):
             if not isinstance(hz, (list, tuple)) or len(hz) < 3:
@@ -154,7 +182,11 @@ def plan_coverage(
     sin_t = math.sin(math.radians(theta))
     rot = [(x * cos_t + y * sin_t, -x * sin_t + y * cos_t) for x, y in pts]
 
-    passes = _boustrophedon_passes(rot, swath_m)
+    # Lateral room every reversal needs: reversing between two passes d apart
+    # is a half-circle of radius d / 2, so d = 2R at the bank limit.
+    min_turn_spacing_m = (0.0 if max_bank_deg <= 0.0
+                          else 2.0 * turn_radius_m(speed_ms, max_bank_deg))
+    passes = _boustrophedon_passes(rot, swath_m, min_turn_spacing_m)
 
     # ONE CPU allowance for this plan, shared by keepout clipping AND hazard
     # rerouting. Initialised here rather than inside each phase: two separate
@@ -211,7 +243,7 @@ def plan_coverage(
     # the exact serpentine ordering they have always had.
     if hazard_hulls and len(segments) > 2:
         segments = _order_segments_around_hazards(
-            segments, hazard_hulls, hazard_tol, _charge)
+            segments, hazard_hulls, hazard_tol, _charge, min_turn_spacing_m)
 
     # Walk the full polyline (rotation preserves distance, so measure here).
     # Spray sub-segments are joined by connecting legs; a leg that would cross
@@ -277,6 +309,10 @@ def plan_coverage(
             "angle_deg": theta,
         },
     }
+    # Turn geometry, measured on the ordered spray sequence that is actually
+    # flown (segments, not the pre-clip passes): the bank this plan commands,
+    # whether it met the limit, and the speed that would if it did not.
+    result["stats"].update(_turn_stats(segments, speed_ms, max_bank_deg))
     if keepouts is not None:
         # Only in keepout mode: pre-keepout clients keep the exact legacy
         # stats shape (regression-pinned in tests).
@@ -389,8 +425,197 @@ def _line_crossings(pts: list[tuple[float, float]], c: float) -> list[tuple[floa
     return segments
 
 
+# --- turn geometry ------------------------------------------------------------
+#
+# WHY THIS EXISTS. Measured in SITL 2026-08-18: this airframe rolls to 50-65 deg
+# in ordinary autopilot turns, past ArduPlane's own ROLL_LIMIT_DEG, while a real
+# spray pass flies at 10-25 m AGL. A 60 deg bank raises stall speed ~41% and a
+# stall-spin entered there has no recovery altitude. guardian.py's bank monitor
+# already SEES this, and says so in its own comments -- but detection cannot
+# make a turn gentler. This is the half that can: the planner stops commanding
+# the geometry that forces the bank.
+#
+# THE PHYSICS. A coordinated level turn at speed V and bank phi has radius
+# R = V^2 / (g * tan phi). Reversing direction between two parallel passes
+# separated by d needs a half-circle of radius d/2, so a serpentine that turns
+# onto the ADJACENT pass line demands R = swath/2 -- 10 m on a 20 m swath. At
+# 18 m/s that is a physically impossible 73 deg of bank, which is exactly why
+# the autopilot saturates its roll limit on every headland turn today. The
+# aircraft cannot fly a tighter circle than physics allows, so it overshoots the
+# line and banks as hard as it is permitted to.
+#
+# THE FIX is the one crop-dusters have used for decades: do not turn onto the
+# neighbouring pass. Fly every Nth line and fill in the gaps on later sweeps, so
+# each turn has N * swath of lateral room instead of one swath. Every line is
+# still flown exactly once -- coverage is identical, only the ORDER changes --
+# and the price is longer connecting hops (~+20% path length on a 20-acre field
+# at the default limit).
+#
+# WHAT THIS DOES NOT COVER, deliberately, and what the reported numbers are for:
+#   * A field narrower than 2 * R_min cannot satisfy the limit by ordering
+#     alone -- the widest available turn is bounded by the field itself. The
+#     planner then flies the widest geometry there is and REPORTS the bank it
+#     still commands, rather than claiming a limit it did not meet.
+#   * Speed is the other lever, and the planner does not command it (speed_ms is
+#     an estimate input today). R falls with V^2, so slowing down buys far more
+#     than reordering: stats.turn_max_speed_ms is the speed at which the planned
+#     geometry WOULD meet the limit -- the actionable number on a narrow field.
+#   * Detour corners around hazard hulls (reroute.py) are turns too, and are not
+#     constrained here. They are rare and off the spray line; the serpentine
+#     turnaround is the one that happens hundreds of times per job at 15 m AGL.
+
+# Above this many sweep lines, skip the ordering search and take the direct
+# construction. The search is O(n^2) worst case and n is unbounded before
+# clipping (huge field / tiny swath), so it gets a ceiling like every other
+# unbounded loop in this module.
+_MAX_ORDER_SEARCH_LINES = 400
+
+
+def turn_radius_m(speed_ms: float, bank_deg: float) -> float:
+    """Radius of a coordinated level turn: R = V^2 / (g tan phi)."""
+    if bank_deg <= 0.0 or bank_deg >= 90.0:
+        return math.inf
+    return speed_ms * speed_ms / (_G_MS2 * math.tan(math.radians(bank_deg)))
+
+
+def bank_for_radius_deg(speed_ms: float, radius_m: float) -> float:
+    """Bank a coordinated level turn of this radius demands at this speed."""
+    if radius_m <= 0.0:
+        return 90.0
+    return math.degrees(math.atan(speed_ms * speed_ms / (_G_MS2 * radius_m)))
+
+
+def speed_for_turn_ms(radius_m: float, bank_deg: float) -> float:
+    """Fastest speed at which a turn of this radius stays inside this bank."""
+    if radius_m <= 0.0 or bank_deg <= 0.0:
+        return 0.0
+    return math.sqrt(_G_MS2 * radius_m * math.tan(math.radians(bank_deg)))
+
+
+def _stride_order(n: int, k: int) -> list[int]:
+    """Every kth line, then the fill-in sweeps: 0, k, 2k, ..., 1, 1+k, ...
+
+    Groups are NOT alternated (boustrophedon-style) between sweeps. Reversing
+    every other group would shorten the return hop, but it lands the sweep
+    change on two ADJACENT lines -- reintroducing the exact tight turn this
+    ordering exists to remove, once per sweep.
+    """
+    out: list[int] = []
+    for g in range(k):
+        out.extend(range(g, n, k))
+    return out
+
+
+def _interleave_order(n: int, m: int) -> list[int]:
+    """Interleave the bottom and top blocks, both walked downward.
+
+    At m = n // 2 this reaches the widest turn ANY ordering of n lines can
+    achieve (n=10: 4,9,3,8,2,7,1,6,0,5 -- every step 5 or 6 lines wide). It is
+    the ordering that matters on a field too narrow for a plain stride.
+    """
+    lo = list(range(0, n - m))[::-1]
+    hi = list(range(n - m, n))[::-1]
+    out: list[int] = []
+    for i in range(max(len(lo), len(hi))):
+        if i < len(lo):
+            out.append(lo[i])
+        if i < len(hi):
+            out.append(hi[i])
+    return out
+
+
+def _min_line_gap(order: list[int]) -> int:
+    if len(order) < 2:
+        return 0
+    return min(abs(order[i + 1] - order[i]) for i in range(len(order) - 1))
+
+
+def _order_lines(n_lines: int, target_gap: int) -> list[int]:
+    """Visit order for sweep lines, putting >= target_gap lines between turns.
+
+    Returns the cheapest ordering that MEETS the target (hop cost rises with the
+    gap, so the smallest sufficient stride wins), or -- when the field is too
+    narrow for any ordering to reach it -- the one that gets widest. The caller
+    measures the result rather than trusting it: the achieved geometry is what
+    gets reported, never the requested one.
+    """
+    if n_lines < 3 or target_gap <= 1:
+        return list(range(n_lines))
+    # No ordering of n lines can beat n // 2: lines n//2-1 and n//2 each have
+    # only one partner that far away, so both would have to be path endpoints.
+    target = min(target_gap, n_lines // 2)
+    if n_lines > _MAX_ORDER_SEARCH_LINES:
+        cand = _stride_order(n_lines, target)
+        return cand if _min_line_gap(cand) >= target else list(range(n_lines))
+    best: Optional[list[int]] = None
+    best_gap = -1
+    for t in range(target, 0, -1):
+        for cand in (_stride_order(n_lines, t), _interleave_order(n_lines, t)):
+            gap = _min_line_gap(cand)
+            if gap > best_gap:
+                best, best_gap = cand, gap
+            if gap >= target:
+                return cand
+    return best if best is not None else list(range(n_lines))
+
+
+def _turn_stats(passes, speed_ms: float, max_bank_deg: float) -> dict:
+    """Measured turn geometry of a planned pass sequence.
+
+    Measures the plan that was actually built instead of asserting the ordering
+    worked -- the ordering is a request, the geometry is the fact. Only
+    REVERSALS constrain: a transition that keeps the same heading is a
+    reposition the autopilot flies straight, not a turn.
+    """
+    worst_radius = math.inf
+    reversals = 0
+    hammerheads = 0          # reversal with no lateral room at all (see below)
+    for (a0, a1), (b0, b1) in zip(passes, passes[1:]):
+        # Passes are horizontal in the rotated frame, so heading is +/-x and the
+        # lateral room available to the turn is the y separation.
+        if (a1[0] - a0[0]) * (b1[0] - b0[0]) >= 0:
+            continue                      # same direction: no reversal to fly
+        reversals += 1
+        offset = abs(b0[1] - a1[1])
+        if offset <= 0.0:
+            # Two segments on the SAME line flown in opposite directions -- a
+            # zero-radius reversal, reachable only on a concave field where one
+            # sweep line splits into several segments. No ordering fixes it, so
+            # count it and let it show rather than reporting an infinite bank.
+            hammerheads += 1
+            continue
+        worst_radius = min(worst_radius, offset / 2.0)
+    stats = {
+        "turn_reversals": reversals,
+        "turn_zero_offset": hammerheads,
+        "turn_bank_limit_deg": round(max_bank_deg, 2),
+    }
+    if not math.isfinite(worst_radius) and hammerheads:
+        worst_radius = 0.0
+    if math.isfinite(worst_radius) and worst_radius > 0.0:
+        bank = bank_for_radius_deg(speed_ms, worst_radius)
+        stats["turn_radius_m"] = round(worst_radius, 2)
+        stats["turn_bank_deg"] = round(bank, 1)
+        stats["turn_bank_ok"] = bool(bank <= max_bank_deg + 1e-9)
+        stats["turn_max_speed_ms"] = round(
+            speed_for_turn_ms(worst_radius, max_bank_deg), 1)
+    elif worst_radius == 0.0:
+        stats["turn_radius_m"] = 0.0
+        stats["turn_bank_deg"] = 90.0
+        stats["turn_bank_ok"] = False
+        stats["turn_max_speed_ms"] = 0.0
+    else:
+        # No reversal anywhere: a single pass, or every transition same-heading.
+        stats["turn_radius_m"] = None
+        stats["turn_bank_deg"] = None
+        stats["turn_bank_ok"] = True
+        stats["turn_max_speed_ms"] = None
+    return stats
+
+
 def _boustrophedon_passes(
-    rot: list[tuple[float, float]], swath_m: float
+    rot: list[tuple[float, float]], swath_m: float,
+    min_turn_spacing_m: float = 0.0,
 ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """Ordered spray passes ((start, end) in rotated coords) for the polygon.
 
@@ -404,6 +629,13 @@ def _boustrophedon_passes(
     remaining segment endpoint on the current line. For single-segment lines
     this reduces to the classic serpentine alternation; for concave fields
     (multiple segments per line) it gives a sensible nearest-neighbor tour.
+
+    min_turn_spacing_m is the lateral room every direction reversal needs, from
+    the caller's bank limit (see the turn-geometry section above). Lines are
+    then visited in an order that provides it -- every Nth line, gaps filled on
+    later sweeps -- instead of in index order. Which lines exist, and where they
+    lie, is unchanged: coverage is identical and only the ORDER differs. 0 keeps
+    the plain adjacent-line serpentine.
     """
     ys = [y for _, y in rot]
     xs = [x for x, _ in rot]
@@ -416,6 +648,13 @@ def _boustrophedon_passes(
     n_lines = max(1, math.ceil(height / swath_m - 1e-9))
     first_y = y_min + (height - (n_lines - 1) * swath_m) / 2.0
     line_ys = [first_y + k * swath_m for k in range(n_lines)]
+
+    # Index order puts exactly one swath of lateral room in every reversal,
+    # which is what forces the measured 50-65 deg banks. Reorder so each turn
+    # gets the room the bank limit needs.
+    if min_turn_spacing_m > 0.0 and n_lines > 2:
+        target_gap = math.ceil(min_turn_spacing_m / swath_m - 1e-9)
+        line_ys = [line_ys[i] for i in _order_lines(n_lines, target_gap)]
 
     passes = []
     cur = (min(xs), y_min)  # nominal start corner -> first pass flies west-to-east
@@ -664,7 +903,22 @@ def _coverage_stats(field_rot, segments, kp_rot, kp_ybounds,
     }
 
 
-def _order_segments_around_hazards(segments, hulls, tol, charge):
+def _reversal_offset(prev_seg, cand_seg):
+    """Lateral room a turn from prev_seg onto cand_seg has, or None.
+
+    None means the two are flown in the SAME direction, so the transition is a
+    reposition rather than a reversal and the pass-spacing constraint does not
+    apply to it (see the turn-geometry section for what that does and does not
+    model). Passes are horizontal in the rotated frame, so the room available
+    is the y separation.
+    """
+    if (prev_seg[1][0] - prev_seg[0][0]) * (cand_seg[1][0] - cand_seg[0][0]) >= 0:
+        return None
+    return abs(cand_seg[0][1] - prev_seg[1][1])
+
+
+def _order_segments_around_hazards(segments, hulls, tol, charge,
+                                   min_turn_spacing_m=0.0):
     """Greedy tour over spray sub-segments that avoids hazard crossings.
 
     From the current position, prefer the nearest unflown sub-segment whose
@@ -679,6 +933,13 @@ def _order_segments_around_hazards(segments, hulls, tol, charge):
 
     The first segment is kept as the start so the pattern still begins where
     the serpentine did.
+
+    min_turn_spacing_m keeps this from quietly undoing the turn-geometry
+    ordering. Nearest-unflown is by definition the ADJACENT pass, so an
+    unconstrained greedy re-tightens every turn back to one swath the moment a
+    field has a hazard on it -- on exactly the fields where that matters most.
+    Candidates with enough lateral room are therefore ranked first, and a
+    too-tight one is taken only when nothing else is reachable.
     """
     def blocked(a, b):
         for hull in hulls:
@@ -703,10 +964,38 @@ def _order_segments_around_hazards(segments, hulls, tol, charge):
              for i, seg in enumerate(remaining)
              for rev, entry in ((False, seg[0]), (True, seg[1]))),
             key=lambda c: c[0])
+        # Spacing is pure arithmetic, so it filters BEFORE the expensive
+        # hazard test rather than after -- the tiering costs no extra
+        # blocked() calls in the common case, and the cache keeps a fallback
+        # sweep from charging the CPU budget twice for the same candidate.
+        seen = {}
+
+        def clear(i, rev):
+            key = (i, rev)
+            if key not in seen:
+                seen[key] = not blocked(
+                    pos, (remaining[i][1] if rev else remaining[i][0]))
+            return seen[key]
+
+        def oriented(i, rev):
+            seg = remaining[i]
+            return (seg[1], seg[0]) if rev else seg
+
+        def roomy(i, rev):
+            if min_turn_spacing_m <= 0.0:
+                return True
+            off = _reversal_offset(ordered[-1], oriented(i, rev))
+            return off is None or off >= min_turn_spacing_m
+
         pick = None
-        for d, i, rev in cands:
-            if not blocked(pos, (remaining[i][1] if rev else remaining[i][0])):
-                pick = (d, i, rev)
+        for tier in (True, False):
+            for d, i, rev in cands:
+                if tier and not roomy(i, rev):
+                    continue
+                if clear(i, rev):
+                    pick = (d, i, rev)
+                    break
+            if pick is not None:
                 break
         if pick is None:
             pick = cands[0]     # boxed in: accept a crossing, caller reroutes

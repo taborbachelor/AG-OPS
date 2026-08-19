@@ -11,7 +11,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.coverage import EARTH_RADIUS_M, plan_coverage
+from app.coverage import DEFAULT_MAX_BANK_DEG, EARTH_RADIUS_M, plan_coverage
 from app.gis_zones import fetch_zones
 
 router = APIRouter()
@@ -46,6 +46,13 @@ class CoverageRequest(BaseModel):
                                       Field(max_length=500)]]] = Field(
         None, max_length=100)
     keepout_buffer: float = Field(0.0, ge=0)     # m standoff around keepouts
+    # Ceiling on the bank the PLAN is allowed to command in a turn; passes are
+    # ordered to give every reversal the lateral room it needs at speed.
+    # 0 disables it and restores the plain adjacent-line serpentine, which
+    # demands ~73 deg of bank at the default swath and speed. The achieved
+    # geometry always comes back in stats.turn_* whether or not the limit was
+    # met — see coverage.py's turn-geometry section.
+    max_bank: float = Field(DEFAULT_MAX_BANK_DEG, ge=0, lt=90)
 
 
 class AutoCoverageRequest(BaseModel):
@@ -78,6 +85,13 @@ class AutoCoverageRequest(BaseModel):
     # 115 kV line before this gate existed). Warning about that is not enough
     # — the operator has to accept it deliberately.
     allow_hazard_crossings: bool = False
+    # Ceiling on the bank the PLAN is allowed to command in a turn; passes are
+    # ordered to give every reversal the lateral room it needs at speed.
+    # 0 disables it and restores the plain adjacent-line serpentine, which
+    # demands ~73 deg of bank at the default swath and speed. The achieved
+    # geometry always comes back in stats.turn_* whether or not the limit was
+    # met — see coverage.py's turn-geometry section.
+    max_bank: float = Field(DEFAULT_MAX_BANK_DEG, ge=0, lt=90)
 
 
 # Same bounds as the multi router's speed field, enforced in the handlers:
@@ -122,6 +136,7 @@ def plan(req: CoverageRequest):
             keepouts=(None if req.keepouts is None else
                       [[p.model_dump() for p in kp] for kp in req.keepouts]),
             keepout_buffer_m=req.keepout_buffer,
+            max_bank_deg=req.max_bank,
         )
     except ValueError as exc:
         # Geometry-level rejections (degenerate polygon, bad speed, fully
@@ -174,7 +189,8 @@ def plan_auto(req: AutoCoverageRequest):
     user_keepouts = ([[p.model_dump() for p in kp] for kp in req.keepouts]
                      if req.keepouts else [])
     plan_kwargs = dict(swath_m=req.swath, alt_m=req.alt,
-                       angle_deg=req.angle, speed_ms=req.speed)
+                       angle_deg=req.angle, speed_ms=req.speed,
+                       max_bank_deg=req.max_bank)
     try:
         zones = fetch_zones(clat, clon, radius)
     except ValueError as exc:

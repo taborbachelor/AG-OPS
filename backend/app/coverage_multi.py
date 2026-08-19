@@ -20,7 +20,7 @@ only in-field hops were counted.
 import math
 
 from app.coverage import (_MAX_CLIP_WORK, _detour_budget_m, _project, _unproject,
-                          EARTH_RADIUS_M, plan_coverage)
+                          DEFAULT_MAX_BANK_DEG, EARTH_RADIUS_M, plan_coverage)
 from app.reroute import hazard_hull, hull_tolerance, route_leg
 
 # Same meters-per-degree as the single-field planner, so spray lengths and
@@ -48,12 +48,18 @@ def _coverage_totals(planned: dict) -> dict:
 
 
 def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
-               home=None, speed_ms=18.0, hazards=None, hazard_buffer_m=0.0):
+               home=None, speed_ms=18.0, hazards=None, hazard_buffer_m=0.0,
+               max_bank_deg=DEFAULT_MAX_BANK_DEG):
     """Plan a multi-field job.
 
     fields: list of polygons (each a list of {lat,lon}). Fields that fail to
     plan (fully blocked / degenerate) are reported in `skipped`, never fatal
     unless NO field survives.
+
+    max_bank_deg: per-field turn-geometry bank ceiling, passed straight
+    through to plan_coverage. Transit legs BETWEEN fields are not constrained
+    by it — they are single repositions at altitude, not the hundreds of
+    low-level turnarounds the constraint exists for.
 
     hazards: keepout rings that must be FLOWN AROUND rather than overflown
     (powerlines). Applied to in-field hops by plan_coverage and to the transit
@@ -86,7 +92,8 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
                 kwargs["hazard_buffer_m"] = hazard_buffer_m
                 # Hazard rerouting draws on the same job-wide CPU allowance.
                 kwargs.setdefault("work_budget", work_budget)
-            plan = plan_coverage(poly, swath_m, alt_m, speed_ms=speed_ms, **kwargs)
+            plan = plan_coverage(poly, swath_m, alt_m, speed_ms=speed_ms,
+                                 max_bank_deg=max_bank_deg, **kwargs)
             if plan["waypoints"]:
                 planned[i] = plan
             else:

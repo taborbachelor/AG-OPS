@@ -9,7 +9,13 @@ That keeps all assertions in intuitive metric units.
 import math
 import unittest
 
-from app.coverage import EARTH_RADIUS_M, plan_coverage
+from app.coverage import (
+    EARTH_RADIUS_M,
+    bank_for_radius_deg,
+    plan_coverage,
+    speed_for_turn_ms,
+    turn_radius_m,
+)
 
 LAT0, LON0 = 39.9042, -95.7997
 _M_PER_DEG = math.pi / 180.0 * EARTH_RADIUS_M
@@ -91,9 +97,24 @@ class TestRectangle(unittest.TestCase):
                             "consecutive passes must fly opposite directions")
 
     def test_path_length(self):
-        expected = 10 * 400 + 9 * 20  # passes + serpentine hops
+        # Spray distance is fixed by the field (10 passes x 400 m); the hops are
+        # what the turn-geometry constraint costs. The plain adjacent-line
+        # serpentine hopped only 9 x 20 m, but demanded 73 deg of bank to fly
+        # it -- see coverage.py's turn-geometry section. Widening the turns to
+        # the limit costs ~800 m of extra hop on this field (~+19%).
+        expected = 10 * 400 + 980
         self.assertAlmostEqual(self.plan["stats"]["path_length_m"], expected,
                                delta=0.05 * expected)
+
+    def test_unconstrained_restores_the_plain_serpentine(self):
+        # max_bank_deg=0 is the documented escape hatch, and must reproduce the
+        # pre-constraint path exactly: adjacent-line hops, nothing else moved.
+        plan = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=100.0,
+                             max_bank_deg=0.0)
+        expected = 10 * 400 + 9 * 20
+        self.assertAlmostEqual(plan["stats"]["path_length_m"], expected,
+                               delta=0.05 * expected)
+        self.assertEqual(plan["stats"]["n_passes"], 10)
 
     def test_area_acres(self):
         # 80,000 m^2 = 19.768 acres.
@@ -336,3 +357,160 @@ class TestRouterErrorMapping(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTurnGeometry(unittest.TestCase):
+    """The planning-time bank constraint (coverage.py's turn-geometry section).
+
+    Background, and why these numbers are pinned: SITL measured this airframe
+    rolling to 50-65 deg in ordinary autopilot turns while a spray pass flies at
+    10-25 m AGL. guardian.py's bank monitor sees that in flight; these tests
+    cover the half that prevents it, by refusing to command the geometry that
+    demands the bank in the first place.
+    """
+
+    # 800 m x 800 m: wide enough that the ordering can fully satisfy the limit.
+    BIG_XY = [(0.0, 0.0), (800.0, 0.0), (800.0, 800.0), (0.0, 800.0)]
+    # 400 m x 80 m: only 4 passes, so the widest turn the field allows is
+    # 2 lines / 40 m of offset no matter how the lines are ordered.
+    NARROW_XY = [(0.0, 0.0), (400.0, 0.0), (400.0, 80.0), (0.0, 80.0)]
+
+    def test_adjacent_line_serpentine_is_unflyable(self):
+        # The problem statement, pinned as a test: turning onto the neighbouring
+        # pass demands a radius of swath/2 = 10 m, which at 18 m/s is 73 deg of
+        # bank -- more than the airframe's roll limit, which is why the
+        # autopilot saturates instead of tracking the plan.
+        plan = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                             max_bank_deg=0.0)
+        self.assertAlmostEqual(plan["stats"]["turn_radius_m"], 10.0, delta=0.5)
+        self.assertGreater(plan["stats"]["turn_bank_deg"], 70.0)
+        self.assertFalse(plan["stats"]["turn_bank_ok"])
+
+    def test_constraint_widens_every_turn(self):
+        constrained = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0)
+        loose = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                              max_bank_deg=0.0)
+        self.assertGreater(constrained["stats"]["turn_radius_m"],
+                           loose["stats"]["turn_radius_m"])
+        self.assertLess(constrained["stats"]["turn_bank_deg"],
+                        loose["stats"]["turn_bank_deg"] - 30.0)
+
+    def test_wide_field_actually_meets_the_limit(self):
+        plan = plan_coverage(poly_ll(self.BIG_XY), swath_m=20.0, alt_m=15.0)
+        s = plan["stats"]
+        self.assertTrue(s["turn_bank_ok"],
+                        f"800 m field still commands {s['turn_bank_deg']} deg")
+        self.assertLessEqual(s["turn_bank_deg"], s["turn_bank_limit_deg"])
+
+    def test_narrow_field_reports_what_it_could_not_fix(self):
+        # A field this narrow cannot satisfy the limit by ordering alone. The
+        # planner must fly the widest geometry available and SAY the bank is
+        # still over, not quietly claim success -- and it must hand back the
+        # one lever that does work: a slower turn.
+        plan = plan_coverage(poly_ll(self.NARROW_XY), swath_m=20.0, alt_m=15.0,
+                             speed_ms=18.0)
+        s = plan["stats"]
+        self.assertFalse(s["turn_bank_ok"])
+        self.assertGreater(s["turn_bank_deg"], s["turn_bank_limit_deg"])
+        self.assertLess(s["turn_max_speed_ms"], 18.0)
+        # And that reported speed must be the truth: flying the SAME geometry
+        # that slowly does bring the bank inside the limit.
+        self.assertLessEqual(
+            bank_for_radius_deg(s["turn_max_speed_ms"], s["turn_radius_m"]),
+            s["turn_bank_limit_deg"] + 0.2)
+
+    def test_coverage_is_identical_only_the_order_changes(self):
+        # The whole safety argument rests on this: reordering must not cost a
+        # single sprayed meter. Same lines, same count, each flown exactly once.
+        kw = dict(swath_m=20.0, alt_m=15.0, angle_deg=0.0)
+        constrained = plan_coverage(poly_ll(RECT_XY), **kw)
+        loose = plan_coverage(poly_ll(RECT_XY), max_bank_deg=0.0, **kw)
+
+        def lines(plan):
+            return sorted(round(xy_from_ll(w["lat"], w["lon"])[1], 3)
+                          for w in plan["waypoints"])
+
+        self.assertEqual(lines(constrained), lines(loose))
+        self.assertEqual(constrained["stats"]["n_passes"],
+                         loose["stats"]["n_passes"])
+        self.assertEqual(len(set(lines(constrained))),
+                         constrained["stats"]["n_passes"])
+
+    def test_turns_cost_path_length_and_nothing_else(self):
+        kw = dict(swath_m=20.0, alt_m=15.0, angle_deg=0.0)
+        constrained = plan_coverage(poly_ll(RECT_XY), **kw)
+        loose = plan_coverage(poly_ll(RECT_XY), max_bank_deg=0.0, **kw)
+        # Longer, but not unboundedly so -- if this ever doubles, the ordering
+        # search has regressed into picking a needlessly wide stride.
+        ratio = (constrained["stats"]["path_length_m"]
+                 / loose["stats"]["path_length_m"])
+        self.assertGreater(ratio, 1.0)
+        self.assertLess(ratio, 1.5)
+        self.assertAlmostEqual(constrained["stats"]["est_time_s"],
+                               constrained["stats"]["path_length_m"] / 18.0,
+                               places=6)
+
+    def test_slower_plan_needs_less_reordering(self):
+        # R falls with V^2, so a slow job should need a narrower stride and pay
+        # less path length for the same bank limit. This is the relationship the
+        # turn_max_speed_ms advice depends on being true.
+        fast = plan_coverage(poly_ll(self.BIG_XY), swath_m=20.0, alt_m=15.0,
+                             speed_ms=22.0)
+        slow = plan_coverage(poly_ll(self.BIG_XY), swath_m=20.0, alt_m=15.0,
+                             speed_ms=12.0)
+        self.assertLess(slow["stats"]["path_length_m"],
+                        fast["stats"]["path_length_m"])
+        self.assertTrue(slow["stats"]["turn_bank_ok"])
+
+    def test_single_pass_field_has_no_turn_to_constrain(self):
+        tiny = [(0.0, 0.0), (400.0, 0.0), (400.0, 10.0), (0.0, 10.0)]
+        s = plan_coverage(poly_ll(tiny), swath_m=20.0, alt_m=15.0)["stats"]
+        self.assertEqual(s["n_passes"], 1)
+        self.assertEqual(s["turn_reversals"], 0)
+        self.assertIsNone(s["turn_bank_deg"])
+        self.assertTrue(s["turn_bank_ok"])
+
+
+class TestTurnGeometryMath(unittest.TestCase):
+    def test_radius_matches_the_standard_turn_formula(self):
+        # R = V^2 / (g tan phi): 18 m/s at 25 deg -> ~70.9 m.
+        self.assertAlmostEqual(turn_radius_m(18.0, 25.0), 70.9, delta=0.5)
+        self.assertAlmostEqual(turn_radius_m(18.0, 45.0), 33.0, delta=0.5)
+
+    def test_bank_and_radius_are_inverses(self):
+        for speed in (10.0, 18.0, 25.0):
+            for bank in (15.0, 25.0, 45.0, 60.0):
+                r = turn_radius_m(speed, bank)
+                self.assertAlmostEqual(bank_for_radius_deg(speed, r), bank,
+                                       places=6)
+
+    def test_speed_for_turn_is_the_inverse_of_radius(self):
+        for radius in (30.0, 70.9, 200.0):
+            v = speed_for_turn_ms(radius, 25.0)
+            self.assertAlmostEqual(turn_radius_m(v, 25.0), radius, places=4)
+
+    def test_degenerate_inputs_do_not_produce_a_usable_turn(self):
+        self.assertEqual(turn_radius_m(18.0, 0.0), math.inf)
+        self.assertEqual(turn_radius_m(18.0, 90.0), math.inf)
+        self.assertEqual(bank_for_radius_deg(18.0, 0.0), 90.0)
+        self.assertEqual(speed_for_turn_ms(0.0, 25.0), 0.0)
+
+
+class TestBankLimitValidation(unittest.TestCase):
+    def test_nan_bank_limit_rejected(self):
+        # NaN would make every comparison False and silently drop the
+        # constraint -- the same failure class the speed_ms guard exists for.
+        with self.assertRaises(ValueError):
+            plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                          max_bank_deg=float("nan"))
+
+    def test_vertical_and_negative_banks_rejected(self):
+        for bad in (90.0, 120.0, -1.0, float("inf")):
+            with self.assertRaises(ValueError):
+                plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                              max_bank_deg=bad)
+
+    def test_zero_disables_the_constraint(self):
+        plan = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                             max_bank_deg=0.0)
+        self.assertEqual(plan["stats"]["turn_bank_limit_deg"], 0.0)

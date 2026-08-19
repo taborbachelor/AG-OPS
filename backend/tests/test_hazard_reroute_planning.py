@@ -86,6 +86,33 @@ class SingleFieldTests(unittest.TestCase):
         _assert_path_clears(self, plan["waypoints"], [self.LINE], 20.0,
                             LAT, LON)
 
+    def test_hazard_ordering_does_not_re_tighten_the_turns(self):
+        # REGRESSION. The hazard tour is a nearest-unflown greedy, and the
+        # nearest unflown segment is by definition the ADJACENT pass -- so an
+        # unconstrained greedy silently undoes the turn-geometry ordering the
+        # moment a field has a hazard on it. That is the worst possible place to
+        # lose it: a field with a power line across it is exactly where a
+        # 60-degree bank at spray height is least survivable. The tour must
+        # prefer candidates that keep the lateral room.
+        hazardless = self._plan()
+        routed = self._plan(hazards=[self.LINE], hazard_buffer_m=20.0)
+        self.assertGreater(routed["stats"]["turn_radius_m"], 30.0,
+                           "hazard ordering collapsed back to adjacent passes")
+        self.assertLess(
+            routed["stats"]["turn_bank_deg"],
+            hazardless["stats"]["turn_bank_deg"] + 5.0,
+            "rerouting made the commanded bank materially worse")
+
+    def test_rerouting_still_costs_distance(self):
+        # Same intent as test_path_gets_longer_not_shorter, held against a
+        # like-for-like baseline: both plans ordered by the same turn
+        # constraint, so the delta is the detour and nothing else.
+        base = self._plan(max_bank_deg=0.0)
+        routed = self._plan(hazards=[self.LINE], hazard_buffer_m=20.0,
+                            max_bank_deg=0.0)
+        self.assertGreater(routed["stats"]["path_length_m"],
+                           base["stats"]["path_length_m"])
+
     def test_leg_kinds_align_with_waypoints(self):
         plan = self._plan(hazards=[self.LINE], hazard_buffer_m=20.0)
         self.assertEqual(len(plan["leg_kinds"]), len(plan["waypoints"]) - 1)

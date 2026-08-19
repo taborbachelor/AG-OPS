@@ -160,17 +160,25 @@ class TestPondClipping(unittest.TestCase):
         self.assertEqual(self.plan20["stats"]["n_segments"], 14)
 
     def test_serpentine_direction_survives_clipping(self):
-        # Sub-segments must keep their parent pass's flight direction:
-        # consecutive pass lines still alternate east/west.
+        # Sub-segments must keep their parent pass's flight direction, and
+        # consecutive pass lines IN FLIGHT ORDER must still alternate east/west.
+        # Flight order is no longer bottom-to-top: the turn-geometry constraint
+        # flies every Nth line and fills the gaps on later sweeps, so comparing
+        # spatially adjacent lines would be testing an ordering the planner
+        # deliberately stopped using. Alternation is still the property that
+        # matters -- it is what keeps a turn a short reversal instead of a
+        # full-length traverse back to the far end of the field.
         segs = segments_xy(self.plan0)
         dir_by_line: dict = {}
+        flight_order: list = []
         for (sx, sy), (ex, _ey) in segs:
             key = round(sy)
             d = 1.0 if ex > sx else -1.0
             # All sub-segments on one line fly the same way.
             self.assertEqual(dir_by_line.setdefault(key, d), d)
-        lines = sorted(dir_by_line)
-        for a, b in zip(lines, lines[1:]):
+            if not flight_order or flight_order[-1] != key:
+                flight_order.append(key)
+        for a, b in zip(flight_order, flight_order[1:]):
             self.assertLess(dir_by_line[a] * dir_by_line[b], 0.0,
                             "consecutive pass lines must alternate direction")
 
@@ -295,13 +303,23 @@ class TestLegacyRegression(unittest.TestCase):
         self.assertEqual(
             set(plan["stats"]),
             {"area_m2", "area_acres", "n_passes", "path_length_m",
-             "est_time_s", "swath_m", "angle_deg"})
+             "est_time_s", "swath_m", "angle_deg",
+             # Turn geometry reports on EVERY plan, keepouts or not. The
+             # pre-keepout contract this class pins was about not leaking
+             # keepout bookkeeping to callers that never asked for it; the bank
+             # a plan commands is not bookkeeping, and a caller who cannot see
+             # it cannot know the plan is flyable.
+             "turn_reversals", "turn_zero_offset", "turn_bank_limit_deg",
+             "turn_radius_m", "turn_bank_deg", "turn_bank_ok",
+             "turn_max_speed_ms"})
         # Pins from test_coverage.py's rectangle expectations.
         self.assertEqual(plan["stats"]["n_passes"], 10)
         self.assertEqual(len(plan["waypoints"]), 20)
         self.assertAlmostEqual(plan["stats"]["area_acres"], 19.768,
                                delta=0.01 * 19.768)
-        expected_len = 10 * 400 + 9 * 20
+        # Turn-geometry hops, not the old adjacent-line ones (test_coverage.py
+        # ::TestRectangle::test_path_length carries the rationale).
+        expected_len = 10 * 400 + 980
         self.assertAlmostEqual(plan["stats"]["path_length_m"], expected_len,
                                delta=0.05 * expected_len)
 
