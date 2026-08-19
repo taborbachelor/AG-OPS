@@ -1,0 +1,18 @@
+{
+  "$comment": [
+    "Project-scoped MCP. Claude Code loads this only for sessions opened in THIS",
+    "repository, which is also how project isolation is enforced: a session in",
+    "another checkout never attaches to the AgOps team at all.",
+    "",
+    "If this server fails to start, nothing breaks. Every operation it exposes is",
+    "also one shell command away (py tools/agops.py ...), and the hooks do not",
+    "depend on it."
+  ],
+  "mcpServers": {
+    "agops": {
+      "command": "py",
+      "args": ["${CLAUDE_PROJECT_DIR}/tools/agops/mcp_server.py"],
+      "env": {}
+    }
+  }
+}

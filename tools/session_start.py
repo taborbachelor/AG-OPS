@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+"""SUPERSEDED by tools/agops/hook_session_start.py.
+
+No longer referenced from .claude/settings.json. See .agops/README.md.
+"""
 """SessionStart hook: tell a new session its own id and the current claim state.
 
 Without this a session cannot know its `session_id`, and claiming under the

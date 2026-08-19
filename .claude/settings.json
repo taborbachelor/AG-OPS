@@ -1,12 +1,22 @@
 {
+  "$comment": [
+    "AgOps multi-agent coordination. Every hook here is deterministic (a script,",
+    "never a model call) and every one fails OPEN: if the coordinator is broken,",
+    "sessions still start and edits still land. See .agops/README.md.",
+    "",
+    "SessionStart  register this session as an agent, brief it on the team",
+    "PreToolUse    block a write into a file another LIVE agent's task owns",
+    "Stop          heartbeat, deliver messages, surface the next task",
+    "SessionEnd    mark offline, free resource locks, KEEP task ownership"
+  ],
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/session_start.py\"",
-            "timeout": 20
+            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/agops/hook_session_start.py\"",
+            "timeout": 25
           }
         ]
       }
@@ -17,7 +27,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/guard.py\"",
+            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/agops/hook_pretooluse.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/agops/hook_stop.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/agops/hook_session_end.py\"",
             "timeout": 20
           }
         ]

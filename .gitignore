@@ -32,3 +32,9 @@ sitl/_scenario/
 
 # Parallel-session claim registry (runtime state, machine-local)
 .claim/
+
+# AgOps coordination runtime state (machine-local; project.json IS tracked)
+.agops/agops.db
+.agops/agops.db-wal
+.agops/agops.db-shm
+.agops/*.tmp

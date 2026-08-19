@@ -1,4 +1,11 @@
 #!/usr/bin/env python
+"""SUPERSEDED by the AgOps coordination layer (tools/agops/, .agops/).
+
+Kept on disk so the transition is reversible and so the area definitions have a
+provenance trail -- they were carried into .agops/project.json verbatim. Nothing
+is wired to this file any more: .claude/settings.json now calls the agops hooks.
+Use `py tools\agops.py ...`. See .agops/README.md section 16.
+"""
 """Work-claim registry: keeps N concurrent Claude sessions off each other's files.
 
 The registry is the machine-readable truth; LANES.md is the human view of it.

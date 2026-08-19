@@ -1,0 +1,155 @@
+{
+  "project_id": "agops-gcs",
+  "project_name": "AgOps GCS",
+  "description": "Autonomous agricultural drone ground control station (backend + GCS frontend + customer site)",
+  "repo": "rc-plane-app",
+  "schema_version": 1,
+  "coordination_enabled": true,
+  "enforcement": "advisory",
+  "stale_after_s": 2700,
+  "offline_after_s": 14400,
+  "broadcast_min_interval_s": 300,
+  "always_open": [
+    "LANES.md",
+    ".agops/*",
+    ".agops/**",
+    ".claim/*",
+    "*.log",
+    "CLAUDE.md"
+  ],
+  "areas": {
+    "AIR": {
+      "desc": "Onboard enforcement: link, guardian, mission/fence upload, SITL scenarios",
+      "globs": [
+        "backend/app/vehicle_manager.py",
+        "backend/app/guardian.py",
+        "backend/app/keepout_watch.py",
+        "backend/app/preflight.py",
+        "backend/app/param_meta.py",
+        "backend/app/config.py",
+        "backend/app/eventlog.py",
+        "backend/app/onboard_fence.py",
+        "backend/app/routers/safety.py",
+        "backend/app/routers/mission.py",
+        "backend/app/routers/vehicle.py",
+        "backend/app/routers/logs.py",
+        "backend/app/routers/bench.py",
+        "backend/app/routers/sim.py",
+        "backend/tests/sitl/*",
+        "backend/tests/test_guardian.py",
+        "backend/tests/test_keepout_watch.py",
+        "backend/tests/test_preflight.py",
+        "backend/tests/test_bench.py",
+        "backend/tests/test_scorecard.py",
+        "backend/tests/test_m1*.py",
+        "backend/tests/test_m2_link.py",
+        "backend/tests/test_m3_params.py",
+        "backend/tests/test_m4_sim.py",
+        "backend/tests/test_flight_*.py",
+        "backend/scenarios.ps1"
+      ]
+    },
+    "PLANNER": {
+      "desc": "Coverage planning, GIS, hazards, field detection",
+      "globs": [
+        "backend/app/coverage.py",
+        "backend/app/coverage_multi.py",
+        "backend/app/reroute.py",
+        "backend/app/gis_zones.py",
+        "backend/app/cdl.py",
+        "backend/app/albers.py",
+        "backend/app/field_boundaries.py",
+        "backend/app/routers/coverage.py",
+        "backend/app/routers/coverage_multi.py",
+        "backend/app/routers/fields.py",
+        "backend/tests/test_coverage*.py",
+        "backend/tests/test_reroute.py",
+        "backend/tests/test_hazard_reroute_planning.py",
+        "backend/tests/test_zones*.py",
+        "backend/tests/test_cdl.py",
+        "backend/tests/test_multi.py"
+      ]
+    },
+    "UI": {
+      "desc": "GCS operator frontend (all of it)",
+      "globs": [
+        "frontend/*",
+        "frontend/**"
+      ]
+    },
+    "OPS": {
+      "desc": "Customer site, orders, tooling, launcher, packaging",
+      "globs": [
+        "web/*",
+        "web/**",
+        "backend/app/routers/orders.py",
+        "backend/app/routers/connection.py",
+        "backend/app/main.py",
+        "backend/tests/test_orders.py",
+        "backend/AgOpsGCS.spec",
+        "backend/run_gcs.py",
+        "tools/*",
+        "start-all.ps1"
+      ]
+    },
+    "DOCS": {
+      "desc": "Root design + reference docs (NOT LANES.md, which is always shared)",
+      "globs": [
+        "README.md",
+        "ARCHITECTURE.md",
+        "GAP-ANALYSIS.md",
+        "SPRAY-FLIGHT-SAFETY.md",
+        "POWERLINE-KEEPOUTS.md",
+        "VALUATION.md",
+        "CLAUDE-CALEB.md"
+      ]
+    }
+  },
+  "resources": {
+    "sitl-5760": {
+      "desc": "The SITL TCP port. Single-occupancy: scenarios.ps1 / pytest -m sitl"
+    },
+    "serial-fc": {
+      "desc": "The real Cube over USB/COM"
+    },
+    "exe-build": {
+      "desc": "PyInstaller output at backend/dist/AgOpsGCS.exe"
+    },
+    "git-push": {
+      "desc": "Pushing to origin/main (take briefly if you hit races)"
+    }
+  },
+  "specialties": {
+    "alpha": [
+      "flight",
+      "autonomy",
+      "mavlink",
+      "guardian",
+      "sitl",
+      "onboard"
+    ],
+    "bravo": [
+      "planner",
+      "coverage",
+      "gis",
+      "hazards",
+      "geometry"
+    ],
+    "charlie": [
+      "ui",
+      "frontend",
+      "react",
+      "gcs",
+      "testing"
+    ],
+    "delta": [
+      "ops",
+      "packaging",
+      "tooling",
+      "backend",
+      "infrastructure"
+    ]
+  },
+  "known_agents": {},
+  "lead": null
+}
