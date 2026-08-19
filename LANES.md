@@ -313,6 +313,60 @@ Newest at the bottom. One row per decision no session may silently reverse. Reve
 
 ---
 
+## Field notes for a redesign (written 2026-08-19, after the first real 3-session run)
+
+This design was built and then immediately used by three concurrent sessions for a day. It held,
+but not without lessons. If you are replacing it, these are the parts that cost real time.
+
+**What broke**
+
+1. **Identity is the hard problem, and it is silent when wrong.** A session does not know its own
+   `session_id`. Claim under any other string and the guard blocks you from *your own* files, with a
+   message naming a session that does not exist. Solve identity first, before ownership. The
+   `SessionStart` hook telling a session its id is the clean fix; the `CLAIM_WHOAMI` handshake exists
+   only to rescue sessions that were already running.
+2. **Enforcement must live where sessions actually start.** A project-level hook in
+   `<repo>/.claude/settings.json` does not load for a session whose project dir is somewhere else --
+   alpha ran from the home directory and was completely unguarded for an hour while believing it was
+   protected. Belief in protection you do not have is worse than knowing you have none.
+3. **False positives are the dominant failure mode -- three in one session**, each blocking work on
+   files that session owned: ASCII arrows (`->`) parsed as output redirection; heredoc *bodies*
+   scanned for targets, so a commit message that merely NAMED a file read as writing it; and
+   relative paths resolved against the session cwd rather than whatever the command `cd`'d into. A
+   guard that blocks legitimate work trains sessions to route around the mechanism, which leaves you
+   worse off than no guard. **Bias hard toward allowing.**
+4. **Shell command strings are a bad ownership signal.** Structured tool inputs (`Edit`/`Write`
+   `file_path`) are exact and trivial; `Bash` is a string you must parse, and every parse is wrong in
+   some case. If starting over: enforce hard on structured inputs, treat shell as best-effort
+   advisory, and accept that `rm` slips through occasionally rather than blocking real work daily.
+
+**What worked and is worth keeping**
+
+- **Inert below two sessions.** Solo work paid zero friction. Nobody had to opt out.
+- **Heartbeat-by-use.** The guard renews the caller's claim on every edit, so liveness is free and a
+  dead session's area frees itself. No stale locks, no manual cleanup, ever.
+- **Overlap computed against the real file list**, not eyeballed -- it named all 43 contested files
+  the instant a second session tried to claim a taken area.
+- **Read-only access across areas stayed open**, and that mattered constantly: AIR read `coverage.py`,
+  `gis_zones.py` and `keepout_watch.py` all day to build against them correctly.
+- **Two-layer split.** A machine registry for mechanics (who owns what, is it live) and a markdown
+  file for the things no tool can infer -- the seam register and the decisions log. Do not try to
+  make one artifact do both.
+- **Seams need named owners.** File partitioning is necessary and *not sufficient*: the `86c6a6e`
+  class of bug lives precisely between two green, individually-correct areas. The seam register is
+  what caught S1-S6 this run.
+- **Stage by explicit path, never `git add -A`.** With concurrent uncommitted work in the tree, `-A`
+  sweeps another session's half-finished code into your commit. This came up on every single commit.
+
+**What was never solved**
+
+- The registry stops accidents between cooperating sessions. It is **not** a security boundary: any
+  agent with write access can edit `claim.py` itself. That was accepted deliberately, and the
+  compensation is that overrides need a token only Tabor sets and every one is audited. A redesign
+  should either accept the same limit honestly or move enforcement somewhere sessions cannot reach.
+
+---
+
 ## Protocol
 
 **Start**
