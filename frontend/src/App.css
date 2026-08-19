@@ -2489,3 +2489,136 @@ body {
 
 .spray-status.ok { background: rgba(0, 230, 118, 0.12); color: var(--accent-green); }
 .spray-status.err { background: rgba(255, 23, 68, 0.12); color: var(--accent-red); }
+
+/* ===== POST-FLIGHT SCORECARD (in the logs panel) ===== */
+
+/* The logs panel is fixed-height with overflow:hidden, and the playback view
+   was previously short enough to fit. The scorecard makes it taller than the
+   panel, so this column has to scroll or the card is silently clipped. */
+.playback {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.playback::-webkit-scrollbar { width: 6px; }
+.playback::-webkit-scrollbar-thumb { background: rgba(0,229,255,0.2); border-radius: 3px; }
+
+.log-card-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.scorecard {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.sc-title {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.sc-head {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Absent is deliberately styled as information, never as a pass. */
+.sc-absent {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: rgba(0, 10, 30, 0.5);
+  border: 1px solid var(--glass-border);
+  border-left: 2px solid var(--accent-orange);
+  border-radius: 6px;
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.sc-section {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 10px 0 4px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.sc-hint {
+  font-size: 9px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  cursor: help;
+}
+
+.sc-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(0, 229, 255, 0.05);
+}
+
+.sc-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.sc-value {
+  font-family: var(--font-display);
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.sc-unit {
+  margin-left: 2px;
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* A value that was never measured must not read as a good number. */
+.sc-metric-missing .sc-value { color: var(--text-dim); }
+
+.sc-metric-warn .sc-value { color: var(--accent-orange); }
+
+.sc-clean {
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--accent-green);
+}
+
+.sc-toggle {
+  margin-top: 10px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-family: var(--font-body);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.sc-toggle:hover { color: var(--accent); }
+
+.sc-extremes { margin-top: 4px; }

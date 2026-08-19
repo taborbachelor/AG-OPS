@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 import { API } from '../api';
+import Scorecard from './Scorecard';
 const SPEEDS = [1, 2, 4, 10];
 
 const toTelem = (s) => ({
@@ -21,6 +22,10 @@ function LogsPanel({ setPlaybackTelem, setPlaybackPath }) {
   const [head, setHead] = useState(0); // seconds
   const [speed, setSpeed] = useState(2);
   const [status, setStatus] = useState('');
+  // null covers BOTH 'no flight selected' and 'this flight has no card'.
+  // Scorecard itself distinguishes absent-from-clean, so it is safe to
+  // pass through, but it must be cleared on every load and on going back.
+  const [scorecard, setScorecard] = useState(null);
   const timerRef = useRef(null);
 
   const duration = samples.length ? samples[samples.length - 1].t : 0;
@@ -51,6 +56,7 @@ function LogsPanel({ setPlaybackTelem, setPlaybackPath }) {
 
   const load = async (name) => {
     setPlaying(false);
+    setScorecard(null);
     try {
       const r = await fetch(`${API}/logs/${name}`);
       const d = await r.json();
@@ -58,6 +64,7 @@ function LogsPanel({ setPlaybackTelem, setPlaybackPath }) {
       setSelected(name);
       setSamples(s);
       setHead(0);
+      setScorecard(d.scorecard || null);
       // [lat, lon, alt] triples: Leaflet ignores the third element; the 3D
       // view uses it to draw the recorded track at its real altitude.
       setPlaybackPath(s.filter((x) => x.lat).map((x) => [x.lat, x.lon, x.alt || 0]));
@@ -103,14 +110,17 @@ function LogsPanel({ setPlaybackTelem, setPlaybackPath }) {
           {logs.map((l) => (
             <div key={l.name} className="log-row" onClick={() => load(l.name)}>
               <div className="log-when">{(l.started || l.name).replace('T', ' ')}</div>
-              <div className="log-meta">{fmtDur(l.duration)} · {l.samples} pts · {l.size_kb} KB</div>
+              <div className="log-meta">
+                {fmtDur(l.duration)} · {l.samples} pts · {l.size_kb} KB
+                {l.has_scorecard && <span className="log-card-badge">scorecard</span>}
+              </div>
             </div>
           ))}
         </div>
       ) : (
         <div className="playback">
           <button className="control-btn" onClick={() => {
-            setSelected(null); setSamples([]); setPlaying(false);
+            setSelected(null); setSamples([]); setPlaying(false); setScorecard(null);
             setPlaybackTelem(null); setPlaybackPath(null);
           }} style={{ fontSize: 11, alignSelf: 'flex-start', marginBottom: 8 }}>
             ← Back to list
@@ -141,6 +151,8 @@ function LogsPanel({ setPlaybackTelem, setPlaybackPath }) {
                 onClick={() => setSpeed(s)}>{s}×</button>
             ))}
           </div>
+
+          <Scorecard card={scorecard} />
         </div>
       )}
 
