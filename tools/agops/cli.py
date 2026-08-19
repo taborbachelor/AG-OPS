@@ -383,14 +383,50 @@ def cmd_admin(a):
             raise AgopsError("enforcement must be advisory | blocking | off")
         cfg["enforcement"] = a.value
     elif a.action == "assign":
+        # Both arguments are load-bearing and both were previously unchecked:
+        # `assign ""` cheerfully set an IN_PROGRESS task to owner-nobody, which
+        # is a state no other code path can produce and none of them expect.
+        if not a.task_id:
+            raise AgopsError("assign needs --task-id")
+        if not (a.value or "").strip():
+            raise AgopsError(
+                "assign needs an agent name. To take a task away from its owner "
+                "without giving it to anybody, use: admin release --task-id %s"
+                % a.task_id)
         conn = core.connect()
         try:
+            if core._resolve_agent(conn, a.value) is None:
+                raise AgopsError("no agent named %r on this project" % a.value)
+            core.get_task(a.task_id)          # raises if the task does not exist
             conn.execute("UPDATE tasks SET owner=?, status='IN_PROGRESS', updated_at=? "
                          "WHERE task_id=?", (a.value, core._now(), a.task_id))
             core._event(conn, "human", "task.reassign", a.task_id, "to " + a.value)
         finally:
             conn.close()
         out(a, {"ok": True}, "%s reassigned to %s" % (a.task_id, a.value))
+        return
+    elif a.action == "release":
+        # The override that was missing: hand a task back to the pool regardless
+        # of who holds it. Needed whenever an agent is simply gone and there is
+        # nothing to recover -- a throwaway session, a cancelled experiment.
+        if not a.task_id:
+            raise AgopsError("release needs --task-id")
+        core.get_task(a.task_id)
+        conn = core.connect()
+        try:
+            conn.execute("UPDATE tasks SET owner=NULL, status='AVAILABLE', "
+                         "claimed_at=NULL, needs_recovery=0, updated_at=? "
+                         "WHERE task_id=?", (core._now(), a.task_id))
+            # Clear the agent-side pointer too. Leaving it set showed an OFFLINE
+            # agent still holding a task the board had already handed back --
+            # two answers to "who has this", which is how trust in a board dies.
+            conn.execute("UPDATE agents SET current_task=NULL WHERE current_task=?",
+                         (a.task_id,))
+            core._event(conn, "human", "task.force_release", a.task_id,
+                        a.value or "human override")
+        finally:
+            conn.close()
+        out(a, {"ok": True}, "%s released to the pool" % a.task_id)
         return
     elif a.action == "cancel":
         conn = core.connect()
@@ -570,7 +606,7 @@ def build_parser():
 
     s = sub.add_parser("admin", help="human override")
     s.add_argument("action", choices=["pause", "resume", "enforcement", "assign",
-                                      "cancel", "clear-locks"])
+                                      "release", "cancel", "clear-locks"])
     s.add_argument("value", nargs="?"); s.add_argument("--task-id")
     s.set_defaults(fn=cmd_admin)
 
