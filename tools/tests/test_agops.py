@@ -39,6 +39,11 @@ def write_config(**over):
     cfg.update({
         "project_id": "agops-gcs",
         "project_name": "AgOps GCS",
+        # Mechanism tests (atomicity, conflicts, dependencies) exercise CLAIMING,
+        # which is orthogonal to who is allowed to initiate it. They run under
+        # self_serve so the mechanism is what is under test; TestDispatchModel
+        # sets "assigned" explicitly to test the gate itself.
+        "claim_policy": "self_serve",
         "areas": {
             "PLANNER": {"desc": "planning", "globs": ["backend/app/coverage*.py"]},
             "UI": {"desc": "frontend", "globs": ["frontend/*", "frontend/**"]},
@@ -592,6 +597,78 @@ class TestResourcesAndOverride(Base):
             self.assertIn(expected, kinds)
 
 
+class TestDispatchModel(Base):
+    """Tabor dispatches work; agents do not take it.
+
+    The coordination problem worth solving was three sessions landing on one
+    task, not idle agents. Dispatch solves that and keeps the choice of what
+    gets built next with the human, so `assigned` is the default policy and an
+    unforced claim is refused.
+    """
+
+    def setUp(self):
+        super().setUp()
+        core.register_agent(session_id="s-a", name="alpha")
+        core.register_agent(session_id="s-b", name="bravo")
+        cfg = core.load_config()
+        cfg["claim_policy"] = "assigned"
+        core.save_config(cfg)
+        core.create_task("dispatched work", files=["src/x.ts"])
+
+    def test_agent_cannot_claim_unbidden(self):
+        with self.assertRaises(AgopsError) as ctx:
+            core.claim_task("TASK-001", "alpha")
+        self.assertIn("do not pick their own work", str(ctx.exception))
+        self.assertEqual(core.get_task("TASK-001")["status"], "AVAILABLE")
+
+    def test_human_assignment_gives_it_to_the_named_agent(self):
+        r = core.assign_task("TASK-001", "alpha")
+        self.assertTrue(r["ok"])
+        t = core.get_task("TASK-001")
+        self.assertEqual(t["owner"], "alpha")
+        self.assertEqual(t["status"], "IN_PROGRESS")
+
+    def test_assignment_tells_the_agent(self):
+        core.assign_task("TASK-001", "alpha", note="exe-build lock is free")
+        msgs = core.inbox("alpha")
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("TASK-001", msgs[0]["content"])
+        self.assertIn("exe-build lock is free", msgs[0]["content"])
+
+    def test_force_is_the_human_saying_take_it_now(self):
+        self.assertTrue(core.claim_task("TASK-001", "alpha", force=True)["ok"])
+
+    def test_reassignment_will_not_steal_mid_flight(self):
+        core.assign_task("TASK-001", "alpha")
+        with self.assertRaises(AgopsError) as ctx:
+            core.assign_task("TASK-001", "bravo")
+        self.assertIn("already owned by alpha", str(ctx.exception))
+        self.assertEqual(core.get_task("TASK-001")["owner"], "alpha")
+
+    def test_assigning_to_an_unknown_agent_is_refused(self):
+        with self.assertRaises(AgopsError):
+            core.assign_task("TASK-001", "zulu")
+
+    def test_assignment_still_reports_file_conflicts(self):
+        # Dispatch must not become a way to walk two agents into one file.
+        core.create_task("other work", files=["src/x.ts"])
+        core.assign_task("TASK-001", "alpha")
+        r = core.assign_task("TASK-002", "bravo")
+        self.assertTrue(r["ok"], "the human's decision stands")
+        self.assertTrue(r["conflicts"], "but the overlap must be reported")
+        self.assertEqual(r["conflicts"][0]["level"], "BLOCKING")
+
+    def test_relaxing_the_policy_restores_self_serve(self):
+        cfg = core.load_config()
+        cfg["claim_policy"] = "self_serve"
+        core.save_config(cfg)
+        self.assertTrue(core.claim_task("TASK-001", "alpha")["ok"])
+
+    def test_owner_can_still_reclaim_its_own_task(self):
+        core.assign_task("TASK-001", "alpha")
+        self.assertTrue(core.claim_task("TASK-001", "alpha")["ok"])
+
+
 class TestAutoClaimPolicy(Base):
     """Idle agents propose work; they do not take it unless told they may.
 
@@ -617,6 +694,11 @@ class TestAutoClaimPolicy(Base):
         super().setUp()
         core.register_agent(session_id="s-a", name="alpha")
         core.create_task("something available", priority="HIGH")
+        # These cover the older, weaker brake (auto_claim) on its own terms.
+        # The dispatch policy is a separate, stronger gate tested above.
+        cfg = core.load_config()
+        cfg["claim_policy"] = "on_request"
+        core.save_config(cfg)
 
     def test_default_is_off(self):
         self.assertFalse(core.load_config().get("auto_claim", False))
@@ -644,6 +726,84 @@ class TestAutoClaimPolicy(Base):
         core.claim_task("TASK-001", "alpha")
         ctx = self._context(self._stop_hook("s-a"))
         self.assertNotIn("DO NOT CLAIM", ctx)
+
+
+class TestMonitor(Base):
+    """The board a human reads. Its one job is to not lie.
+
+    "COMPLETE" is a claim about the board; "pushed" is a claim about the world,
+    and they come apart constantly -- an agent commits, its session ends, and the
+    work sits on one machine only. A monitor that shows COMPLETE without saying
+    which of those happened is telling half the truth.
+    """
+
+    def setUp(self):
+        super().setUp()
+        core.register_agent(session_id="s-a", name="alpha")
+        core.create_task("finished work", files=["src/x.ts"])
+        core.create_task("open work", priority="HIGH")
+        core.create_task("later", depends_on=["TASK-001"])
+        core.claim_task("TASK-001", "alpha")
+
+    def _monitor(self, *extra):
+        return run_cli("monitor", *extra)
+
+    def test_monitor_renders_every_section(self):
+        r = self._monitor()
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        for section in ("SESSIONS", "IN PROGRESS", "OPEN", "BLOCKED",
+                        "COMPLETE", "RECENT"):
+            self.assertIn(section, r.stdout, "missing section %s" % section)
+
+    def test_in_progress_shows_who_and_when(self):
+        r = self._monitor()
+        self.assertIn("TASK-001", r.stdout)
+        self.assertIn("taken by alpha", r.stdout)
+
+    def test_blocked_shows_what_it_waits_on(self):
+        self.assertIn("waiting:", self._monitor().stdout)
+
+    def test_output_is_ascii_only(self):
+        # The console this is read in is not UTF-8; a stray unicode glyph makes
+        # a tidy dashboard look broken.
+        self._monitor().stdout.encode("ascii")
+
+    def test_completed_without_a_commit_says_so(self):
+        core.complete_task("TASK-001", "alpha",
+                           "did the work and verified it properly")
+        self.assertIn("no commit recorded", self._monitor().stdout)
+
+    def test_local_only_commit_is_called_out(self):
+        # A real commit that is not an ancestor of origin/main: HEAD itself,
+        # if HEAD is unpushed, else a fabricated-but-present sha is impossible,
+        # so assert on the classifier directly for the local case.
+        head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        state = core.commit_states([head]).get(head)
+        self.assertIn(state, ("pushed", "local"))
+
+    def test_unknown_commit_is_reported_missing_not_pushed(self):
+        fake = "0" * 40
+        self.assertEqual(core.commit_states([fake])[fake], "missing")
+        core.complete_task("TASK-001", "alpha",
+                           "work finished and verified end to end",
+                           commit_hash=fake)
+        self.assertIn("NOT IN REPO", self._monitor().stdout)
+
+    def test_json_mode_carries_the_commit_states(self):
+        core.complete_task("TASK-001", "alpha",
+                           "work finished and verified end to end",
+                           commit_hash="0" * 40)
+        data = json.loads(self._monitor("--json").stdout)
+        self.assertIn("commit_states", data)
+        self.assertIn("completed", data)
+        self.assertEqual(data["completed"][0]["task_id"], "TASK-001")
+
+    def test_empty_board_does_not_crash(self):
+        reset()
+        r = self._monitor()
+        self.assertEqual(r.returncode, 0, r.stderr[:200])
+        self.assertIn("nobody registered", r.stdout)
 
 
 class TestGracefulDegradation(Base):

@@ -93,12 +93,20 @@ def build_context(payload):
                                              m["content"][:70]))
 
     L.append("")
-    if not auto:
+    policy = cfg.get("claim_policy", "assigned")
+    if policy == "assigned":
+        L.append("HOW WORK STARTS HERE: **the human dispatches, you do not "
+                 "self-serve.** Answer whatever they asked. If they ask what is "
+                 "next, recommend one of the above and wait. They assign it with "
+                 "`py tools\\agops.py assign TASK-0XX %s`, or tell you to take it "
+                 "-- either way the instruction comes from them. Starting work "
+                 "unasked costs them a commit and a file lock they did not agree "
+                 "to." % name)
+        L.append("")
+    elif not auto:
         L.append("HOW WORK STARTS HERE: you do NOT pick up tasks on your own. "
-                 "Answer whatever the human asked. If they ask what is next, "
-                 "recommend one of the above and wait. Claim and begin only when "
-                 "they say continue, or name a task. Starting work unasked costs "
-                 "them a commit and a file lock they did not agree to.")
+                 "Recommend one of the above and wait for the human to say "
+                 "continue.")
         L.append("")
     L.append("HOW TO WORK HERE (you are %s)" % name)
     L.append("  py tools\\agops.py status                     the whole board")

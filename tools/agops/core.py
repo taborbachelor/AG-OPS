@@ -99,6 +99,15 @@ def default_config() -> dict:
         "schema_version": SCHEMA_VERSION,
         "coordination_enabled": True,
         "enforcement": "advisory",
+        # WHO DECIDES WHAT AN AGENT WORKS ON.
+        #   "assigned"   the human dispatches; agents never take work themselves.
+        #                They can read the board and recommend, and that is all.
+        #   "on_request" agents may claim, but only when told to in the moment.
+        #   "self_serve" agents pull from the queue freely (swarm).
+        # Default "assigned", because the problem this system was built for is
+        # three sessions landing on one task -- not idle agents. Dispatch is the
+        # thing a human is actually good at and wants to keep.
+        "claim_policy": "assigned",
         # Whether an idle agent may claim work on its own initiative.
         # OFF by default, and that default is deliberate: a session that was
         # asked a status question once claimed a task and shipped a feature.
@@ -709,6 +718,60 @@ def get_file_owners(path, project=None) -> dict:
 
 # --- claiming ----------------------------------------------------------------
 
+def assign_task(tid, agent, by="human", note="", project=None) -> dict:
+    """Human dispatch: give a task to a named agent and tell them.
+
+    The counterpart to claiming. Claiming is an agent deciding; assigning is a
+    person deciding, which is the mode most small teams actually want -- the
+    coordination problem worth solving is two sessions on one task, and dispatch
+    solves that without giving up control of what gets built next.
+    """
+    require_project(project)
+    conn = connect()
+    try:
+        a = _resolve_agent(conn, agent)
+        if a is None:
+            raise AgopsError("no agent named %r -- see: py tools\\agops.py agents"
+                             % agent)
+        t = conn.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+        if t is None:
+            raise AgopsError("no such task %r" % tid)
+        if t["status"] in ("COMPLETE", "CANCELLED"):
+            raise AgopsError("%s is %s" % (tid, t["status"]))
+        if t["owner"] and t["owner"] != a["name"]:
+            raise AgopsError(
+                "%s is already owned by %s. Reassigning takes it away mid-flight "
+                "-- release it first if that is what you want: "
+                "py tools\\agops.py admin release --task-id %s" % (tid, t["owner"], tid))
+
+        files = [r["path"] for r in conn.execute(
+            "SELECT path FROM task_files WHERE task_id=?", (tid,))]
+        conflicts = check_conflicts(files, agent=a["name"], task_id=tid) if files \
+            else {"level": "NONE", "conflicts": []}
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE tasks SET owner=?, status='IN_PROGRESS', claimed_at=?, "
+                     "updated_at=? WHERE task_id=?",
+                     (a["name"], _now(), _now(), tid))
+        conn.execute("UPDATE agents SET current_task=?, status='WORKING' "
+                     "WHERE agent_id=?", (tid, a["agent_id"]))
+        _event(conn, by, "task.assign", tid, "to " + a["name"])
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    body = "You have been assigned %s: %s" % (tid, t["title"])
+    if note:
+        body += "\n" + note
+    body += ("\nRead it with: py tools\\agops.py task %s" % tid)
+    try:
+        send_message(by, a["name"], body, "INFO", tid, files, project=project)
+    except AgopsError:
+        pass                    # a message failure must not undo the assignment
+    return {"ok": True, "task_id": tid, "owner": a["name"],
+            "conflicts": conflicts["conflicts"]}
+
+
 def claim_task(tid, agent, force=False, project=None) -> dict:
     """Atomically take ownership. Exactly one caller can win.
 
@@ -728,6 +791,17 @@ def claim_task(tid, agent, force=False, project=None) -> dict:
         t = conn.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
         if t is None:
             raise AgopsError("no such task %r" % tid)
+        # Under the default policy an agent does not decide what it works on.
+        # force=True is the human saying so in the moment, which is why the
+        # message names the two ways forward rather than just refusing.
+        policy = load_config().get("claim_policy", "assigned")
+        if policy == "assigned" and not force and t["owner"] != name:
+            raise AgopsError(
+                "claim_policy is 'assigned': agents do not pick their own work "
+                "here. Ask the human to dispatch it "
+                "(py tools\\agops.py assign %s %s), or they can tell you to take "
+                "it now (claim --force). You can still read the board and "
+                "recommend." % (tid, name))
         if t["status"] == "BLOCKED":
             raise AgopsError("%s is BLOCKED (%s)" % (tid, t["blocked_reason"] or "?"))
         if t["status"] in ("COMPLETE", "CANCELLED"):
@@ -1087,6 +1161,44 @@ def reclaim(tid, agent, verified=False, project=None) -> dict:
         return get_task(tid)
     finally:
         conn.close()
+
+
+def commit_states(shas) -> dict:
+    """For each commit hash: 'pushed', 'local', 'missing' or 'unknown'.
+
+    "Complete" is a claim about the board; "pushed" is a claim about the world.
+    They come apart constantly -- an agent commits, its session ends, and the
+    work sits on this machine only. A monitor that shows COMPLETE without
+    saying whether anyone else can see it is telling half the truth, so this
+    asks git rather than trusting the task record.
+    """
+    out = {}
+    shas = [s for s in (shas or []) if s]
+    if not shas:
+        return out
+    try:
+        remote = subprocess.run(
+            ["git", "-C", REPO, "rev-parse", "--verify", "--quiet", "origin/main"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        remote = ""
+    for sha in shas:
+        try:
+            known = subprocess.run(["git", "-C", REPO, "cat-file", "-e", sha + "^{commit}"],
+                                   capture_output=True, text=True, timeout=10)
+            if known.returncode != 0:
+                out[sha] = "missing"
+                continue
+            if not remote:
+                out[sha] = "unknown"
+                continue
+            anc = subprocess.run(
+                ["git", "-C", REPO, "merge-base", "--is-ancestor", sha, remote],
+                capture_output=True, text=True, timeout=10)
+            out[sha] = "pushed" if anc.returncode == 0 else "local"
+        except Exception:
+            out[sha] = "unknown"
+    return out
 
 
 def _git_dirty_report() -> dict:

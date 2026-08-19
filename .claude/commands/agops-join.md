@@ -23,8 +23,12 @@ Do this now, in order.
 5. `py tools\agops.py next` — the ranked queue for your specialties.
 
 Then **recommend** one task and stop — do not claim it. Say which you would take
-and why, in a line or two. The human starts you with *continue* or
-`/agops-continue`; joining the team is not the same as being told to work.
+and why, in a line or two.
+
+Work here is **dispatched, not taken**: Tabor assigns it
+(`py tools\agops.py assign TASK-0XX <you>`) or tells you to start
+(`/agops-continue`). Joining the team is not the same as being told to work,
+and an unforced claim is refused by design.
 
 If no task fits — the queue is empty, everything conflicts, or the work needs a
 decision only the human can make — say so and stop. Do not invent speculative

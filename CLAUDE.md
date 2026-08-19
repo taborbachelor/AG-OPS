@@ -7,6 +7,11 @@ Autonomous agricultural drone ground control station. Backend (FastAPI + MAVLink
 repository at once. The SessionStart hook has already registered you and told you
 your name; `py tools\agops.py whoami` confirms it.
 
+**Tabor drives.** This system exists so three sessions never land on the same
+task — not so agents can dispatch themselves. He assigns work; you do it, tell
+the others what they need to know, and stop. Read the board freely and recommend
+when asked.
+
 Where things live:
 - **`.agops/README.md`** — how coordination works, and every command. Read it if
   anything below is unclear.
@@ -21,9 +26,12 @@ Where things live:
 
 These are not advisory. Each one exists because breaking it cost real time.
 
-1. **Claim before you implement.** `py tools\agops.py claim TASK-0XX`. Claiming
-   is atomic — exactly one agent wins a race. Never start work on a task someone
-   else owns, and never "just quickly" edit outside your claim.
+1. **Work only what you were given.** Tabor dispatches tasks
+   (`py tools\agops.py assign TASK-0XX <agent>`); agents do not pick their own.
+   If he tells you to start something directly, that is the instruction — take it
+   with `claim --force` so the board matches reality. Never start work on a task
+   someone else owns, and never "just quickly" edit outside it. Ownership is
+   atomic: exactly one agent holds a task at a time.
 2. **Check before you edit anything you did not claim.**
    `py tools\agops.py conflicts <paths...>`. A BLOCKING result means a live agent
    is in that file right now. Go around it or talk to them; do not force it.
@@ -47,13 +55,12 @@ These are not advisory. Each one exists because breaking it cost real time.
    `py tools\agops.py take sitl-5760` … `drop` the moment you are done. A red
    SITL scenario during parallel work is more likely contention than a
    regression — re-run it holding the lock before believing it.
-8. **When you finish, PROPOSE the next task and stop.** Run
-   `py tools\agops.py next`, say which one you would take and why in a line or
-   two, then wait. Claim and begin only when the human says *continue* (or names
-   a task). This holds no matter how obvious the next step looks: claiming
-   commits them to a file lock and a commit they did not ask for. The one
-   exception is if they have set `auto_claim: true` in `.agops/project.json`,
-   which turns the queue into a swarm.
+8. **When you finish, report and STOP.** Say what landed, then — only if asked
+   — recommend what you would do next in a line or two. Do not take it. Tabor
+   decides what happens next and dispatches it. This holds no matter how obvious
+   the next step looks: starting work commits him to a file lock and a commit he
+   did not ask for. (`claim_policy` in `.agops/project.json` relaxes this to
+   `on_request` or `self_serve` if he ever wants a swarm.)
 9. **Never destroy another agent's work.** No `reset`, `checkout --`, `clean`,
    `stash` or force-push over changes that are not yours. If an agent crashed,
    use the recovery path (`/agops-recover`), which preserves everything.
@@ -69,7 +76,8 @@ speculative work — every task you invent is one another agent has to read.
 
 ## Commands
 
-`/agops-join` · `/agops-status` · `/agops-continue` (the go-ahead to take work) ·
+`/agops-monitor` (the full board) · `/agops-assign` (dispatch work) ·
+`/agops-continue` (go-ahead to take it) · `/agops-join` · `/agops-status` ·
 `/agops-complete` · `/agops-handoff` · `/agops-recover`. Everything else is `py tools\agops.py <cmd>` (`--help` works on
 every subcommand), or the `agops_*` MCP tools if they are loaded.
 

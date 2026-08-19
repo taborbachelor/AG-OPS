@@ -67,7 +67,15 @@ def main():
                              % (t["task_id"], t["priority"], t["title"][:50],
                                 "" if t["_conflict"] == "NONE"
                                 else "  (conflict: %s)" % t["_conflict"]))
-            if auto:
+            policy = core.load_config().get("claim_policy", "assigned")
+            if policy == "assigned":
+                lines.append(
+                    "You hold nothing, and work here is DISPATCHED, not taken. "
+                    "Do not claim. If the human asks what is next, recommend one "
+                    "of the above in a line or two and stop. They assign it "
+                    "(py tools\\agops.py assign <TASK-ID> %s) or tell you to "
+                    "start." % me)
+            elif auto:
                 lines.append("auto_claim is ON: claim the best fit with "
                              "py tools\\agops.py claim <TASK-ID> and begin.")
             else:

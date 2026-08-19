@@ -2,10 +2,11 @@
   "project_id": "agops-gcs",
   "project_name": "AgOps GCS",
   "description": "Autonomous agricultural drone ground control station (backend + GCS frontend + customer site)",
-  "repo": "rc-plane-app",
   "schema_version": 1,
   "coordination_enabled": true,
   "enforcement": "advisory",
+  "claim_policy": "assigned",
+  "auto_claim": false,
   "stale_after_s": 2700,
   "offline_after_s": 14400,
   "broadcast_min_interval_s": 300,
@@ -119,6 +120,8 @@
       "desc": "Pushing to origin/main (take briefly if you hit races)"
     }
   },
+  "known_agents": {},
+  "repo": "rc-plane-app",
   "specialties": {
     "alpha": [
       "flight",
@@ -150,7 +153,5 @@
       "infrastructure"
     ]
   },
-  "known_agents": {},
-  "lead": null,
-  "auto_claim": false
+  "lead": null
 }

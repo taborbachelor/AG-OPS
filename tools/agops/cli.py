@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agops import core  # noqa: E402
@@ -137,6 +138,186 @@ def render_status(st) -> str:
     return "\n".join(L)
 
 
+# --- monitor -----------------------------------------------------------------
+
+_W = 78
+
+
+def _rule(ch="-"):
+    return " " + ch * (_W - 2)
+
+
+def _clock(ts):
+    if not ts:
+        return "--:--"
+    return time.strftime("%H:%M", time.localtime(ts))
+
+
+def _ago(ts):
+    return _hms(time.time() - ts) if ts else "-"
+
+
+def _wrap(text, width):
+    # ASCII only: a unicode ellipsis renders as a replacement glyph in the
+    # Windows console this gets read in, which makes a tidy dashboard look
+    # broken.
+    return text if len(text) <= width else text[:width - 2] + ".."
+
+
+def render_monitor(st, commit_state=None) -> str:
+    """The at-a-glance board: who is here, what is open, what shipped.
+
+    Grouped by what a human actually scans for, in that order: who is live, what
+    is being worked right now, what is free to hand out, what is stuck, and what
+    landed. Completion carries the commit AND whether it is pushed, because
+    those come apart and only one of them means other people can see the work.
+    """
+    commit_state = commit_state or {}
+    agents = st["agents"]
+    live = [a for a in agents if a["status"] != "OFFLINE" and not a["stale"]]
+    tasks = st["tasks"]
+    L = []
+    L.append("=" * _W)
+    head = " %s" % st["project_name"].upper()
+    L.append(head + time.strftime("%Y-%m-%d %H:%M").rjust(_W - len(head) - 1))
+    L.append("=" * _W)
+    if not st["coordination_enabled"]:
+        L.append(" !! COORDINATION PAUSED - claims and the guard are inert")
+    L.append("")
+
+    # --- sessions -----------------------------------------------------------
+    L.append(" SESSIONS  (%d live, %d offline, %d stale)"
+             % (len(live),
+                sum(1 for a in agents if a["status"] == "OFFLINE"),
+                sum(1 for a in agents if a["stale"] and a["status"] != "OFFLINE")))
+    L.append(_rule())
+    if not agents:
+        L.append("   nobody registered - open Claude Code in this repo to join")
+    for a in agents:
+        dot = "*" if a in live else ("!" if a["stale"] else "-")
+        task = a["current_task"] or "--"
+        note = ""
+        if a["status"] == "OFFLINE":
+            note = "offline %s" % _ago(a["last_heartbeat"])
+        elif a["stale"]:
+            note = "STALE %s quiet" % _ago(a["last_heartbeat"])
+        else:
+            note = "%s quiet" % _ago(a["last_heartbeat"])
+        L.append("  %s %-9s %-9s %-10s %-22s %s"
+                 % (dot, a["name"], a["status"], task,
+                    _wrap(",".join(a["specialties"]), 22), note))
+    L.append("")
+
+    # --- in progress --------------------------------------------------------
+    ip = tasks.get("IN_PROGRESS") or []
+    L.append(" IN PROGRESS  (%d)" % len(ip))
+    L.append(_rule())
+    if not ip:
+        L.append("   nothing being worked")
+    for t in ip:
+        L.append("  %-10s %-8s %s" % (t["task_id"], t["priority"],
+                                      _wrap(t["title"], 46)))
+        L.append("  %-10s taken by %s at %s  (%s ago)"
+                 % ("", t["owner"] or "?", _clock(t["claimed_at"]),
+                    _ago(t["claimed_at"])))
+    L.append("")
+
+    # --- open ---------------------------------------------------------------
+    av = tasks.get("AVAILABLE") or []
+    L.append(" OPEN  (%d)   assign with: py tools\\agops.py assign <TASK> <agent>"
+             % len(av))
+    L.append(_rule())
+    if not av:
+        L.append("   queue empty")
+    for t in av:
+        files = ", ".join(t["affected_files"][:2])
+        L.append("  %-10s %-8s %-38s %s"
+                 % (t["task_id"], t["priority"], _wrap(t["title"], 38),
+                    _wrap(files, 17)))
+    L.append("")
+
+    # --- blocked ------------------------------------------------------------
+    bl = tasks.get("BLOCKED") or []
+    rv = tasks.get("REVIEW") or []
+    if bl or rv:
+        L.append(" BLOCKED / NEEDS REVIEW  (%d)" % (len(bl) + len(rv)))
+        L.append(_rule())
+        for t in bl:
+            L.append("  %-10s %-8s %-29s waiting: %s"
+                     % (t["task_id"], t["priority"], _wrap(t["title"], 29),
+                        _wrap(t["blocked_reason"] or "?", 22)))
+        for t in rv:
+            L.append("  %-10s %-8s %-29s RECOVERY (%s)"
+                     % (t["task_id"], t["priority"], _wrap(t["title"], 29),
+                        t["owner"] or "?"))
+        L.append("")
+
+    # --- complete -----------------------------------------------------------
+    done = st.get("completed") or []
+    L.append(" COMPLETE  (%d)" % len(done))
+    L.append(_rule())
+    if not done:
+        L.append("   nothing finished yet")
+    for t in done:
+        sha = (t["commit_hash"] or "")[:7]
+        state = commit_state.get(t["commit_hash"], "")
+        if not sha:
+            mark = "no commit recorded"
+        elif state == "pushed":
+            mark = "%s PUSHED" % sha
+        elif state == "local":
+            mark = "%s LOCAL ONLY" % sha
+        elif state == "missing":
+            mark = "%s NOT IN REPO" % sha
+        else:
+            mark = sha
+        L.append("  %-10s %-35s %-8s %s"
+                 % (t["task_id"], _wrap(t["title"], 35), t["completed_by"] or "?",
+                    mark))
+        if t["completion_summary"]:
+            L.append("  %-10s %s" % ("", _wrap(t["completion_summary"], 59)))
+    L.append("")
+
+    # --- conflicts + activity ----------------------------------------------
+    if st["conflicts"]:
+        L.append(" CONFLICTS")
+        L.append(_rule())
+        for c in st["conflicts"]:
+            L.append("  %-8s %-34s %s" % (c["level"], _wrap(c["path"], 34), c["why"]))
+        L.append("")
+    L.append(" RECENT")
+    L.append(_rule())
+    for e in st["recent_events"][:6]:
+        L.append("  %s  %-9s %-20s %s"
+                 % (_clock(e["ts"]), e["actor"] or "-", e["kind"],
+                    _wrap(e["subject"] or "", 26)))
+    L.append("=" * _W)
+    return "\n".join(L)
+
+
+def cmd_monitor(a):
+    while True:
+        st = core.project_status(project=a.project)
+        st["completed"] = core.list_tasks(status="COMPLETE", project=a.project)
+        states = core.commit_states([t["commit_hash"] for t in st["completed"]])
+        if a.json:
+            st["commit_states"] = states
+            out(a, st)
+            return
+        text = render_monitor(st, states)
+        if a.watch:
+            # Clear and repaint rather than scroll: this is a dashboard, and a
+            # dashboard that scrolls is a log.
+            sys.stdout.write("\033[2J\033[H")
+        print(text)
+        if not a.watch:
+            return
+        try:
+            time.sleep(max(2, a.watch))
+        except KeyboardInterrupt:
+            return
+
+
 def out(args, obj, text=None):
     if getattr(args, "json", False):
         print(json.dumps(obj, indent=2, default=str))
@@ -243,6 +424,15 @@ def cmd_claim(a):
     else:
         out(a, r, r.get("message") or "claim failed: %s" % r.get("reason"))
         sys.exit(1)
+
+
+def cmd_assign(a):
+    r = core.assign_task(a.task_id, a.to, by=current_agent(a.agent) or "human",
+                         note=a.note or "", project=a.project)
+    msg = "ASSIGNED %s to %s" % (a.task_id, r["owner"])
+    for c in r["conflicts"]:
+        msg += "\n  %s: %s" % (c["level"], c["why"])
+    out(a, r, msg)
 
 
 def cmd_release(a):
@@ -378,6 +568,32 @@ def cmd_admin(a):
         cfg["coordination_enabled"] = False
     elif a.action == "resume":
         cfg["coordination_enabled"] = True
+    elif a.action == "clear-agents":
+        # Wipes the roster so the NATO names start at alpha again. Refuses while
+        # anyone still holds work: that is either live work or a crash worth
+        # recovering, and silently forgetting who had it is how you lose both.
+        conn = core.connect()
+        try:
+            held = [dict(r) for r in conn.execute(
+                "SELECT name, current_task FROM agents WHERE current_task IS NOT NULL")]
+            if held and not a.force:
+                raise AgopsError(
+                    "these agents still hold work: %s. Finish, release "
+                    "(admin release --task-id X) or recover it first, or pass "
+                    "--force to clear the roster anyway (tasks keep their owner)."
+                    % ", ".join("%s/%s" % (h["name"], h["current_task"]) for h in held))
+            n = conn.execute("SELECT COUNT(*) c FROM agents").fetchone()["c"]
+            conn.execute("DELETE FROM agents")
+            core._event(conn, "human", "team.clear_agents", "",
+                        "cleared %d agent(s)" % n)
+        finally:
+            conn.close()
+        out(a, {"ok": True, "cleared": n}, "cleared %d agent(s); names restart at alpha" % n)
+        return
+    elif a.action == "policy":
+        if a.value not in ("assigned", "on_request", "self_serve"):
+            raise AgopsError("policy takes assigned | on_request | self_serve")
+        cfg["claim_policy"] = a.value
     elif a.action == "auto-claim":
         if a.value not in ("on", "off"):
             raise AgopsError("auto-claim takes on | off")
@@ -454,9 +670,9 @@ def cmd_admin(a):
     else:
         raise AgopsError("unknown admin action %r" % a.action)
     core.save_config(cfg)
-    out(a, cfg, "coordination_enabled=%s enforcement=%s auto_claim=%s"
+    out(a, cfg, "coordination_enabled=%s enforcement=%s claim_policy=%s auto_claim=%s"
         % (cfg["coordination_enabled"], cfg["enforcement"],
-           cfg.get("auto_claim", False)))
+           cfg.get("claim_policy", "assigned"), cfg.get("auto_claim", False)))
 
 
 def cmd_events(a):
@@ -534,6 +750,11 @@ def build_parser():
 
     sub.add_parser("whoami").set_defaults(fn=cmd_whoami)
     sub.add_parser("status", help="team dashboard").set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("monitor", help="full board: sessions, tasks, commits")
+    s.add_argument("--watch", type=int, metavar="SECONDS",
+                   help="repaint every N seconds until Ctrl-C")
+    s.set_defaults(fn=cmd_monitor)
     sub.add_parser("doctor", help="is coordination working").set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser("agents"); s.add_argument("--all", action="store_true")
@@ -559,6 +780,11 @@ def build_parser():
     s.add_argument("--force", action="store_true",
                    help="claim despite a BLOCKING conflict (only after agreeing)")
     s.set_defaults(fn=cmd_claim)
+
+    s = sub.add_parser("assign", help="dispatch a task to an agent (human control)")
+    s.add_argument("task_id"); s.add_argument("to", help="agent name")
+    s.add_argument("--note", help="anything the agent should know first")
+    s.set_defaults(fn=cmd_assign)
 
     s = sub.add_parser("release"); s.add_argument("task_id"); s.add_argument("--reason")
     s.set_defaults(fn=cmd_release)
@@ -610,10 +836,11 @@ def build_parser():
     s = sub.add_parser("drop"); s.add_argument("resource"); s.set_defaults(fn=cmd_drop)
 
     s = sub.add_parser("admin", help="human override")
-    s.add_argument("action", choices=["pause", "resume", "enforcement",
+    s.add_argument("action", choices=["pause", "resume", "enforcement", "policy",
                                       "auto-claim", "assign", "release",
-                                      "cancel", "clear-locks"])
+                                      "cancel", "clear-locks", "clear-agents"])
     s.add_argument("value", nargs="?"); s.add_argument("--task-id")
+    s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_admin)
 
     s = sub.add_parser("events"); s.add_argument("--limit", type=int, default=25)

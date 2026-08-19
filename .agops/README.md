@@ -120,7 +120,28 @@ The loser gets `TASK-007 is already owned by alpha.` and cannot act as owner:
 `complete` and `release` re-check ownership and refuse. Six concurrent OS
 processes racing one claim is a test in the suite, not a hope.
 
-## 6. Discovery and the auto-claim brake
+## 6. Who decides what an agent works on
+
+**Tabor dispatches; agents do not self-serve.** `claim_policy` in
+`.agops/project.json` defaults to `assigned`, and an unforced `claim` is refused:
+
+```
+py tools\agops.py assign TASK-005 charlie --note "exe-build lock is free"
+```
+
+That sets the owner, marks it IN_PROGRESS and messages the agent, who picks it up
+on its next turn. An agent told directly to start uses `claim --force`, which
+records that a human authorised it.
+
+Why this is the default: the problem this system was built for is three sessions
+landing on one task. Dispatch solves that without giving up control of what gets
+built next, which is the part a human is actually good at and wants to keep.
+
+```
+py tools\agops.py admin policy assigned      # default: Tabor dispatches
+py tools\agops.py admin policy on_request    # agents may claim when told to
+py tools\agops.py admin policy self_serve    # swarm: agents pull from the queue
+```
 
 **Agents do not pick up work on their own.** `auto_claim` in
 `.agops/project.json` is **false** by default: an idle agent surfaces the ranked
