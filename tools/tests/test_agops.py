@@ -806,6 +806,65 @@ class TestMonitor(Base):
         self.assertIn("nobody registered", r.stdout)
 
 
+class TestLiveMonitor(Base):
+    """The board is meant to sit open on a second screen for hours.
+
+    Which makes two things load-bearing that a one-shot view never needs: it
+    must not strobe, and it must survive the coordination store being briefly
+    unreadable without taking the window down with it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        core.register_agent(session_id="s-a", name="alpha")
+        core.create_task("live work", priority="HIGH")
+
+    def test_paint_clears_the_tail_when_the_board_shrinks(self):
+        from agops import cli as agops_cli
+        import io as _io
+        import contextlib
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agops_cli._paint(["only one line"], 5)
+        written = buf.getvalue()
+        self.assertIn("\033[H", written, "cursor was not homed")
+        self.assertIn("\033[K", written, "lines were not cleared as overwritten")
+        self.assertIn("\033[J", written, "tail was not cleared after shrinking")
+
+    def test_paint_does_not_clear_the_whole_screen_each_frame(self):
+        from agops import cli as agops_cli
+        import io as _io
+        import contextlib
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agops_cli._paint(["a", "b", "c"], 3)
+        self.assertNotIn("\033[2J", buf.getvalue(),
+                         "full clear per frame makes the board strobe")
+
+    def test_enabling_ansi_never_raises(self):
+        from agops import cli as agops_cli
+        agops_cli._enable_ansi()          # must be safe on any console
+
+    def test_watch_emits_frames_and_a_footer(self):
+        proc = subprocess.Popen(
+            [sys.executable, CLI, "monitor", "--watch", "1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, AGOPS_HOME=_TMP))
+        try:
+            time.sleep(3.5)
+        finally:
+            proc.terminate()
+            out_text = proc.communicate(timeout=10)[0]
+        self.assertIn("watching every 1s", out_text)
+        self.assertIn("Ctrl-C to stop", out_text)
+        self.assertGreaterEqual(out_text.count("SESSIONS"), 2,
+                                "expected repeated frames")
+
+    def test_one_shot_has_no_footer(self):
+        r = run_cli("monitor")
+        self.assertNotIn("Ctrl-C to stop", r.stdout)
+
+
 class TestGracefulDegradation(Base):
     def test_doctor_reports_health_honestly(self):
         r = run_cli("doctor", "--json")

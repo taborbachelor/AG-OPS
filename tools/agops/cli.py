@@ -295,27 +295,110 @@ def render_monitor(st, commit_state=None) -> str:
     return "\n".join(L)
 
 
+def _enable_ansi():
+    """Turn on VT processing so the cursor codes work in a Windows console.
+
+    Without this the board prints raw escape sequences on stock cmd.exe. Windows
+    Terminal and PowerShell 7 already have it on; enabling it twice is harmless.
+    """
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def _paint(lines, prev_len):
+    """Redraw in place: home the cursor, overwrite, clear the tail.
+
+    Deliberately NOT clear-screen-then-write. A full clear flashes on every
+    frame, and this thing is meant to sit open on a second monitor for hours --
+    a board that strobes once a second is one you stop looking at. Padding each
+    line and clearing from the cursor down leaves the screen stable and only
+    changes the characters that actually changed.
+    """
+    buf = ["\033[H"]
+    for ln in lines:
+        buf.append(ln + "\033[K\n")
+    if prev_len > len(lines):
+        buf.append("\033[J")
+    sys.stdout.write("".join(buf))
+    sys.stdout.flush()
+    return len(lines)
+
+
+def _board(a):
+    st = core.project_status(project=a.project)
+    st["completed"] = core.list_tasks(status="COMPLETE", project=a.project)
+    states = core.commit_states([t["commit_hash"] for t in st["completed"]])
+    return st, states
+
+
 def cmd_monitor(a):
-    while True:
-        st = core.project_status(project=a.project)
-        st["completed"] = core.list_tasks(status="COMPLETE", project=a.project)
-        states = core.commit_states([t["commit_hash"] for t in st["completed"]])
-        if a.json:
-            st["commit_states"] = states
-            out(a, st)
-            return
-        text = render_monitor(st, states)
-        if a.watch:
-            # Clear and repaint rather than scroll: this is a dashboard, and a
-            # dashboard that scrolls is a log.
-            sys.stdout.write("\033[2J\033[H")
-        print(text)
-        if not a.watch:
-            return
-        try:
-            time.sleep(max(2, a.watch))
-        except KeyboardInterrupt:
-            return
+    if a.json:
+        st, states = _board(a)
+        st["commit_states"] = states
+        out(a, st)
+        return
+
+    if not a.watch:
+        st, states = _board(a)
+        print(render_monitor(st, states))
+        return
+
+    interval = max(1, a.watch)
+    ansi = _enable_ansi()
+    if ansi:
+        sys.stdout.write("\033[2J")            # one clear, at the start only
+    painted, last_body, last_change = 0, None, time.time()
+    try:
+        while True:
+            try:
+                st, states = _board(a)
+                body = render_monitor(st, states).splitlines()
+                degraded = None
+            except Exception as exc:
+                # A locked or missing database must not kill a board that has
+                # been open for hours. Say so on the board and keep polling.
+                body = ["=" * _W,
+                        " AGOPS MONITOR - COORDINATION UNREADABLE",
+                        "=" * _W, "",
+                        "  %s" % str(exc)[:70],
+                        "",
+                        "  Work is unaffected; this view is blind, not broken.",
+                        "  Retrying every %ds. Ctrl-C to stop." % interval]
+                degraded = True
+            key = [l for l in body if not l.startswith(" AGOPS GCS")]
+            if key != last_body:
+                last_body, last_change = key, time.time()
+            foot = ("  watching every %ds  |  last change %s ago  |  %s  |  Ctrl-C to stop"
+                    % (interval, _hms(time.time() - last_change),
+                       time.strftime("%H:%M:%S")))
+            if degraded:
+                foot = "  retrying  |  %s  |  Ctrl-C to stop" % time.strftime("%H:%M:%S")
+            frame = body + [foot]
+            if ansi:
+                painted = _paint(frame, painted)
+            else:
+                # Dumb terminal or a pipe: append frames instead of repainting,
+                # and FLUSH -- piped stdout is block-buffered, so without this
+                # a monitor redirected to a file or a log shows nothing until
+                # the process exits, which for this loop means never.
+                print("\n".join(frame))
+                sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        if ansi:
+            sys.stdout.write("\033[J")
+        print("\nmonitor stopped.")
+        return
 
 
 def out(args, obj, text=None):
@@ -752,8 +835,9 @@ def build_parser():
     sub.add_parser("status", help="team dashboard").set_defaults(fn=cmd_status)
 
     s = sub.add_parser("monitor", help="full board: sessions, tasks, commits")
-    s.add_argument("--watch", type=int, metavar="SECONDS",
-                   help="repaint every N seconds until Ctrl-C")
+    s.add_argument("--watch", type=int, nargs="?", const=2, metavar="SECONDS",
+                   help="live board: repaint every N seconds (default 2) until "
+                        "Ctrl-C. Run this in its own terminal.")
     s.set_defaults(fn=cmd_monitor)
     sub.add_parser("doctor", help="is coordination working").set_defaults(fn=cmd_doctor)
 

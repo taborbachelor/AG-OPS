@@ -248,6 +248,31 @@ Recovery **never** frees a task automatically, deletes anything, or touches git.
 OFFLINE and frees its resource locks, but **preserves task ownership** — a closed
 terminal is not evidence the work is finished.
 
+## 11b. The live board
+
+Keep this open in its own terminal for the whole work session:
+
+```
+tools\monitor.cmd                     (double-click works too)
+py tools\agops.py monitor --watch     (same thing, 2s refresh)
+py tools\agops.py monitor --watch 10  (slower, for a second screen)
+```
+
+It shows every session (live / stale / offline), what each holds, IN PROGRESS
+with who took it and when, the OPEN queue, what is BLOCKED and on what, and
+COMPLETE with the commit **and whether it is PUSHED, LOCAL ONLY, NOT IN REPO or
+has no commit at all**. That last column is the point: "complete" is a claim
+about the board, "pushed" is a claim about the world, and they come apart.
+
+It repaints in place rather than clearing the screen each frame, because a board
+that strobes once a second is one you stop looking at. If the coordination store
+is briefly unreadable it says so on the board and keeps polling rather than
+taking the window down.
+
+**A Claude slash command cannot do this.** A session runs a command, gets output
+and returns -- it has nowhere to keep repainting. `/agops-monitor` gives a
+one-shot snapshot and points here for the live view.
+
 ## 12. Human override
 
 ```
