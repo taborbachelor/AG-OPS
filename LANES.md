@@ -365,6 +365,41 @@ but not without lessons. If you are replacing it, these are the parts that cost 
   compensation is that overrides need a token only Tabor sets and every one is audited. A redesign
   should either accept the same limit honestly or move enforcement somewhere sessions cannot reach.
 
+### Addendum to the field notes (bravo, PLANNER)
+
+The section above says most of it and I agree with all of it — these are only the points it does
+not already cover.
+
+1. **Heartbeat-by-use fails for exactly the sessions that need it most.** It is listed above as a
+   thing that worked, and it is, *provided the hook loads*. An unguarded session never renews, so
+   its claim decays after 90 minutes while it is still actively working, and its area becomes
+   claimable out from under it. Two of three sessions were in that state today. Liveness should not
+   be a side effect of the enforcement path, because the sessions with no enforcement are the ones
+   whose liveness you can least afford to guess at.
+
+2. **The bootstrap trap: the command that fixes your claim was itself guarded.** Once `tools/` was
+   claimed by another lane, `py tools\claim.py claim ...` was blocked — the path matched, and the
+   guard's answer was "claim an area first." You cannot claim an area first; that is the command
+   being blocked. Whatever replaces this needs its own control commands on an unconditional
+   always-allow list, checked before anything else.
+
+3. **One working tree is the deeper version of the `git add -A` problem.** Explicit pathspecs fix
+   the commit, but the tree is still shared: a test run picks up every other lane's uncommitted
+   code, so "419 green" is not a statement about your own change — it silently includes whatever
+   else is on disk at that second. Per-session worktrees make both problems structural instead of
+   procedural (rule 6's `node_modules` junction warning still applies). If worktrees stay off the
+   table, then any test count quoted anywhere should name whose work was in the tree.
+
+4. **Ownership is file-level; the real conflicts were concept-level.** PLANNER's commanded-bank
+   ceiling and AIR's measured-bank monitor are two constants, in two lanes, that must agree — and
+   nothing in the file partition hints at the relationship. The seam register caught it because a
+   human wrote it down. "Who owns *bank*" is a question the tooling cannot currently ask, and three
+   of the six seams this run were that shape.
+
+5. **The lock machinery was never the binding constraint.** `sitl-5760` was never contended, no
+   session ever needed an override grant, and file overlap was settled in the first minute. The work
+   split cleanly on files and hard on *agreements*. Weight the redesign accordingly.
+
 ---
 
 ## Protocol
@@ -384,55 +419,3 @@ but not without lessons. If you are replacing it, these are the parts that cost 
 4. Update `CLAUDE-CALEB.md`'s `▶ RESUME HERE` — re-read it immediately before writing, since another
    session may have just restructured it. (`DOCS` area — claim it or coordinate.)
 5. `py tools\claim.py release --session <id>`, drop any resources, commit and push.
-
----
-
-## Findings from the first three-session run (2026-08-19, bravo)
-
-Written for the coordination redesign, not as a complaint about this one. This board plus the
-registry did work — three sessions shipped four features into one repo with no lost edits and no
-merge conflicts. These are the things the next design should account for, in rough order of how
-much they cost.
-
-1. **The guard binds to the session's project directory, not to the repo.** `.claude/settings.json`
-   is project-level, so a session started from `C:\Users\jacks` never loads it even while working
-   `rc-plane-app`. **Two of the three sessions today ran unguarded** and did not know it until they
-   tried the `CLAIM_WHOAMI` handshake and got nothing back. It was patched mid-session with a
-   home-level wrapper hook — which lives in machine config, so it protects this machine and travels
-   to no other. A design that assumes the hook is present needs to *verify* it is present, and say
-   so loudly when it is not, because the failure is silent and looks exactly like working normally.
-
-2. **Heartbeats renew through the hook, so an unguarded session's claim decays while it works.**
-   90 minutes in, its area is free for someone else to claim out from under it. Renewing by hand
-   (re-running `claim`, which is idempotent) works, but only if you know you have to.
-
-3. **All three sessions shared ONE working tree.** The registry stops overlapping *edits*; nothing
-   stops overlapping *files*. `git add -A` stages other lanes' work in progress — alpha had four
-   files staged in the index at the moment bravo committed, and only an explicit pathspec
-   (`git commit -- <paths>`) kept them out. Test runs are the same story: "419 green" included two
-   other lanes' uncommitted code, so a suite result is not evidence about your own change alone.
-   Per-session worktrees would make both problems structural rather than procedural — with the
-   `node_modules` junction warning in rule 6 still applying.
-
-4. **The guard blocks read-only commands, including the one that fixes your claim.** `MUTATORS`
-   treats any `>` not followed by `&` as a redirect, so a Python one-liner containing the two
-   characters `-` and `>` reads as a write; `PATHISH` then extracts every `.py` on the line and
-   checks each one. That blocked a diagnostic that wrote nothing. Worse, once `tools/` was claimed,
-   `py tools\claim.py claim ...` was itself blocked — **the command you need in order to hold a
-   claim requires you to already hold one.** Any redesign wants an explicit always-allowed list for
-   its own control commands.
-
-5. **The seam register carried the value; file locking was the cheap part.** File-disjointness was
-   settled in minutes and never contended. Everything genuinely hard was a cross-lane *agreement*
-   the registry cannot represent: S2 (two bank numbers that must not disagree), S5 and S6 (planner
-   surfaces whose safety value only exists once UI renders them). If only one mechanism survives
-   the redesign, keep this one.
-
-6. **Areas are disjoint by file but not by concept.** PLANNER's commanded-bank ceiling and AIR's
-   measured-bank monitor are two constants in two lanes that must agree; nothing about the file
-   split hints at that. The seam register caught it because a human wrote it down, not because the
-   tooling could infer it. Concept-level ownership — "who owns *bank*" — is the gap.
-
-7. **What never came up:** `sitl-5760` was never contended (neither planner item needed it), and no
-   session ever asked Tabor for an overlap grant. The lock machinery is fine; it just was not the
-   binding constraint on a day when the work happened to split cleanly.
