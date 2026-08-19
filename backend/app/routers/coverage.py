@@ -53,6 +53,12 @@ class CoverageRequest(BaseModel):
     # geometry always comes back in stats.turn_* whether or not the limit was
     # met — see coverage.py's turn-geometry section.
     max_bank: float = Field(DEFAULT_MAX_BANK_DEG, ge=0, lt=90)
+    # Widen each pass to cover the full swath-deep band it sprays, closing the
+    # sawtooth strip along a slanted or traced boundary. Spray then reaches up
+    # to half a swath past the boundary where the edge slants away (bounded --
+    # see coverage.py's headlands section). Set false where overspray is not
+    # acceptable: an organic neighbour, a road, a waterway.
+    headlands: bool = True
 
 
 class AutoCoverageRequest(BaseModel):
@@ -92,6 +98,12 @@ class AutoCoverageRequest(BaseModel):
     # geometry always comes back in stats.turn_* whether or not the limit was
     # met — see coverage.py's turn-geometry section.
     max_bank: float = Field(DEFAULT_MAX_BANK_DEG, ge=0, lt=90)
+    # Widen each pass to cover the full swath-deep band it sprays, closing the
+    # sawtooth strip along a slanted or traced boundary. Spray then reaches up
+    # to half a swath past the boundary where the edge slants away (bounded --
+    # see coverage.py's headlands section). Set false where overspray is not
+    # acceptable: an organic neighbour, a road, a waterway.
+    headlands: bool = True
 
 
 # Same bounds as the multi router's speed field, enforced in the handlers:
@@ -137,6 +149,7 @@ def plan(req: CoverageRequest):
                       [[p.model_dump() for p in kp] for kp in req.keepouts]),
             keepout_buffer_m=req.keepout_buffer,
             max_bank_deg=req.max_bank,
+            headlands=req.headlands,
         )
     except ValueError as exc:
         # Geometry-level rejections (degenerate polygon, bad speed, fully
@@ -190,7 +203,7 @@ def plan_auto(req: AutoCoverageRequest):
                      if req.keepouts else [])
     plan_kwargs = dict(swath_m=req.swath, alt_m=req.alt,
                        angle_deg=req.angle, speed_ms=req.speed,
-                       max_bank_deg=req.max_bank)
+                       max_bank_deg=req.max_bank, headlands=req.headlands)
     try:
         zones = fetch_zones(clat, clon, radius)
     except ValueError as exc:

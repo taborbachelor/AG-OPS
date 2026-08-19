@@ -41,6 +41,9 @@ class MultiRequest(BaseModel):
     # Turn-geometry bank ceiling, per field. See routers/coverage.py and
     # coverage.py's turn-geometry section; 0 restores the plain serpentine.
     max_bank: float = Field(DEFAULT_MAX_BANK_DEG, ge=0, lt=90)
+    # See routers/coverage.py — pass widening that closes the boundary
+    # headland, at the cost of bounded overspray past the field edge.
+    headlands: bool = True
 
 
 # Zone-derived keepout rings are bounded like caller keepouts — but instead of
@@ -175,6 +178,7 @@ def plan_multi_endpoint(req: MultiRequest):
             hazards=(hazards or None),
             hazard_buffer_m=req.powerline_buffer,
             max_bank_deg=req.max_bank,
+            headlands=req.headlands,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

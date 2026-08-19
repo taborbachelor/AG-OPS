@@ -49,12 +49,15 @@ def _coverage_totals(planned: dict) -> dict:
 
 def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
                home=None, speed_ms=18.0, hazards=None, hazard_buffer_m=0.0,
-               max_bank_deg=DEFAULT_MAX_BANK_DEG):
+               max_bank_deg=DEFAULT_MAX_BANK_DEG, headlands=True):
     """Plan a multi-field job.
 
     fields: list of polygons (each a list of {lat,lon}). Fields that fail to
     plan (fully blocked / degenerate) are reported in `skipped`, never fatal
     unless NO field survives.
+
+    headlands: per-field pass widening, passed straight through to
+    plan_coverage.
 
     max_bank_deg: per-field turn-geometry bank ceiling, passed straight
     through to plan_coverage. Transit legs BETWEEN fields are not constrained
@@ -93,7 +96,8 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
                 # Hazard rerouting draws on the same job-wide CPU allowance.
                 kwargs.setdefault("work_budget", work_budget)
             plan = plan_coverage(poly, swath_m, alt_m, speed_ms=speed_ms,
-                                 max_bank_deg=max_bank_deg, **kwargs)
+                                 max_bank_deg=max_bank_deg,
+                                 headlands=headlands, **kwargs)
             if plan["waypoints"]:
                 planned[i] = plan
             else:

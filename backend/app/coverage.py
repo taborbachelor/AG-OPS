@@ -55,6 +55,7 @@ def plan_coverage(
     hazards: Optional[list[list[dict]]] = None,
     hazard_buffer_m: float = 0.0,
     max_bank_deg: float = DEFAULT_MAX_BANK_DEG,
+    headlands: bool = True,
 ) -> dict:
     """Plan a serpentine spray pattern over a lat/lon polygon.
 
@@ -99,6 +100,12 @@ def plan_coverage(
             stats.turn_* -- on a field too narrow to satisfy the limit the
             planner flies the widest turns available and says so, rather than
             failing a plan the operator needs.
+        headlands: widen each pass to cover the full swath-deep band it sprays
+            rather than only the line through its middle, closing the sawtooth
+            strip along a slanted or traced boundary. Costs up to half a swath
+            of overspray past the boundary where the edge slants away -- the
+            same overhang the sweep grid already produces in the other axis.
+            False restores line-exact extents. See the headlands section.
 
     Returns:
         {"waypoints": [{"lat", "lon", "alt"}, ...],  # segment endpoints in flight order
@@ -182,12 +189,6 @@ def plan_coverage(
     sin_t = math.sin(math.radians(theta))
     rot = [(x * cos_t + y * sin_t, -x * sin_t + y * cos_t) for x, y in pts]
 
-    # Lateral room every reversal needs: reversing between two passes d apart
-    # is a half-circle of radius d / 2, so d = 2R at the bank limit.
-    min_turn_spacing_m = (0.0 if max_bank_deg <= 0.0
-                          else 2.0 * turn_radius_m(speed_ms, max_bank_deg))
-    passes = _boustrophedon_passes(rot, swath_m, min_turn_spacing_m)
-
     # ONE CPU allowance for this plan, shared by keepout clipping AND hazard
     # rerouting. Initialised here rather than inside each phase: two separate
     # defaults would let a single request spend twice the DoS budget.
@@ -206,6 +207,17 @@ def plan_coverage(
                 "keepout clipping too complex for this request: "
                 "increase the swath, shrink the field/job, or simplify "
                 "the keepouts")
+
+    # Lateral room every reversal needs: reversing between two passes d apart
+    # is a half-circle of radius d / 2, so d = 2R at the bank limit.
+    min_turn_spacing_m = (0.0 if max_bank_deg <= 0.0
+                          else 2.0 * turn_radius_m(speed_ms, max_bank_deg))
+    # Built here rather than earlier so headland widening charges the SAME CPU
+    # budget as keepout clipping and hazard routing -- one allowance per plan.
+    headland_stats: dict = {}
+    passes = _boustrophedon_passes(rot, swath_m, min_turn_spacing_m,
+                                   headlands=headlands, charge=_charge,
+                                   stats_out=headland_stats)
 
     if keepouts is None:
         # Legacy path: no clipping, no extra stats keys, identical output.
@@ -313,6 +325,10 @@ def plan_coverage(
     # flown (segments, not the pre-clip passes): the bank this plan commands,
     # whether it met the limit, and the speed that would if it did not.
     result["stats"].update(_turn_stats(segments, speed_ms, max_bank_deg))
+    # How much sprayed length the headland widening added, and to how many
+    # passes. Zero on a field whose edges run parallel to the passes -- there is
+    # no sawtooth to close there, and saying so is more useful than silence.
+    result["stats"].update(headland_stats)
     if keepouts is not None:
         # Only in keepout mode: pre-keepout clients keep the exact legacy
         # stats shape (regression-pinned in tests).
@@ -423,6 +439,98 @@ def _line_crossings(pts: list[tuple[float, float]], c: float) -> list[tuple[floa
         if xs[j + 1] - xs[j] > 1e-9:  # drop tangential zero-length touches
             segments.append((xs[j], xs[j + 1]))
     return segments
+
+
+# --- headlands ----------------------------------------------------------------
+#
+# WHY THIS EXISTS. Coverage analysis put 0.41 and 0.56 acres of genuinely missed
+# ground on real 40-acre Sabetha fields. Measured again 2026-08-19 on a field
+# with a traced (rather than hand-drawn) boundary: 0.93 acres missed, of which
+# **0.76 was along the field boundary and only 0.17 around the keepout** -- so
+# this is a boundary problem first and a keepout problem a distant second.
+#
+# THE MECHANISM. A pass sprays a swath_m-wide BAND centred on its line, but its
+# sprayed extent is clipped to where the field boundary sits AT THE LINE. Any
+# row inside the band where the field reaches further out is missed. On a
+# straight edge parallel to the passes that is nothing; on a slanted or traced
+# edge it is a sawtooth strip half a swath deep running the whole boundary --
+# which is exactly the headland a ground rig would close with a perimeter lap.
+#
+# WHY NOT A PERIMETER LAP. That is the ground-rig answer and it is wrong for an
+# aircraft. A boundary lap is a closed ring whose corners are the field's own
+# corners: 90-degree turns at a point, which at spray speed demand a bank no
+# airframe can fly (see the turn-geometry section -- we just spent +38% path
+# length getting rid of exactly that). It would also add a whole extra lap of
+# flight time. Instead each pass is EXTENDED to cover its own band: compute the
+# field crossings over the full [c - swath/2, c + swath/2] strip rather than
+# only at y = c, and stretch the pass to the widest the field gets in there.
+# No new passes, no new turns, no change to the turn geometry, and the extra
+# distance is a few metres per pass end.
+#
+# THE EXTREMES ARE EXACT, not sampled. Between vertices a polygon edge is
+# straight, so x(y) is linear and the widest crossing over a band can only occur
+# at a band edge or at a vertex inside the band. Sampling exactly those rows is
+# exact for any polygon, at a couple of crossing computations per pass.
+#
+# WHAT IT COSTS: spray reaches up to half a swath past the boundary where the
+# edge slants away. That is the same overspray the planner already accepts in
+# the other axis -- the sweep grid is centred in the field extent, so the outer
+# bands already overhang by up to swath/2. This makes the two axes consistent
+# rather than introducing something new. Callers who cannot accept it pass
+# headlands=False.
+#
+# KEEPOUTS ARE DELIBERATELY NOT WIDENED. The same band logic would say a pass
+# should stop SHORT of where the keepout clip puts it, and the remaining ~0.17
+# acres sits between the buffered keepout and the last sprayed point. Closing
+# that means spraying nearer a pond than the clip allows, and the buffer is a
+# chemical-drift guarantee with tests that assert it. Coverage is not worth
+# eroding a standoff, so the keepout share of the miss stays missed and stays
+# reported in coverage_pct.
+
+# Rows are sampled a hair inside the band edge: the crossing rule is half-open
+# in y, so a vertex sitting exactly on a sampled row is a degenerate case worth
+# stepping around rather than reasoning about.
+_BAND_EPS = 1e-6
+
+
+def _headland_crossings(rot, c, half, vertex_ys, charge=None):
+    """x-intervals for the pass on line y=c, widened to cover its whole band.
+
+    ONLY THE OUTER ENDS MOVE. A widened interval may reach past the field's
+    outer boundary -- that is the whole point, and the overspray is bounded by
+    how far the edge slants within half a swath. It may NOT grow inward toward
+    another interval on the same line. Those two intervals are the prongs of a
+    concave field, and the gap between them is a notch the boundary genuinely
+    excludes: a farmstead, a neighbour's ground, a road. The band edge below a
+    U-shaped notch is solid field, so an unconfined widening reads that as
+    permission to fly straight across the notch, spraying it. Caught by
+    test_u_shape_splits_lines_into_two_segments, which is why every interval
+    except the first keeps its left bound and every interval except the last
+    keeps its right bound.
+    """
+    base = _line_crossings(rot, c)
+    if not base or half <= 0.0:
+        return base
+    rows = [c - half + _BAND_EPS, c + half - _BAND_EPS]
+    rows.extend(vy for vy in vertex_ys if c - half < vy < c + half)
+    out = [[a, b] for a, b in base]
+    for r in rows:
+        if charge is not None:
+            charge(len(rot))
+        for a, b in _line_crossings(rot, r):
+            for iv in out:
+                if b >= iv[0] and a <= iv[1]:      # overlaps this pass interval
+                    iv[0] = min(iv[0], a)
+                    iv[1] = max(iv[1], b)
+    # Confine every interior end to where it started: outward past the field
+    # boundary is intended, inward across a notch is not.
+    last = len(out) - 1
+    for k, iv in enumerate(out):
+        if k > 0:
+            iv[0] = max(iv[0], base[k][0])
+        if k < last:
+            iv[1] = min(iv[1], base[k][1])
+    return [(lo, hi) for lo, hi in out if hi - lo > 1e-9]
 
 
 # --- turn geometry ------------------------------------------------------------
@@ -615,7 +723,8 @@ def _turn_stats(passes, speed_ms: float, max_bank_deg: float) -> dict:
 
 def _boustrophedon_passes(
     rot: list[tuple[float, float]], swath_m: float,
-    min_turn_spacing_m: float = 0.0,
+    min_turn_spacing_m: float = 0.0, headlands: bool = False,
+    charge=None, stats_out: Optional[dict] = None,
 ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """Ordered spray passes ((start, end) in rotated coords) for the polygon.
 
@@ -636,6 +745,13 @@ def _boustrophedon_passes(
     later sweeps -- instead of in index order. Which lines exist, and where they
     lie, is unchanged: coverage is identical and only the ORDER differs. 0 keeps
     the plain adjacent-line serpentine.
+
+    headlands widens each pass to cover its own swath-deep band instead of just
+    the line through its middle, closing the sawtooth strip along a slanted or
+    traced boundary (see the headlands section). stats_out, when given, receives
+    headland_passes and headland_extra_m -- how many passes were widened and by
+    how much sprayed length, so the fix can be shown to have done something
+    rather than assumed to.
     """
     ys = [y for _, y in rot]
     xs = [x for x, _ in rot]
@@ -656,10 +772,24 @@ def _boustrophedon_passes(
         target_gap = math.ceil(min_turn_spacing_m / swath_m - 1e-9)
         line_ys = [line_ys[i] for i in _order_lines(n_lines, target_gap)]
 
+    # Vertex rows are where a boundary's x(y) changes slope, so they are the
+    # only interior rows a band's widest crossing can occur at (see headlands).
+    vertex_ys = sorted({y for _, y in rot}) if headlands else []
+    half = swath_m / 2.0
+    extra_m = 0.0
+    widened = 0
+
     passes = []
     cur = (min(xs), y_min)  # nominal start corner -> first pass flies west-to-east
     for c in line_ys:
         remaining = _line_crossings(rot, c)
+        if headlands:
+            base_len = sum(hi - lo for lo, hi in remaining)
+            remaining = _headland_crossings(rot, c, half, vertex_ys, charge)
+            grew = sum(hi - lo for lo, hi in remaining) - base_len
+            if grew > 1e-6:
+                widened += 1
+                extra_m += grew
         while remaining:
             best = None  # (distance, seg index, reversed?)
             for idx, (xa, xb) in enumerate(remaining):
@@ -672,6 +802,9 @@ def _boustrophedon_passes(
             start, end = ((xb, c), (xa, c)) if reverse else ((xa, c), (xb, c))
             passes.append((start, end))
             cur = end
+    if stats_out is not None:
+        stats_out["headland_passes"] = widened
+        stats_out["headland_extra_m"] = round(extra_m, 1)
     return passes
 
 

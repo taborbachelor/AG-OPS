@@ -247,10 +247,24 @@ class TestClipWorkCap(unittest.TestCase):
         # The pond overlaps two pass lines (y=90 and y=110) at buffer 0 and
         # has 4 vertices, so the real work is 8 edge visits; a patched cap
         # of 5 must trip on the second overlapping pass.
+        # headlands=False on purpose: headland widening shares this same
+        # allowance and would trip the cap first, which would leave this test
+        # passing without ever exercising the clipping guard it is named for.
         with mock.patch.object(coverage_module, "_MAX_CLIP_WORK", 5):
             with self.assertRaisesRegex(ValueError,
                                         "keepout clipping too complex"):
-                plan_rect(keepouts=[poly_ll(POND_XY)])
+                plan_rect(keepouts=[poly_ll(POND_XY)], headlands=False)
+
+    def test_headland_widening_is_charged_to_the_budget(self):
+        # Headland widening walks the boundary a few extra rows per pass, which
+        # on a huge field with a 500-vertex boundary is real CPU on the same
+        # GIL that serves telemetry. It shares the plan's one allowance rather
+        # than getting a free pass.
+        with_h = [coverage_module._MAX_CLIP_WORK]
+        without_h = [coverage_module._MAX_CLIP_WORK]
+        plan_rect(keepouts=[], work_budget=with_h, headlands=True)
+        plan_rect(keepouts=[], work_budget=without_h, headlands=False)
+        self.assertLess(with_h[0], without_h[0])
 
     def test_router_maps_cap_to_400(self):
         from fastapi import HTTPException
@@ -265,13 +279,22 @@ class TestClipWorkCap(unittest.TestCase):
 
     def test_far_keepouts_cost_no_work(self):
         # A keepout 10 km north of the field can never block a pass; the
-        # y-band prefilter must skip it entirely, so planning succeeds even
-        # with a near-zero work cap — real jobs with localized keepouts are
-        # only ever charged for rings a pass can actually hit.
+        # y-band prefilter must skip it entirely — real jobs with localized
+        # keepouts are only ever charged for rings a pass can actually hit.
+        #
+        # Measured by comparing the budget actually consumed with and without
+        # the far ring, rather than by planning under a near-zero cap. The cap
+        # is now shared with headland widening, so "it planned at all" would no
+        # longer isolate the prefilter; spend-with vs spend-without does, and
+        # tests the claim more directly than the old form did.
         far = poly_ll([(0.0, 10000.0), (40.0, 10000.0),
                        (40.0, 10040.0), (0.0, 10040.0)])
-        with mock.patch.object(coverage_module, "_MAX_CLIP_WORK", 1):
-            plan = plan_rect(keepouts=[far])
+        without = [coverage_module._MAX_CLIP_WORK]
+        with_far = [coverage_module._MAX_CLIP_WORK]
+        plan_rect(keepouts=[], work_budget=without)
+        plan = plan_rect(keepouts=[far], work_budget=with_far)
+        self.assertEqual(without[0], with_far[0],
+                         "a keepout 10 km away was charged to the work budget")
         self.assertEqual(plan["stats"]["keepouts_applied"], 0)
         self.assertEqual(plan["stats"]["n_segments"],
                          plan["stats"]["n_passes"])
@@ -311,7 +334,10 @@ class TestLegacyRegression(unittest.TestCase):
              # it cannot know the plan is flyable.
              "turn_reversals", "turn_zero_offset", "turn_bank_limit_deg",
              "turn_radius_m", "turn_bank_deg", "turn_bank_ok",
-             "turn_max_speed_ms"})
+             "turn_max_speed_ms",
+             # Same reasoning for headlands: how much ground the plan reaches
+             # is not keepout bookkeeping either.
+             "headland_passes", "headland_extra_m"})
         # Pins from test_coverage.py's rectangle expectations.
         self.assertEqual(plan["stats"]["n_passes"], 10)
         self.assertEqual(len(plan["waypoints"]), 20)
@@ -445,3 +471,48 @@ class TestPlanAuto(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHeadlandsKeepStandoff(unittest.TestCase):
+    """Headland widening must not erode the keepout buffer.
+
+    Widening stretches a pass toward the field EDGE, so the case that matters
+    is a keepout sitting on that edge: the widened endpoint is heading straight
+    at it. Widening happens before clipping, so the buffer still holds -- this
+    pins that ordering, because reversing it would spray inside the standoff
+    with no test to notice.
+    """
+
+    # Pond hard against the field's east edge, straddling several pass lines.
+    EDGE_POND_XY = [(360.0, 60.0), (400.0, 60.0), (400.0, 140.0), (360.0, 140.0)]
+
+    def test_every_sprayed_point_keeps_the_buffer(self):
+        plan = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                             angle_deg=0.0,
+                             keepouts=[poly_ll(self.EDGE_POND_XY)],
+                             keepout_buffer_m=25.0)
+        for (ax, ay), (bx, by) in segments_xy(plan):
+            for k in range(21):
+                t = k / 20.0
+                px, py = ax + t * (bx - ax), ay + t * (by - ay)
+                self.assertGreaterEqual(
+                    dist_to_poly_xy(px, py, self.EDGE_POND_XY), 25.0 - 0.5,
+                    f"sprayed point ({px:.1f}, {py:.1f}) inside the buffer")
+
+    def test_widening_still_happened_on_that_field(self):
+        # Guard against the test above passing because nothing was widened at
+        # all: the slanted case has to actually exercise the interaction.
+        slanted = [(0.0, 0.0), (400.0, 0.0), (400.0, 120.0), (300.0, 200.0),
+                   (0.0, 200.0)]
+        plan = plan_coverage(poly_ll(slanted), swath_m=20.0, alt_m=15.0,
+                             angle_deg=0.0,
+                             keepouts=[poly_ll(self.EDGE_POND_XY)],
+                             keepout_buffer_m=25.0)
+        self.assertGreater(plan["stats"]["headland_passes"], 0)
+        for (ax, ay), (bx, by) in segments_xy(plan):
+            for k in range(21):
+                t = k / 20.0
+                px, py = ax + t * (bx - ax), ay + t * (by - ay)
+                self.assertGreaterEqual(
+                    dist_to_poly_xy(px, py, self.EDGE_POND_XY), 25.0 - 0.5,
+                    f"sprayed point ({px:.1f}, {py:.1f}) inside the buffer")

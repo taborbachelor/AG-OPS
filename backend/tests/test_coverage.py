@@ -514,3 +514,120 @@ class TestBankLimitValidation(unittest.TestCase):
         plan = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
                              max_bank_deg=0.0)
         self.assertEqual(plan["stats"]["turn_bank_limit_deg"], 0.0)
+
+
+# A field with edges the passes are NOT parallel to: the shape that creates a
+# headland. Slanted top-right corner (a road) and a slanted left edge (a creek).
+SLANTED_XY = [(0.0, 0.0), (420.0, 0.0), (420.0, 260.0), (300.0, 400.0),
+              (60.0, 400.0), (0.0, 300.0)]
+
+
+def _boundary_distance(px: float, py: float,
+                       poly_xy: list[tuple[float, float]]) -> float:
+    """Distance from a point to the polygon boundary (0 if on it)."""
+    best = math.inf
+    n = len(poly_xy)
+    for i in range(n):
+        ax, ay = poly_xy[i]
+        bx, by = poly_xy[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        L = dx * dx + dy * dy
+        t = 0.0 if L == 0 else max(0.0, min(
+            1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+        best = min(best, math.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+    return best
+
+
+class TestHeadlands(unittest.TestCase):
+    """Pass widening that closes the strip along a slanted boundary.
+
+    Background: a pass sprays a swath-deep BAND but was clipped to the field
+    boundary as it sits at the line through the band's middle. Every row in the
+    band where the field reaches further out was missed -- a sawtooth strip
+    running the whole boundary. Measured on a traced (not hand-drawn) boundary:
+    0.93 acres missed, 0.76 of it along the edge.
+    """
+
+    def test_slanted_boundary_coverage_improves(self):
+        kw = dict(swath_m=20.0, alt_m=15.0, keepouts=[])
+        wide = plan_coverage(poly_ll(SLANTED_XY), **kw)
+        narrow = plan_coverage(poly_ll(SLANTED_XY), headlands=False, **kw)
+        self.assertGreater(wide["stats"]["coverage_pct"],
+                           narrow["stats"]["coverage_pct"])
+        self.assertLess(wide["stats"]["uncovered_acres"],
+                        narrow["stats"]["uncovered_acres"])
+        # And it reports what it did rather than leaving it to be inferred.
+        self.assertGreater(wide["stats"]["headland_passes"], 0)
+        self.assertGreater(wide["stats"]["headland_extra_m"], 0.0)
+
+    def test_spray_never_reaches_further_than_half_a_swath_outside(self):
+        # The bound that makes the overspray acceptable, and it is geometric
+        # rather than lucky: a widened endpoint sits at the boundary crossing
+        # of some row within half a swath of its own line, so the boundary is
+        # never further than that half swath away from it.
+        swath = 20.0
+        plan = plan_coverage(poly_ll(SLANTED_XY), swath_m=swath, alt_m=15.0,
+                             keepouts=[])
+        for px, py in waypoints_xy(plan):
+            if not point_in_polygon_grown(px, py, SLANTED_XY, tol=0.0):
+                self.assertLessEqual(
+                    _boundary_distance(px, py, SLANTED_XY), swath / 2.0 + 0.5,
+                    f"({px:.1f}, {py:.1f}) sprays further outside than half a swath")
+
+    def test_edges_parallel_to_the_passes_need_no_widening(self):
+        # A rectangle swept along its own edge has no sawtooth to close, so the
+        # feature must do nothing at all -- not merely something small.
+        plan = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                             angle_deg=0.0, keepouts=[])
+        self.assertEqual(plan["stats"]["headland_passes"], 0)
+        self.assertEqual(plan["stats"]["headland_extra_m"], 0.0)
+        off = plan_coverage(poly_ll(RECT_XY), swath_m=20.0, alt_m=15.0,
+                            angle_deg=0.0, keepouts=[], headlands=False)
+        self.assertAlmostEqual(plan["stats"]["path_length_m"],
+                               off["stats"]["path_length_m"], places=6)
+
+    def test_a_notch_is_never_sprayed_across(self):
+        # REGRESSION. The band edge below a U-shaped notch is solid field, so
+        # an unconfined widening reads that as permission to fly straight
+        # across the notch. The notch is excluded ground -- a farmstead, a
+        # neighbour, a road -- and spraying it is the worst failure this
+        # feature could have.
+        u_xy = [(0.0, 0.0), (300.0, 0.0), (300.0, 300.0), (200.0, 300.0),
+                (200.0, 100.0), (100.0, 100.0), (100.0, 300.0), (0.0, 300.0)]
+        plan = plan_coverage(poly_ll(u_xy), swath_m=30.0, alt_m=15.0,
+                             angle_deg=0.0, keepouts=[])
+        for px, py in waypoints_xy(plan):
+            in_notch = (100.0 < px < 200.0) and (py > 100.0)
+            self.assertFalse(in_notch,
+                             f"waypoint ({px:.1f}, {py:.1f}) is inside the notch")
+        # The prong count is the other half of the same property.
+        self.assertEqual(plan["stats"]["n_passes"], 17)
+
+    def test_disabled_restores_line_exact_extents(self):
+        kw = dict(swath_m=20.0, alt_m=15.0, keepouts=[])
+        off = plan_coverage(poly_ll(SLANTED_XY), headlands=False, **kw)
+        self.assertEqual(off["stats"]["headland_passes"], 0)
+        self.assertEqual(off["stats"]["headland_extra_m"], 0.0)
+        for px, py in waypoints_xy(off):
+            self.assertTrue(point_in_polygon_grown(px, py, SLANTED_XY),
+                            f"({px:.1f}, {py:.1f}) outside the field")
+
+    def test_widening_does_not_disturb_the_turn_geometry(self):
+        # The two planner constraints must not fight: widening moves pass ENDS
+        # along the pass, and turn geometry is about the spacing BETWEEN passes.
+        kw = dict(swath_m=20.0, alt_m=15.0, keepouts=[])
+        wide = plan_coverage(poly_ll(SLANTED_XY), **kw)["stats"]
+        narrow = plan_coverage(poly_ll(SLANTED_XY), headlands=False, **kw)["stats"]
+        for key in ("turn_radius_m", "turn_bank_deg", "turn_bank_ok",
+                    "turn_reversals"):
+            self.assertEqual(wide[key], narrow[key], f"{key} moved")
+
+    def test_widening_never_grows_a_pass_beyond_the_field_width(self):
+        # Sanity bound on the whole mechanism: no pass may end up longer than
+        # the field's own extent along the sweep direction.
+        plan = plan_coverage(poly_ll(SLANTED_XY), swath_m=20.0, alt_m=15.0,
+                             angle_deg=0.0, keepouts=[])
+        span = max(x for x, _ in SLANTED_XY) - min(x for x, _ in SLANTED_XY)
+        wps = waypoints_xy(plan)
+        for i in range(0, len(wps) - 1, 2):
+            self.assertLessEqual(abs(wps[i + 1][0] - wps[i][0]), span + 1.0)
