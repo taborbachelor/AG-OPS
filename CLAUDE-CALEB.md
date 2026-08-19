@@ -24,6 +24,11 @@
 - Note: Completely separate from Relevyn
 
 > ### ▶ RESUME HERE (start of next session)
+> **🟢 TWO SESSIONS? READ `LANES.md` FIRST** (repo root, git-tracked) — the parallel-work board:
+> lane ownership by file, the SITL port lock, the seam register, and the append-only decisions log.
+> Claim a lane there before touching anything, and read/write it by its ABSOLUTE main-checkout path
+> even from a worktree. It exists so two sessions stop re-learning the `86c6a6e` cross-lane bug.
+>
 > **Mission context: airframe fully printed, internals imminent. Backend flight-readiness (A1–A5), UI overhaul (B1–B3), a full-backend hardening audit, AND the guardian safety-monitor expansion are ALL SHIPPED and on `main`.** Remaining pre-first-flight work is one eyeball check plus hardware-gated items; everything else is new feature work off the roadmap below.
 >
 > **State as of 2026-08-18 end of session (commit `86c6a6e`, working tree clean, EVERYTHING PUSHED — `main` local == `origin/main`; no other branches, no worktrees, no stashes):**
