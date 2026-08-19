@@ -368,6 +368,12 @@ function SprayPanel({
   const keepoutsApplied = plan
     ? plan.fields.reduce((s, f) => s + (f.stats.keepouts_applied || 0), 0)
     : 0;
+  // Fields too narrow to satisfy the bank limit by reordering alone: the
+  // planner still flies the geometry and reports the bank it actually
+  // commands, rather than claiming a limit it did not meet (see coverage.py).
+  const turnWarnings = plan
+    ? plan.fields.filter((f) => f.stats && f.stats.turn_bank_ok === false)
+    : [];
   const jobAcres = fields.reduce((s, f) => s + (f.acres != null ? f.acres : polyAcres(f.polygon)), 0);
 
   return (
@@ -569,6 +575,18 @@ function SprayPanel({
                 {totals.uncovered_acres} acre(s) of sprayable ground not
                 covered by any pass — usually the strip alongside a keepout.
                 Tighten the swath or re-angle the passes to close it.
+              </div>
+            )}
+            {turnWarnings.length > 0 && (
+              <div className="spray-note" style={{ color: '#ff5c5c', fontWeight: 600 }}>
+                Field{turnWarnings.length === 1 ? '' : 's'}{' '}
+                {turnWarnings.map((f) => `#${f.index + 1}`).join(', ')} too
+                narrow to reverse within the {turnWarnings[0].stats.turn_bank_limit_deg}°
+                bank limit — commands up to{' '}
+                {Math.max(...turnWarnings.map((f) => f.stats.turn_bank_deg))}°
+                at spray height. Fly at or below{' '}
+                {Math.min(...turnWarnings.map((f) => f.stats.turn_max_speed_ms))} m/s
+                to stay within the limit.
               </div>
             )}
             {hazardOverflights > 0 && (
