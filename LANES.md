@@ -159,8 +159,8 @@ what you're actually building, which the registry can't know.
 
 ### UI — GCS operator frontend
 *Goal: effortless.*
-- **Session:** `b06ca0f4` (charlie) · **Working on:** items 1 and 2 — both **SHIPPED**. Next:
-  item 3, which needs Tabor's eyes, not code. ✅ **The guard-does-not-load gap is CLOSED** (was true at 10:39, fixed by ~11:0x):
+- **Session:** `b06ca0f4` (charlie) · **Working on:** items 1, 2 and 3 — **all SHIPPED**. The
+  UI queue is empty; charlie is free for new work. ✅ **The guard-does-not-load gap is CLOSED** (was true at 10:39, fixed by ~11:0x):
   a home-directory hook now pipes into the repo's guard, and it correctly blocked charlie from a
   path outside UI. Two notes for whoever owns the tooling: it matches **filename tokens anywhere
   in a command, including inside quoted prose** — editing this very file was blocked because the
@@ -185,8 +185,20 @@ what you're actually building, which the registry can't know.
    a PASS the backend would refuse — with `connected` and a GPS fix, the old fallback read READY
    against an unreachable gate. No verdict now renders as CHECKING and never as a pass. The
    client-side `gpsReady` hint went with it, along with three orphaned CSS rules.
-3. 3D scene eyeball check (needs Tabor's eyes): `start-all.ps1` → FLY view → does the nose lead the
-   trail? If sideways, adjust the heading offset in `MapView3D.jsx`'s `oriProp`.
+3. ~~3D scene eyeball check (needs Tabor's eyes)~~ **RESOLVED BY MEASUREMENT 2026-08-19
+   (charlie)** — it did not need eyes. Cesium is a dependency, so the real library was asked
+   where the model's nose ends up and checked against the physical requirement. **It was wrong
+   in two independent ways.** (a) Heading was **90 deg off**: `headingPitchRollQuaternion`
+   resolves the body frame against an EAST-north-up frame, so body +X pointed east at heading 0
+   while the model is built nose-along-+X — heading 0 measured a bearing of 90.00. That is the
+   sideways aircraft. (b) **Pitch was inverted** — an unrelated bug nobody had reported: the
+   backend stores MAVLink ATTITUDE pitch unmodified and Cesium's positive pitch is also nose-up,
+   but the view negated it, so a climb rendered as a dive. Roll was correct. Pose maths extracted
+   to exported `aircraftHpr`/`aircraftQuaternion` and pinned by 12 tests (42 frontend total),
+   both fixes mutation-checked. **Still worth 30 seconds of Tabor's eyes** for what a test cannot
+   see: that the model reads as an aircraft (fin up, proportions) and that the CHASE camera frames
+   it sensibly — the camera uses a different Cesium API (`HeadingPitchRange`, north-referenced)
+   that no unit test here covers.
 
 ### OPS — customer site, packaging, tooling
 *Goal: it runs without a terminal.*

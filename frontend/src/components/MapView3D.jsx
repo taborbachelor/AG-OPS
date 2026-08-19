@@ -54,7 +54,14 @@ const LEG_STYLE = {
 };
 
 // Aircraft primitive model, scaled up for visibility from mission distances.
-// Local frame at heading 0 is north-west-up: +X = nose, +Y = left wing.
+// The model is built nose-along-+X, wingspan-along-+Y, fin-along-+Z.
+//
+// Cesium's headingPitchRollQuaternion resolves that body frame against an
+// EAST-north-up frame, so at heading 0 body +X points EAST, not north. Left
+// uncorrected the aircraft renders 90 deg off -- nose pointing right of its
+// own track, which is the "it flies sideways" symptom. Measured, not guessed:
+// heading 0 put the nose on a bearing of 90.00, heading 90 on 180.00.
+const MODEL_HEADING_OFFSET_DEG = -90;
 const FUSELAGE = new Cesium.Cartesian3(9, 1.4, 1.4);
 const WING = new Cesium.Cartesian3(2.4, 14, 0.35);
 const TAIL = new Cesium.Cartesian3(2.2, 5, 0.3);
@@ -62,6 +69,24 @@ const FIN = new Cesium.Cartesian3(2.0, 0.3, 2.2);
 
 function cart(lat, lon, alt = 0) {
   return Cesium.Cartesian3.fromDegrees(lon, lat, Math.max(0, alt));
+}
+
+/** Model pose from one telemetry sample. Exported so the frame conventions
+ *  are pinned by a test rather than by eyeballing the scene.
+ *
+ *  heading is DEGREES from the backend (VFR_HUD); pitch/roll are RADIANS
+ *  (MAVLink ATTITUDE), and the backend stores msg.pitch unmodified, so
+ *  positive pitch is nose-up here exactly as ArduPilot means it. Cesium's
+ *  positive pitch is also nose-up, so it passes through un-negated. */
+export function aircraftHpr(t) {
+  return new Cesium.HeadingPitchRoll(
+    Cesium.Math.toRadians((t.heading || 0) + MODEL_HEADING_OFFSET_DEG),
+    t.pitch || 0,
+    t.roll || 0);
+}
+
+export function aircraftQuaternion(origin, t) {
+  return Cesium.Transforms.headingPitchRollQuaternion(origin, aircraftHpr(t));
 }
 
 export default function MapView3D({
@@ -103,10 +128,7 @@ export default function MapView3D({
     const oriProp = new Cesium.CallbackProperty(() => {
       const t = live.current.telemetry;
       if (!t || !t.lat) return undefined;
-      const hpr = new Cesium.HeadingPitchRoll(
-        Cesium.Math.toRadians(t.heading || 0), -(t.pitch || 0), t.roll || 0);
-      return Cesium.Transforms.headingPitchRollQuaternion(
-        cart(t.lat, t.lon, t.altitude), hpr);
+      return aircraftQuaternion(cart(t.lat, t.lon, t.altitude), t);
     }, false);
 
     const partColor = CYAN.withAlpha(0.95);
