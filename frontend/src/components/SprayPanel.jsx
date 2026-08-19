@@ -61,6 +61,11 @@ function SprayPanel({
   const [order, setOrder] = useState(null);
   const [swath, setSwath] = useState(40);
   const [alt, setAlt] = useState(100);
+  // Pass widening (backend default true): passes reach the full boundary at
+  // the cost of up to half a swath of overspray past the edge. Off = spray
+  // stops exactly at the line, but a thin strip near the boundary may go
+  // uncovered. Seam S6.
+  const [headlands, setHeadlands] = useState(true);
   const [bufWater, setBufWater] = useState(15);
   const [bufTrees, setBufTrees] = useState(10);
   const [bufBuildings, setBufBuildings] = useState(10);
@@ -221,6 +226,7 @@ function SprayPanel({
           swath, alt,
           water_buffer: bufWater, tree_buffer: bufTrees, building_buffer: bufBuildings,
           powerline_buffer: bufPowerline,
+          headlands,
           home: homePos || undefined,
           keepouts: holeKeepouts.length ? holeKeepouts : undefined,
           allow_missing_zones: allowMissingZones || undefined,
@@ -497,6 +503,20 @@ function SprayPanel({
           <div className="safety-card-head"><span>SETTINGS</span></div>
           <NumField label="Swath" value={swath} unit="m" onChange={setSwath} />
           <NumField label="Altitude" value={alt} unit="m" onChange={setAlt} />
+          <div className="safety-field" style={{ justifyContent: 'space-between' }}>
+            <span className="safety-label">Full boundary coverage</span>
+            <label className={`mini-toggle ${headlands ? 'on' : ''}`}
+              title="Trade overspray at the edge for full boundary coverage">
+              <input type="checkbox" checked={headlands}
+                onChange={(e) => setHeadlands(e.target.checked)} />
+              {headlands ? 'ON' : 'OFF'}
+            </label>
+          </div>
+          <div className="spray-hint" style={{ textAlign: 'left' }}>
+            {headlands
+              ? 'Passes reach the full boundary — sprays up to half a swath past the field edge. Turn off near an organic neighbour, road, or waterway.'
+              : 'Passes stop exactly at the boundary — no overspray, but a thin strip near the edge may go uncovered.'}
+          </div>
           <NumField label="Water buf" value={bufWater} unit="m" onChange={setBufWater} />
           <NumField label="Tree buf" value={bufTrees} unit="m" onChange={setBufTrees} />
           <NumField label="Bldg buf" value={bufBuildings} unit="m" onChange={setBufBuildings} />
