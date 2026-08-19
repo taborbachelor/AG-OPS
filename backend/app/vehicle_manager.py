@@ -1,3 +1,4 @@
+import inspect
 import math
 import threading
 import time
@@ -2035,6 +2036,131 @@ class VehicleManager:
         self.telemetry.mission_count = len(items)
         log_event("mission", "download", count=len(items))
         return items
+
+    # ---- Onboard geofence (MISSION_TYPE_FENCE) --------------------------
+
+    def home_position(self) -> Optional[dict]:
+        """Home as {lat, lon}, or None when the vehicle hasn't told us yet.
+
+        home_lat/home_lon sit at 0.0 before HOME_POSITION arrives, and 0,0 is a
+        real place in the Atlantic -- a clearance check against it would pass
+        every time and mean nothing. None makes "unknown" explicit so callers
+        skip the check rather than trusting a fabricated answer.
+        """
+        if self.home_lat == 0.0 and self.home_lon == 0.0:
+            return None
+        return {"lat": self.home_lat, "lon": self.home_lon}
+
+    def fence_transfer_supported(self) -> tuple[bool, str]:
+        """Can this build address the FENCE mission type at all?
+
+        MUST be checked before any fence transfer. The `mission_type` field is
+        a MAVLink 2 message extension: on MAVLink 1 bindings the parameter does
+        not exist, every mission message defaults to type 0 (MISSION), and a
+        fence upload would be accepted by the vehicle as a REGULAR MISSION --
+        silently replacing the flight plan with a list of fence vertices. That
+        is a far worse outcome than refusing, so this fails closed and loud
+        rather than falling back (rule #26).
+        """
+        try:
+            send = self.connection.mav.mission_count_send if self.connection \
+                else mavutil.mavlink.MAVLink.mission_count_send
+            if "mission_type" not in inspect.signature(send).parameters:
+                return False, (
+                    "link is bound to MAVLink 1 bindings "
+                    f"({mavutil.mavlink.__name__}), which have no mission_type "
+                    "field -- a fence transfer would overwrite the flight "
+                    "mission. Enable MAVLink 2 (MAVLINK20=1) and re-verify.")
+        except (AttributeError, TypeError, ValueError) as exc:
+            return False, f"could not determine fence protocol support: {exc}"
+        return True, ""
+
+    def upload_fence(self, items: list[dict]) -> dict:
+        """Upload polygon exclusion fence items (from `onboard_fence`).
+
+        Mirrors upload_mission's transfer loop exactly -- vehicle-driven, the
+        requested seq answered rather than a local counter (retransmit-safe on
+        a lossy radio), bounded iterations, and a cancel that closes a
+        half-open transaction. The differences are mission_type=FENCE on every
+        message, MAV_FRAME_GLOBAL (a fence vertex has no meaningful altitude),
+        and param1 carrying the polygon's vertex count.
+
+        An empty list clears the fence, which is a legitimate operation.
+        """
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        ok_proto, why = self.fence_transfer_supported()
+        if not ok_proto:
+            log_event("fence", "upload", level="ERROR", ok=False, error=why)
+            return {"ok": False, "error": why}
+
+        conn = self.connection
+        ftype = getattr(mavutil.mavlink, "MAV_MISSION_TYPE_FENCE", 1)
+
+        def _send_item(seq: int):
+            it = items[seq]
+            with self._send_lock:
+                conn.mav.mission_item_int_send(
+                    conn.target_system, conn.target_component, seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL,
+                    int(it["command"]), 0, 1,
+                    float(it["vertex_count"]), 0.0, 0.0, 0.0,
+                    int(float(it["lat"]) * 1e7), int(float(it["lon"]) * 1e7), 0.0,
+                    mission_type=ftype,
+                )
+
+        ack = None
+        error = None
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.mission_count_send(
+                    conn.target_system, conn.target_component, len(items),
+                    mission_type=ftype)
+            for _ in range(10 * len(items) + 20):
+                msg = self._recv_blocking(
+                    conn, ["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"], 5)
+                if msg is None:
+                    error = "fence transfer timed out (no request/ack from vehicle)"
+                    break
+                # A vehicle mid-mission-transfer can interleave requests for a
+                # DIFFERENT mission type. Answering one with a fence vertex
+                # would corrupt whichever transfer it belonged to.
+                if getattr(msg, "mission_type", ftype) != ftype:
+                    continue
+                if msg.get_type() == "MISSION_ACK":
+                    ack = msg
+                    break
+                if 0 <= msg.seq < len(items):
+                    try:
+                        _send_item(msg.seq)
+                    except Exception as e:
+                        error = f"fence item {msg.seq} failed to send: {e}"
+                        break
+            else:
+                error = "fence transfer did not complete (vehicle kept re-requesting)"
+            if ack is None:
+                try:
+                    with self._send_lock:
+                        conn.mav.mission_ack_send(
+                            conn.target_system, conn.target_component,
+                            mavutil.mavlink.MAV_MISSION_OPERATION_CANCELLED,
+                            mission_type=ftype)
+                except Exception:
+                    pass
+
+        ok = ack is not None and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED
+        result = {"ok": ok, "ack": (ack.type if ack else None), "points": len(items)}
+        if not ok:
+            result["error"] = error or \
+                f"vehicle rejected fence (MISSION_ACK type {ack.type})"
+        log_event("fence", "upload", level="INFO" if ok else "ERROR",
+                  ok=ok, points=len(items), ack=result["ack"],
+                  error=result.get("error"))
+        return result
+
+    def clear_fence(self) -> dict:
+        """Remove every fence point from the vehicle (count 0 transfer)."""
+        return self.upload_fence([])
 
 
 def _json_sanitize(obj):

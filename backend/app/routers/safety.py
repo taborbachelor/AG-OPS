@@ -2,7 +2,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from app import preflight
+from app import onboard_fence, preflight
 from app.guardian import config_to_dict
 from app.vehicle_manager import vehicle_manager
 
@@ -162,6 +162,12 @@ class KeepoutLoad(BaseModel):
     # dict (kind -> [zone]) or a flat list of zones; validated in keepout_watch.
     zones: object
     hazard_buffer_m: float = Field(20.0, ge=0, le=500)
+    # Also push the hazard rings to the flight controller as polygon exclusion
+    # fences, so they survive link loss. Defaults ON: the whole reason the
+    # monitor exists is that a hazard is worth avoiding, and a hazard is no
+    # less dangerous when the laptop is out of range. Opt out for a bench run
+    # where you don't want the FC's fence storage touched.
+    push_to_vehicle: bool = True
 
 
 @router.get("/keepouts")
@@ -184,16 +190,55 @@ def load_keepouts(req: KeepoutLoad):
             req.zones, req.hazard_buffer_m)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+    # Same call arms the SOFT monitor and the HARD onboard fence, from the same
+    # prepared rings. Deliberately one endpoint: the 86c6a6e bug was a fully
+    # built monitor that nothing ever armed, because arming lived in somebody
+    # else's layer. A second endpoint here would recreate that seam exactly.
+    fence = {"attempted": False}
+    if req.push_to_vehicle and vehicle_manager.connected:
+        fence["attempted"] = True
+        try:
+            built = onboard_fence.build_exclusion_items(
+                prepared, home=vehicle_manager.home_position())
+            fence.update(vehicle_manager.upload_fence(built["items"]))
+            fence["polygons"] = built["polygons"]
+            fence["not_fenced"] = built["skipped"]
+        except ValueError as exc:
+            # Geometry we refuse to fence (home inside an exclusion, a
+            # pathological ring, over budget). The monitor is still armed, so
+            # report loudly rather than failing the whole request -- but never
+            # let this read as a successful fence.
+            fence.update({"ok": False, "error": str(exc)})
+
     return {"status": "ok", "hazards": prepared["n_hazards"],
             "keepouts": prepared["n_keepouts"],
             "dropped": prepared["dropped"],
-            "hazard_buffer_m": prepared["hazard_buffer_m"]}
+            "hazard_buffer_m": prepared["hazard_buffer_m"],
+            "fence": fence}
 
 
 @router.delete("/keepouts")
-def clear_keepouts():
+def clear_keepouts(clear_fence: bool = False):
+    """Disarm the live monitor. Does NOT clear the onboard fence by default.
+
+    The asymmetry is deliberate. Stale RINGS are worse than none -- they read
+    as a confident all-clear over ground nobody surveyed, so the monitor
+    forgets them (and mission upload clears it for the same reason). A stale
+    exclusion FENCE is the opposite: the wire it marks did not move when the
+    mission changed, and an exclusion polygon only ever costs something if you
+    try to fly into it. Removing it silently takes away airframe protection.
+
+    So clearing the fence is an explicit act -- `?clear_fence=true` -- for when
+    the operator genuinely means "this aircraft no longer has surveyed
+    hazards", not a side effect of tidying up a monitor.
+    """
     vehicle_manager.clear_mission_keepouts(reason="operator")
-    return {"status": "cleared"}
+    out = {"status": "cleared", "fence_cleared": False}
+    if clear_fence and vehicle_manager.connected:
+        out["fence"] = vehicle_manager.clear_fence()
+        out["fence_cleared"] = bool(out["fence"].get("ok"))
+    return out
 
 
 @router.get("/guardian")
