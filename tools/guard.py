@@ -61,6 +61,21 @@ def main():
         tool = payload.get("tool_name") or ""
         ti = payload.get("tool_input") or {}
 
+        # Identity handshake. A session does not otherwise know its own
+        # session_id, and claiming under the wrong one would get it blocked from
+        # its own files. It runs `echo CLAIM_WHOAMI:<tag>`; we catch that here --
+        # where the real id is -- and drop it in a file named by the tag, so
+        # concurrent handshakes can't collide.
+        if tool in ("Bash", "PowerShell"):
+            m = re.search(r"CLAIM_WHOAMI:([A-Za-z0-9_-]{1,32})", ti.get("command") or "")
+            if m:
+                d = os.path.join(REPO, ".claim")
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, "whoami-%s.txt" % m.group(1)),
+                          "w", encoding="utf-8") as fh:
+                    fh.write(session)
+                return 0
+
         for target in _targets(tool, ti):
             if not os.path.isabs(target):
                 target = os.path.join(payload.get("cwd") or REPO, target)

@@ -13,8 +13,20 @@ py tools\claim.py claim --session <your session_id> --area AIR --label "onboard 
 py tools\claim.py release --session <your session_id>
 ```
 
-Your `session_id` is in the hook payload; if you don't know it, any stable unique string works —
-just reuse the same one all session.
+### Finding your own `session_id`
+
+**It must be the real one.** The guard checks the `session_id` in its hook payload, so a claim filed
+under any other string leaves you blocked from your own files. Do not invent one.
+
+- **Sessions started after this was installed:** the SessionStart hook tells you outright — look for
+  *"YOUR session_id is: …"* in your opening context.
+- **Sessions already running:** run the handshake, which catches the id where it actually lives —
+  inside the hook:
+  ```
+  echo CLAIM_WHOAMI:alpha && cat .claim/whoami-alpha.txt
+  ```
+  Swap `alpha` for anything unique per session (`bravo`, `charlie`) so two handshakes can't collide.
+  The file contains your real id; use it verbatim as `--session`.
 
 ---
 
