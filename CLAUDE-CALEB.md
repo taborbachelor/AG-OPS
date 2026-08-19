@@ -34,7 +34,7 @@
 > - 🔴 **THE CROSS-LANE BUG — read this before splitting work by file again.** Lane A's live keepout-proximity monitor was built end to end (`keepout_watch.py`, endpoints, guardian wiring, tests, a SITL scenario) and **nothing ever called `POST /api/safety/keepouts`** — it ran with zero rings and could never warn. The backend half was Lane A's, the UI half (`SprayPanel.jsx`) was Lane B's, and the seam was owned by nobody. Both lanes were individually green and individually "done". Fixed in `86c6a6e`: upload arms the monitor with the plan's zones + the operator's ACTUAL buffer, and says so loudly when arming fails. **Do a deliberate seam pass at the end of every parallel session** — endpoints with no caller, UI reading fields nothing sets, defaults on both sides that must agree.
 > - 🔥 **Next highest-value safety item, surfaced by that work:** the aircraft banks **50-65 deg in ordinary loiter/RTL turns** (measured), past `ROLL_LIMIT_DEG`, while a real spray pass flies at **10-25 m** — where a 60 deg bank has no recovery altitude. Detection now exists; the fix is a **turn-geometry bank constraint in `coverage.py`** so the planner stops commanding them.
 > - **UI:** Vite (1s builds), 3D FLY view default (CesiumJS, key-free, attitude-true aircraft, CHASE/ORBIT/FREE cams; 2D forced for planning/drawing), NavRail progressive disclosure, server preflight verdicts + guardian chip/annunciators, SprayPanel zone-failure opt-in + overflight warnings, hazard-crossing opt-in, coverage %, and the proximity-monitor arming status. **16 UI tests green.**
-> - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). **UNBILLED as of 2026-08-18: FIVE sessions** — 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16 (docs/merge), and the TWO parallel 2026-08-18 sessions (Lane A safety monitors + Lane B powerline/reroute/coverage), which ran concurrently and are separate transcripts. Note the transcript path changed profiles — see the method note under the billing table.
+> - 💰 **Billing + valuation now live in `VALUATION.md`** (repo root, added 2026-08-19). Cost ledger, labour ledger, three valuation frames with their inputs, the milestones that move the number, and the terms to ask Caleb for. Update it with **`py tools\session_cost.py --new`** at the end of any working session — do not hand-parse transcripts, and do not start a second table anywhere. Current state: token basis **$1,767**, all-in cost (labour included) **≈$8,500**, replacement cost **$180k–340k**, recommended ask **$7,500** + retainer + per-acre royalty. **Nothing has been invoiced since 2026-08-14** — everything from 08-15 onward is unbilled, and no agreement with Caleb exists yet. That conversation is the open item, not the arithmetic.
 > - 🔴 **`AgOpsGCS.exe` DOES NOT EXIST on this machine.** (It was built 2026-08-15 on the previous machine — 53.7MB, smoke-tested — but that binary is not here, and it predates everything since the hardening pass anyway.) **A Cube bench day right now would have nothing to run.** Rebuild per README: `cd frontend; npm run build` then `cd backend; .\venv\Scripts\pyinstaller.exe AgOpsGCS.spec --noconfirm`. Note the kill-by-name gotcha — the onefile bootloader spawns a child, so killing the launched pid leaves the server on :8000.
 >
 > **Next-work menu:**
@@ -78,6 +78,9 @@ In the GCS: link chip (top-left) → **Quick Connect → Simulator** (real COM p
 ```
 rc-plane-app/
 ├── start-all.ps1                # one-command launcher: SITL + backend + GCS + customer site
+├── VALUATION.md                 # cost ledger + what the software is worth + terms — SINGLE SOURCE
+├── tools/
+│   └── session_cost.py          # refreshes VALUATION.md's ledger from Claude transcripts
 ├── backend/
 │   ├── venv/                    # Python virtual environment
 │   ├── requirements.txt         # fastapi, uvicorn, pymavlink, pyserial, pytest, etc.
@@ -289,24 +292,33 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
   is 1,866 lines with 63 functions and 8 of 10 routers import it, so any extraction or mission-model
   change collides with everything. Run those solo.
 - **Hardware-gated:** Cube bench day (script = the `bench` scenario sequence: backup → surface/servo tests → calibrations → `POST /api/bench/first-flight-params {cells, apply:true}`); telemetry radio + receiver (Caleb's task); Stripe live keys (Caleb); WebRTC/HLS video (needs HD video hardware); terrain intelligence phase 2 (needs camera + companion computer); pump/spray-system verification (needs Caleb's answer on sensing).
-- **Billing:** table covers through the 2026-08-14 session. UNBILLED (5): 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16 (docs/merge), and BOTH parallel 2026-08-18 sessions (Lane A + Lane B — separate transcripts, same day).
+- **Billing + valuation:** `VALUATION.md` at the repo root is the single source of truth — cost ledger, hours, what the software is worth, and the terms. Refresh with `py tools\session_cost.py --new`. Invoiced through 2026-08-14; everything after that is unbilled and no agreement is signed.
 
 #### Design ideas (proposed, NOT implemented; user hasn't picked yet)
 - Tier 1 (recommended as one "flight safety & feedback" release — mostly now shipped, see History "List-finish session"): pre-flight checklist card gating ARM (with override); aviation-style alerts/annunciators + optional voice callouts; post-flight summary card on disarm; "RTL margin" can-I-get-home indicator
 - Tier 2: FPV mode (video fullscreen + HUD overlay, map becomes PiP — the showpiece, wants camera hardware); instrument cards w/ sparklines replacing bottom strip; flight-phase adaptive layout; mission altitude-profile ribbon
 - Tier 3: day/night/field themes; map long-press radial menu; first-run tour; tablet layout
 
-#### Billing — Claude usage cost basis (for invoicing Caleb)
-Running log of Claude Code token-usage cost, computed at Anthropic API list-price equivalent (not actual subscription cost — Claude Code runs on a Max/Pro plan, this is a billing proxy). Method: parse local session transcripts (`~/.claude/projects/.../*.jsonl`) filtered to `cwd` under `rc-plane`/`rc-plane-app`, sum `usage` tokens per model (input/output/cache-write-5m/cache-write-1h/cache-read), price at current API rates, include workflow subagent transcripts (`subagents/workflows/*/agent-*.jsonl`).
+#### Billing — MOVED to `VALUATION.md` (2026-08-19)
+> **The cost ledger, the labour ledger, what the software is worth, and the terms to ask Caleb for
+> now live in `VALUATION.md` at the repo root.** It is the single source of truth; do not maintain
+> a second table here. Update it with `py tools\session_cost.py --new` at the end of any working
+> session — the script does the transcript parsing that used to be done by hand, and it separates
+> sessions that were only partly on this project so a Relevyn evening never gets billed to Caleb.
+>
+> The table below is the historical record as of 2026-08-14 and is **frozen** — kept for provenance
+> because those transcripts lived on a machine we no longer have. New rows go in `VALUATION.md`.
+
+Original method note: Claude Code token-usage cost at Anthropic API list-price equivalent (not actual subscription cost — Claude Code runs on a Max/Pro plan, this is a billing proxy). Parse local session transcripts (`~/.claude/projects/.../*.jsonl`) filtered to `cwd` under `rc-plane`/`rc-plane-app`, sum `usage` tokens per model (input/output/cache-write-5m/cache-write-1h/cache-read), price at current API rates, include workflow subagent transcripts (`subagents/workflows/*/agent-*.jsonl`).
 
 | Date logged | Period covered | Cost basis (API list-price) | +20% margin | Notes |
 |---|---|---|---|---|
 | 2026-07-21 | 2026-07-10 → 2026-07-13 (main session + 44 workflow subagents: ag-platform round 1/2, refinement-audit) | $1,182.69 | **$1,419.23** | Session `29330544-8377-4fcf-a93f-a4c0c39cc962`. Breakdown: main session opus-4-6 $5.12 + opus-4-8 $184.99 + fable-5 $705.36; subagents fable-5 $279.54 + opus-4-8 $7.68. |
 | 2026-08-14 | 2026-07-21 → 2026-08-14 (4 sessions + subagents: docs/start-all pass, directive+M1a, M1b/M2/M3, and the big 08-14 both-tracks session) | $144.99 | **$173.99** | Sessions `58e2dfa5` (docs pass, sonnet-5 $4.62), `d2552655` (directive+M1a, opus-4-8 $14.02 + sonnet-5 $0.77), `81187eb4` (M1b/M2/M3, opus-4-8 $30.79 + sonnet-5 $0.23), `5c00e666` (M4→soak + UI B1–B3, fable-5 $92.50 + opus-5 $2.05). Excludes the still-open 2026-08-15 session (3D eyeball check + this billing update) — roll it into the next row. |
 
-**Cumulative:** cost basis **$1,327.68**, with margin **$1,593.22**.
-
-**To extend this table in a future session:** re-run the same transcript-parsing method for any *new* session(s) since the last logged period (check `~/.claude/projects/<profile>-rc-plane-app/` for the current session ID, and `~/.claude/projects/<profile>/<session-id>.jsonl` + its `subagents/` dir for token usage — the `<profile>` segment encodes whatever Windows profile that machine used, e.g. `C--Users-tabor` or `C--Users-jacks`), add a new row, and keep a running cumulative total if useful.
+**Cumulative through 2026-08-14:** cost basis **$1,327.68**, with margin **$1,593.22**.
+**Current cumulative (incl. everything since):** see `VALUATION.md` — **$1,767** basis / **$2,120** with margin,
+and note that the number that actually matters is all-in cost (~$8,500, labour included), not this one.
 
 ---
 
