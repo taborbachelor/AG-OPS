@@ -8,7 +8,7 @@ project repo, so it is reachable from any machine at
 - **Owner:** Tabor. **Audience:** Tabor + Jackson. **NOT for Caleb** — see *Negotiating position*.
 - **Update it:** run `py tools\session_cost.py --new` at the end of any working session and append
   the rows it prints. Procedure at the bottom.
-- **Last reconciled:** 2026-08-19 (session `69aaf91a`).
+- **Last reconciled:** 2026-08-19, after the three-session day (session `b06ca0f4`).
 
 ---
 
@@ -16,9 +16,9 @@ project repo, so it is reachable from any machine at
 
 | | Amount | What it means |
 |---|---:|---|
-| **Token cost to date** | **$1,773** | Claude usage at Anthropic API list price. A billing proxy — real cash is far less. |
-| **All-in cost to date** | **≈ $8,500** | Token cost + Tabor's hours at a conservative $75/hr. Under $500 of this is actual money. |
-| **Replacement cost** | **$180k – $340k** | What a contract team would charge to rebuild it. The ceiling, and not collectable here. |
+| **Token cost to date** | **$1,891** | Claude usage at Anthropic API list price. A billing proxy — real cash is far less. |
+| **All-in cost to date** | **≈ $8,800** | Token cost + Tabor's hours at a conservative $75/hr. Under $500 of this is actual money. |
+| **Replacement cost** | **$200k – $390k** | What a contract team would charge to rebuild it. The ceiling, and not collectable here. |
 | **Recommended ask** | **$7,500** | Phase 1 fixed fee + retainer + royalty. See *Negotiating position*. |
 
 ---
@@ -38,13 +38,20 @@ Sonnet $3/$15; cache writes 1.25× (5 min) / 2× (1 hour) the input rate, cache 
 | 2026-08-18 | Lane A — guardian SITL proof, bank angle, wind, keepout proximity, scorecard, alert unification | `303e824a` | $129.26 | $155.11 |
 | 2026-08-18 | Lane B — powerline keepouts, connector-leg rerouting, coverage analysis, cross-lane fix | `04d27772` | $179.05 | $214.86 |
 | 2026-08-19 | Valuation + this ledger | `69aaf91a` | $16.49 ² | $19.79 |
-| | | | **$1,773** | **$2,127** |
+| 2026-08-19 | — top-up of the row above, per footnote ² | `69aaf91a` | +$1.68 | +$2.02 |
+| 2026-08-19 | AIR — onboard exclusion fences, MAVLink 2, guard hardening | `1681cef0` | $44.17 ³ | $53.00 |
+| 2026-08-19 | UI — scorecard panel, one-verdict pre-flight, 3D orientation fix, docs close-out | `b06ca0f4` | $35.97 ³ | $43.16 |
+| 2026-08-19 | PLANNER — turn-geometry bank constraint, headlands | `c63d3a97` | $35.71 | $42.85 |
+| | | | **$1,891** | **$2,269** |
 
 ¹ Those three sessions ran on the previous laptop. Claude Code transcripts live under the Windows
 profile of the machine that ran them (`~/.claude/projects/C--Users-<profile>-…/`), and that profile
 is gone, so the rows are a considered estimate rather than a measurement. **Never let a re-run of
 `session_cost.py` silently delete them** — the script can only see what is on the current machine.
 Recoverable if that laptop ever comes back: see *Open items*.
+
+³ Both of these were STILL RUNNING when this row was written, so both are low for the same
+reason as footnote ². Top them up next session.
 
 ² A session cannot fully count itself — the row is priced at the moment it is written and the
 session keeps spending afterward. Every last row in this table is therefore slightly low. Correct
@@ -63,12 +70,23 @@ first event to last — which is an **upper bound** on attended time, not a time
 | 2026-07-10 → 08-16 (all sessions on retired machines) | ~55 – 75 | Estimated: ~9 sessions, sized against the measured ones |
 | 2026-08-18 Lane A `303e824a` | 8.7 | Measured |
 | 2026-08-18 Lane B `04d27772` | 8.4 | Measured |
-| 2026-08-19 `69aaf91a` | 10.3 | Measured (51% of the session was on this project; wall clock includes idle) |
-| **Total attended** | **≈ 82 – 102 h** | Working figure: **90 h** |
+| 2026-08-19 `69aaf91a` | ~~10.3~~ | **Superseded by the row below** — it is the same calendar day. |
+| 2026-08-19 (four overlapping sessions) | 12.4 | **UNION of the four spans, not their sum** — see the warning below |
+| **Total attended** | **≈ 84 – 104 h** | Working figure: **92 h** |
 
-At $75/hr (conservative internal rate) → **$6,750**. At $125/hr (market) → **$11,250**.
+At $75/hr (conservative internal rate) → **$6,900**. At $125/hr (market) → **$11,500**.
 
-**All-in cost = token cost + labour ≈ $8,500** at the conservative rate. Cash actually spent is a
+> ⚠️ **PARALLEL SESSIONS BREAK THE SUM-THE-WALL-CLOCK METHOD. Read this before appending again.**
+> Until 2026-08-19 sessions ran one at a time, so summing each session's wall clock was a fair
+> upper bound on attended time. On 2026-08-19 **four sessions ran concurrently** and the script
+> reported 12.4 + 12.4 + 1.3 + 10.6 = **36.7 h for a single calendar day**. Adding that would have
+> inflated the labour line — and therefore the all-in cost that anchors the negotiating position —
+> by roughly a factor of three. The honest figure is the **union of the spans**: 04:25 to 16:49 on
+> one machine = **12.4 h**, which is what the table now carries. `session_cost.py` prints per-session
+> wall clock and cannot know sessions overlapped, so **whoever appends must check the start times
+> and union any that do.** Token cost is unaffected — that spend is genuinely additive.
+
+**All-in cost = token cost + labour ≈ $8,800** at the conservative rate. Cash actually spent is a
 Claude Max subscription over six weeks, roughly $200–400.
 
 ---
@@ -82,22 +100,27 @@ when the *Inputs* below change, not by feel.
 
 | Input | Value | Command |
 |---|---:|---|
-| Tracked source lines | 24,292 | `git ls-files \| grep -E "\.(py\|jsx\|js\|ts\|tsx\|css\|html\|ps1\|sh)$" \| xargs wc -l` |
-| Backend Python | 15,014 | `git ls-files "backend/*.py" \| xargs wc -l` |
-| GCS frontend | 4,798 | `git ls-files "frontend/*.jsx" "frontend/*.js" \| xargs wc -l` |
+| Tracked source lines | 27,642 | `git ls-files \| grep -E "\.(py\|jsx\|js\|ts\|tsx\|css\|html\|ps1\|sh)$" \| xargs wc -l` |
+| Backend Python | 16,553 | `git ls-files "backend/*.py" \| xargs wc -l` |
+| GCS frontend | 5,334 | `git ls-files "frontend/*.jsx" "frontend/*.js" \| xargs wc -l` |
 | Customer site (PrairieSpray) | 1,848 | `git ls-files "web/*" \| grep -E "\.(jsx\|js\|css\|html)$" \| xargs wc -l` |
-| Backend unit tests | 379 | `grep -rc "def test_" backend/tests/*.py` |
-| Live SITL scenarios | 14 | `backend\scenarios.ps1 all` |
-| Frontend tests | 16 | `cd frontend && npm test` |
-| API endpoints | 55 | `grep -rhoE '@router\.(get\|post\|put\|delete\|websocket)\("[^"]*"' backend/app/routers/` |
-| Commits / working days | 63 / 9 | `git rev-list --count HEAD` |
+| Backend unit tests | 419 | `grep -rc "def test_" backend/tests/*.py` |
+| Live SITL scenarios | 15 | `backend\scenarios.ps1 all` |
+| Frontend tests | 42 | `cd frontend && npm test` |
+| API endpoints | 56 | `grep -rhoE '@router\.(get\|post\|put\|delete\|websocket)\("[^"]*"' backend/app/routers/` |
+| Commits / working days | 79 / 10 | `git rev-list --count HEAD` |
 
-### Frame A — Replacement cost · **$180k – $340k**
+### Frame A — Replacement cost · **$200k – $390k**
 
-24,292 lines of specialist UAV / MAVLink / GIS / full-stack work, tested and simulator-validated,
+27,642 lines of specialist UAV / MAVLink / GIS / full-stack work, tested and simulator-validated,
 at a sustained 10–15 lines per hour for production code including tests and debugging →
-**1,620 – 2,430 engineer-hours**. At a blended US contract rate of $110–140/hr for that skill mix.
-A lean two-person shop at ~$65/hr effective would be $105k – $158k.
+**1,843 – 2,764 engineer-hours**. At a blended US contract rate of $110–140/hr for that skill mix.
+A lean two-person shop at ~$65/hr effective would be $120k – $180k.
+
+Recomputed 2026-08-19 (+3,350 tracked lines in one day, past this file's own +2,000 trigger).
+**Frames B and C are deliberately unchanged: no section-4 milestone landed.** Onboard exclusion
+fences were proven against the simulator, not a real aircraft, and the spray layer still does not
+exist — the two largest discounts both stand.
 
 This is the honest cost to reproduce. It is **not** collectable from Caleb and should never be the
 asking price — but it is the right number to *show* him, so the friend price reads as the discount
@@ -172,7 +195,8 @@ Everything the numbers depend on that isn't settled. Short list on purpose.
 |---|---|---|
 | **No agreement with Caleb exists.** Nothing invoiced since 2026-08-14. | Tabor | This is the only item that actually matters. The arithmetic is done; the conversation is not. Every session that ships work without it widens the gap. |
 | Recover the 2026-08-15/16 cost row | Tabor | Currently a ~$120 estimate. If the previous laptop is ever accessible, run `py tools\session_cost.py --since 2026-08-15` **on that machine** and replace the row with the measurement. Otherwise it stays an estimate forever. |
-| Top up the last ledger row | next session | See footnote ². One command, takes a second. |
+| ~~Top up the last ledger row~~ **DONE 2026-08-19** | — | `69aaf91a` was $16.49, actually $18.17; the +$1.68 delta is its own row. Two rows from 2026-08-19 now need the same treatment (footnote ³). |
+| **Parallel sessions break the labour method** | whoever appends next | Four sessions overlapped on 2026-08-19. Summing their wall clock would have tripled the day. Union overlapping spans — see the warning in section 2. |
 | Labour hours before 2026-08-18 are estimated | Tabor | ~55–75 h, unmeasurable for the same profile reason. Only worth revisiting if the old laptop resurfaces; the working figure of 90 h total is conservative either way. |
 | First real flight, spray hardware layer | Caleb (hardware) / us (software) | Both are section 5 milestones worth $15k–50k each to Frame B. Neither is scheduled. |
 | `spreader-project` has no ledger | Tabor | Same partner, same unpaid pattern, and it has a commercial target (USC LLC supply agreement). If it goes anywhere, it needs its own `VALUATION.md` — `tools\session_cost.py` works there with `PROJECT_MARKER` changed. |

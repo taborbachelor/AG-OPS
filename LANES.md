@@ -215,15 +215,11 @@ what you're actually building, which the registry can't know.
 
 ### UI — GCS operator frontend
 *Goal: effortless.*
-- **Session:** `b06ca0f4` (charlie) · **Working on:** items 1, 2 and 3 — **all SHIPPED**. The
-  UI queue is empty; charlie is free for new work. ✅ **The guard-does-not-load gap is CLOSED** (was true at 10:39, fixed by ~11:0x):
-  a home-directory hook now pipes into the repo's guard, and it correctly blocked charlie from a
-  path outside UI. Two notes for whoever owns the tooling: it matches **filename tokens anywhere
-  in a command, including inside quoted prose** — editing this very file was blocked because the
-  markdown text named a backend module — and the suggested remedy it prints is to claim a glob
-  for that file, which would be a session claiming ownership it does not want. Anchoring the edit
-  on token-free markers was the honest way through; a real fix would look at edit targets, not
-  the whole command string.
+- **Session:** — (released 2026-08-19) · **Last held by:** `b06ca0f4` (charlie), which shipped
+  items 1–3 and the DOCS close-out. **The lane is FREE and the queue below is empty except the
+  new item 4.** Environment findings from that session moved to *Field notes for a redesign*
+  rather than living here, because a board note about the environment reads as current fact
+  long after it stops being true.
 
 1. ~~**Scorecard UI in `LogsPanel.jsx`.**~~ **DONE 2026-08-19 (charlie).** New
    `components/Scorecard.jsx` rendered from the playback view, a `scorecard` badge on list rows
@@ -255,6 +251,11 @@ what you're actually building, which the registry can't know.
    see: that the model reads as an aircraft (fin up, proportions) and that the CHASE camera frames
    it sensibly — the camera uses a different Cesium API (`HeadingPitchRange`, north-referenced)
    that no unit test here covers.
+4. **Render the planner's turn-geometry numbers (seam S5) — UNCLAIMED, and the third instance
+   of this exact bug in one day.** Every plan reports `stats.turn_bank_deg` / `turn_bank_ok` /
+   `turn_radius_m` / `turn_max_speed_ms` and nothing renders any of them — including
+   `turn_bank_ok: false`, the narrow-field case where the operator most needs telling. Same
+   shape as items 1 and 2: a complete, tested backend surface with no caller.
 
 ### OPS — customer site, packaging, tooling
 *Goal: it runs without a terminal.*
@@ -310,6 +311,7 @@ Newest at the bottom. One row per decision no session may silently reverse. Reve
 | 2026-08-19 | **S2 ACCEPTED: planner commands <= 25 deg bank; guardian warns at 31.5 deg below 30 m.** Verified rather than assumed -- `guardian.py` really does default `bank_warn_deg 45.0` x `bank_low_alt_factor 0.7` = 31.5 deg under `bank_low_alt_m 30.0`, and a 10-25 m spray pass sits entirely inside that band. 25 deg costs +5.0% stall speed (60 deg costs +41%), and `bank_sustained_s 2.0` means a gust overshoot must persist 2 s before it warns, so the 6.5 deg gap is wider in practice than on paper. | AIR (bravo proposed) | -- |
 | 2026-08-19 | **The link is MAVLink 2** (`mavutil.set_dialect` at import in `vehicle_manager`). `mission_type` is a MAVLink 2 extension; on the old v10 bindings a fence or rally transfer is accepted as a REGULAR mission and silently overwrites the flight plan while reporting success. Proven live: 15 SITL scenarios green, and the onboard-fence scenario asserts the mission survives a fence upload. **Do not revert to v10 -- rally points need this too.** | AIR | -- |
 | 2026-08-19 | **Only HAZARDS become hard onboard fences**, and the ring uploads RAW rather than buffered. Fencing spray-quality keepouts would fire FENCE_ACTION on a harmless sprayer-off overflight and could block RTL; the planner's buffer stays the soft standoff while the fence is the hard floor, matching the bench kit's GCS-warns-first ordering. Overflow REFUSES rather than truncates. | AIR | -- |
+| 2026-08-19 | **The operator UI holds NO in-flight thresholds and computes NO readiness — it renders the server's verdict or admits it has none.** This is M6, and it had ALREADY been silently reversed: the pre-flight panel fell back to two locally-invented checks (link + GPS) whenever the server poll had not landed, so with a connection and a GPS fix it displayed a PASS while the gate was unreachable and would have refused to arm. A UI that disagrees with the gate is worse than one that admits ignorance, so absent a verdict it now reads CHECKING, never a pass. **Anyone adding a client-side threshold, a fallback verdict, or a "sensible default" to an operator panel is re-opening this.** Pinned by tests that fail if a no-verdict state renders as ready. | Claude (charlie) | — |
 
 ---
 
@@ -399,6 +401,52 @@ not already cover.
 5. **The lock machinery was never the binding constraint.** `sitl-5760` was never contended, no
    session ever needed an override grant, and file overlap was settled in the first minute. The work
    split cleanly on files and hard on *agreements*. Weight the redesign accordingly.
+
+### Addendum (charlie, UI)
+
+Both sections above are right and I am not repeating them. Five things neither covers.
+
+1. **`release` is all-or-nothing per session, so a session that finishes one area cannot give it
+   back.** I finished DOCS but was still working UI; `release --session <id> --area DOCS` is not a
+   thing, and releasing would have dropped both. So I sat on DOCS — the file every other lane needs
+   at close-out — purely because the tool had no way to hand back one area. Whatever replaces this
+   needs per-area release, or claims scoped narrowly enough that holding one is harmless.
+
+2. **The registry's label goes stale immediately and nothing notices.** Mine still read
+   "post-flight scorecard panel" while I was three jobs further on. The registry is authoritative
+   for *ownership* and quietly wrong about *purpose* — which is the half a human actually reads when
+   deciding whether to interrupt a lane. Either make the label cheap to update (a `relabel` command)
+   or stop displaying it as if it were current.
+
+3. **A shared doc accumulates assertions that were true when written and are false when read.** I
+   wrote "the guard does not load for charlie" in the Live board at 10:39. It was true. It was false
+   an hour later, when someone fixed it — and my sentence sat there reading like current fact. Stale
+   *state* in a shared board is more dangerous than no board, because it is written in the voice of
+   the person who checked. Every Live-board claim about the *environment* (as opposed to the work)
+   needs a timestamp and an expiry convention.
+
+4. **The one file everybody writes is the one file nobody owns.** `LANES.md` is exempt from the
+   guard by necessity, and that exemption is load-bearing — but it means the shared file is
+   permanently dirty with two or three sessions' half-written blocks, and no session can commit it
+   without sweeping in the others'. I twice left my own block uncommitted for exactly that reason.
+   Per-session block *files* concatenated at read time, or a tiny append-only command, would remove
+   the whole class.
+
+5. **A coordination change silently corrupted a financial ledger, which is the kind of blast radius
+   worth designing against.** `VALUATION.md`'s labour line sums each session's transcript wall clock
+   — sound while sessions ran one at a time. Four overlapping sessions reported 36.7 h for a single
+   calendar day; the honest union is 12.4 h. Appending the raw sum would have tripled the labour
+   figure that anchors the number we ask Caleb for. Nothing in the coordination design knew it had a
+   dependent downstream. When sessions stop being serial, go looking for everything that assumed
+   they were.
+
+**The headline, if only one thing survives:** the same bug shape appeared **three times in one day**
+— the post-flight scorecard, the keepout-proximity monitor before it, and the turn-geometry stats
+(seam **S5**, still open). Every instance was a complete, tested, green backend surface that no UI
+ever called. File partitioning *causes* this: it cleanly assigns both halves of a feature to
+different owners and assigns the seam between them to nobody. Partition by **feature**, with one
+owner accountable end to end, or keep partitioning by file and treat the seam register as the
+primary artifact rather than a supplement to it.
 
 ---
 
