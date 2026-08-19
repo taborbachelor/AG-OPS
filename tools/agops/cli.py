@@ -474,7 +474,13 @@ def cmd_task(a):
 
 
 def cmd_create(a):
-    t = core.create_task(a.title, description=a.description or "",
+    # Provenance is part of the task, not metadata about it. A task with no
+    # source cannot be checked for whether it is still real, and a queue of
+    # unverifiable tasks is one everybody learns to scroll past.
+    desc = a.description or ""
+    if a.source:
+        desc = (desc.rstrip() + "\n\nSOURCE: " + a.source).strip()
+    t = core.create_task(a.title, description=desc,
                          priority=a.priority.upper(), depends_on=a.depends_on or [],
                          files=a.file or [], area=a.area,
                          created_by=current_agent(a.agent) or "human",
@@ -855,6 +861,8 @@ def build_parser():
     s.add_argument("--depends-on", action="append")
     s.add_argument("--file", action="append", help="affected file or glob")
     s.add_argument("--area"); s.add_argument("--estimate"); s.add_argument("--id")
+    s.add_argument("--source", help="where this came from: a doc, a failing "
+                                    "test, a TODO, a blocker you hit")
     s.set_defaults(fn=cmd_create)
 
     s = sub.add_parser("next", help="ranked available work")

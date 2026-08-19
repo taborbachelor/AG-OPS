@@ -149,8 +149,13 @@ at the board, decide who gets the file, and release the other task.
 
 ```
 py tools\agops.py create "Fix the SITL teardown race" --priority HIGH ^
-    --area AIR --file backend/tests/sitl/harness.py --depends-on TASK-006
+    --area AIR --file backend/tests/sitl/harness.py --depends-on TASK-006 ^
+    --source "CLAUDE-CALEB.md RESUME HERE item 5"
 ```
+
+`--source` is worth the extra ten seconds. A task with no stated source cannot be
+checked for whether it is still real, and a queue of unverifiable tasks is one
+everybody learns to scroll past.
 
 `--depends-on` is the useful one: a task with unmet prerequisites sits BLOCKED
 and cannot be dispatched until they complete, at which point it becomes OPEN on
@@ -158,6 +163,14 @@ its own. You never maintain that by hand.
 
 Ground tasks in something real — a requirement, a failing test, a TODO, a
 blocker you hit. Every invented task is one every agent reads past.
+
+**Who creates them.** You do, or an agent does when it hits a genuine blocker
+mid-work. Nothing generates tasks automatically, and nothing ever will: a queue
+that fills itself is a queue nobody trusts. `created_by` on every task says who
+put it there — check it if a task looks like it appeared from nowhere.
+
+The eight tasks the board started with were seeded by Claude when the system was
+built, drawn from `LANES.md` and `CLAUDE-CALEB.md`; each names its source.
 
 ---
 
