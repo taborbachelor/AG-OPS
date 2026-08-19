@@ -8,6 +8,15 @@
 
 ## Scorecard
 
+> ⚠️ **This table is the ORIGINAL 2026-07-22/23 audit snapshot and is NOT maintained.** Several
+> rows still read ABSENT/WEAK for things that have since shipped — connection state machine,
+> multi-GCS/sysid, the parameter engine and structured logging were all delivered by M1–M3, and
+> the failsafe row is the only one that has been refreshed in place. **For current state read the
+> Roadmap below and `CLAUDE-CALEB.md`'s RESUME HERE block, not this table.** Of the original
+> ABSENT rows, the two still genuinely open are the **spraying layer** (hardware/Phase 2) and
+> **config management** (`app/config.py` exists but is 52 lines / 4 settings — most constants are
+> still hardcoded).
+
 | Directive area | Verdict | Summary |
 |---|---|---|
 | Mission transfer protocol | **STRONG** | MISSION_ITEM_INT both directions, answers MISSION_REQUEST & _INT, retransmit-safe seq replies, ACK close-out both paths (`vehicle_manager.py:701-810`) |

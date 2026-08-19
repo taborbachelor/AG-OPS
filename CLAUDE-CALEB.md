@@ -34,17 +34,18 @@
 > - 🔴 **THE CROSS-LANE BUG — read this before splitting work by file again.** Lane A's live keepout-proximity monitor was built end to end (`keepout_watch.py`, endpoints, guardian wiring, tests, a SITL scenario) and **nothing ever called `POST /api/safety/keepouts`** — it ran with zero rings and could never warn. The backend half was Lane A's, the UI half (`SprayPanel.jsx`) was Lane B's, and the seam was owned by nobody. Both lanes were individually green and individually "done". Fixed in `86c6a6e`: upload arms the monitor with the plan's zones + the operator's ACTUAL buffer, and says so loudly when arming fails. **Do a deliberate seam pass at the end of every parallel session** — endpoints with no caller, UI reading fields nothing sets, defaults on both sides that must agree.
 > - 🔥 **Next highest-value safety item, surfaced by that work:** the aircraft banks **50-65 deg in ordinary loiter/RTL turns** (measured), past `ROLL_LIMIT_DEG`, while a real spray pass flies at **10-25 m** — where a 60 deg bank has no recovery altitude. Detection now exists; the fix is a **turn-geometry bank constraint in `coverage.py`** so the planner stops commanding them.
 > - **UI:** Vite (1s builds), 3D FLY view default (CesiumJS, key-free, attitude-true aircraft, CHASE/ORBIT/FREE cams; 2D forced for planning/drawing), NavRail progressive disclosure, server preflight verdicts + guardian chip/annunciators, SprayPanel zone-failure opt-in + overflight warnings, hazard-crossing opt-in, coverage %, and the proximity-monitor arming status. **16 UI tests green.**
-> - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). **UNBILLED as of 2026-08-18:** the 2026-08-15 hardening session, the 2026-08-15 guardian safety-monitor session, the 2026-08-16 docs/merge session, and the 2026-08-18 session. Note the transcript path changed profiles — see the method note under the billing table.
+> - **Billing:** invoiced through the 2026-08-14 session (cumulative $1,593.22 w/ margin — see table). **UNBILLED as of 2026-08-18: FIVE sessions** — 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16 (docs/merge), and the TWO parallel 2026-08-18 sessions (Lane A safety monitors + Lane B powerline/reroute/coverage), which ran concurrently and are separate transcripts. Note the transcript path changed profiles — see the method note under the billing table.
 > - 🔴 **`AgOpsGCS.exe` DOES NOT EXIST on this machine.** (It was built 2026-08-15 on the previous machine — 53.7MB, smoke-tested — but that binary is not here, and it predates everything since the hardening pass anyway.) **A Cube bench day right now would have nothing to run.** Rebuild per README: `cd frontend; npm run build` then `cd backend; .\venv\Scripts\pyinstaller.exe AgOpsGCS.spec --noconfirm`. Note the kill-by-name gotcha — the onefile bootloader spawns a child, so killing the launched pid leaves the server on :8000.
 >
 > **Next-work menu:**
 > 1. **3D scene eyeball check (user's eyes required):** run `start-all.ps1`, FLY view, confirm the Cesium scene renders and the aircraft's nose leads its trail — if it flies sideways, adjust the heading offset in `MapView3D.jsx`'s `oriProp`.
 > 2. **Real Cube bench day** whenever hardware returns (Caleb's telemetry radio + receiver still pending): follow the `bench` scenario sequence — params backup → surface/servo tests → calibrations → first-flight bundle `POST /api/bench/first-flight-params {cells, apply:true}`. Data-USB → COM (115200); **PROP OFF; flight battery only after.**
-> 3. **Turn-geometry bank constraint in `coverage.py`** — the #1 open safety item (see above): the planner still commands 50-65 deg banks that have no recovery altitude at real spray height. Detection exists; the planner-side fix does not. **Blocked on one answer from Caleb: what altitude does a real spray pass fly?** Ask before sizing it.
+> 3. **Turn-geometry bank constraint in `coverage.py`** — the #1 open safety item (see above): the planner still commands 50-65 deg banks that have no recovery altitude at real spray height. Detection exists; the planner-side fix does not. **NOT blocked — the altitude question was ANSWERED 2026-08-18: a real spray pass flies 10-25 m AGL.** So size the constraint against that, not against the 100 m `CoverageRequest.alt` default (which is itself a known-wrong placeholder to revisit). Do not re-ask.
 > 4. **Headlands** — measurably justified now, not a guess: coverage analysis puts **0.41 and 0.56 acres of genuinely missed ground** on real 40-acre Sabetha fields with keepouts (100% on a clean field). That strip alongside a keepout is what perimeter passes close, and `coverage_pct` is the number that will verify the fix.
 > 5. **SITL harness port fix (Lane D item 3)** — `tests/sitl/harness.py` hardcodes `tcp:127.0.0.1:5760`; teardown never proves the port is free. This is why parallel runs fail with a different scenario set each time. 14 scenarios now ride on it.
 > 6. **Rebuild `AgOpsGCS.exe`** — see the red note above; a bench day currently has nothing to run.
-> 7. Still not started: M5 mission model/resume, customer-site 3D field preview, Stripe keys (Caleb), pump-sensing answer (Caleb — gates spray verification entirely).
+> 7. **Post-flight scorecard UI** — small, unclaimed, same seam class as the keepout-arming bug: the backend writes a scorecard on every disarm and serves it, but `LogsPanel.jsx` never shows it. Min hazard distance, min RTL margin, max bank, warning counts per monitor.
+> 8. Still not started: M5 mission model/resume, M7 layer restructure (`vehicle_manager.py` is now 2,057 lines — exclusive-lock job, run it solo), customer-site 3D field preview, Stripe keys (Caleb), pump-sensing answer (Caleb — gates spray verification entirely).
 >
 > **Get running — one command:** `.\start-all.ps1` from `rc-plane-app\` (see **Quick start** below). First run needs deps installed once (`pip install -r requirements.txt`, `npm install` ×2) — see the script's header comment or README.md.
 >
@@ -201,6 +202,7 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
 - OSM parcel coverage near Sabetha is sparse → `/api/fields/snap` and OSM-fallback detect often find 0 there (normal, message guides to Draw/Snap)
 - USDA CDL despeckle can bridge a 1px pinch between two adjacent fields — delete+redraw if separation matters
 - CropScape's `GetCDLData` endpoint was retired server-side; `cdl.py` uses `GetCDLFile` — check the WSDL first if field detection breaks again
+- 🔴 **NEVER junction (`mklink /J`) `node_modules` — or any shared directory — from a git worktree into the main checkout.** Deleting the worktree follows the junction and wipes the TARGET's contents. This happened 2026-08-18: a worktree needed frontend deps, a junction was created to the main checkout's `frontend/node_modules`, and removing the worktree left the main checkout with an empty `node_modules` — `npm test` and `npm run build` both dead until `npm install` was re-run. A worktree that needs node deps should get its own `npm install` (~9 s here), or use `mklink /D` only if you also delete the link with `rmdir` (never `rm -rf`). The same hazard applies to the `sitl/` binaries, which were COPIED rather than linked for exactly this reason.
 
 #### Still TODO (reordered 2026-08-18)
 - ~~**BLOCKING QUESTION** about spray altitude~~ **ANSWERED 2026-08-18: a real spray pass flies
@@ -230,8 +232,12 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
   2. ~~**Live keepout-proximity monitor**~~ **DONE 2026-08-18** — `app/keepout_watch.py` +
      guardian `keepout` monitor + `POST /api/safety/keepouts` + `keepout-prox` scenario.
   3. ~~**Powerline keepouts**~~ **DONE 2026-08-18** (Lane B, `79d54a4`).
-  4. ~~**Post-flight scorecard**~~ **DONE 2026-08-18** — written on disarm, served on
-     `GET /api/logs/{name}`.
+  4. ~~**Post-flight scorecard**~~ **BACKEND DONE 2026-08-18** — written on disarm, served on
+     `GET /api/logs/{name}` (+ `has_scorecard` in the list view). ⚠️ **NO UI YET** —
+     `LogsPanel.jsx` does not render it, so the operator cannot see a scorecard without hitting
+     the API by hand. This is the SAME seam class as the keepout-arming bug (`86c6a6e`): a
+     backend surface with no caller. Small, unclaimed, and worth doing next time the frontend is
+     open — min hazard distance, min RTL margin, max bank, warning counts per monitor.
   5. ~~**Bank-angle monitor** (#4) and **wind** (#6)~~ **DONE 2026-08-18.** Wind IS streamed under
      the existing `MAV_DATA_STREAM_ALL` request — verified live, no extra subscription needed.
   6. **🔥 Turn-geometry bank constraint in `coverage.py`** — NEW, and now the highest-value
@@ -283,7 +289,7 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
   is 1,866 lines with 63 functions and 8 of 10 routers import it, so any extraction or mission-model
   change collides with everything. Run those solo.
 - **Hardware-gated:** Cube bench day (script = the `bench` scenario sequence: backup → surface/servo tests → calibrations → `POST /api/bench/first-flight-params {cells, apply:true}`); telemetry radio + receiver (Caleb's task); Stripe live keys (Caleb); WebRTC/HLS video (needs HD video hardware); terrain intelligence phase 2 (needs camera + companion computer); pump/spray-system verification (needs Caleb's answer on sensing).
-- **Billing:** table covers through the 2026-08-14 session. UNBILLED: 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16 (docs/merge), 2026-08-18.
+- **Billing:** table covers through the 2026-08-14 session. UNBILLED (5): 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16 (docs/merge), and BOTH parallel 2026-08-18 sessions (Lane A + Lane B — separate transcripts, same day).
 
 #### Design ideas (proposed, NOT implemented; user hasn't picked yet)
 - Tier 1 (recommended as one "flight safety & feedback" release — mostly now shipped, see History "List-finish session"): pre-flight checklist card gating ARM (with override); aviation-style alerts/annunciators + optional voice callouts; post-flight summary card on disarm; "RTL margin" can-I-get-home indicator
