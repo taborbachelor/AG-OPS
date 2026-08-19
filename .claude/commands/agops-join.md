@@ -22,10 +22,9 @@ Do this now, in order.
 4. `py tools\agops.py inbox` — read anything addressed to you before starting.
 5. `py tools\agops.py next` — the ranked queue for your specialties.
 
-Then pick ONE task and claim it: `py tools\agops.py claim TASK-0XX`.
-
-If the claim is refused because someone owns overlapping files, do not force it.
-Pick a different task, or message the owner and agree first.
+Then **recommend** one task and stop — do not claim it. Say which you would take
+and why, in a line or two. The human starts you with *continue* or
+`/agops-continue`; joining the team is not the same as being told to work.
 
 If no task fits — the queue is empty, everything conflicts, or the work needs a
 decision only the human can make — say so and stop. Do not invent speculative

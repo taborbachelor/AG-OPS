@@ -71,7 +71,10 @@ def build_context(payload):
         L.extend(owned_paths[:12])
 
     L.append("")
-    L.append("AVAILABLE WORK (ranked for you)")
+    auto = cfg.get("auto_claim", False)
+    L.append("AVAILABLE WORK (ranked for you)"
+             if auto else
+             "AVAILABLE WORK (ranked for you) -- DO NOT CLAIM WITHOUT BEING ASKED")
     if nxt:
         for t in nxt:
             L.append("  %-10s %-8s %-9s %s"
@@ -90,6 +93,13 @@ def build_context(payload):
                                              m["content"][:70]))
 
     L.append("")
+    if not auto:
+        L.append("HOW WORK STARTS HERE: you do NOT pick up tasks on your own. "
+                 "Answer whatever the human asked. If they ask what is next, "
+                 "recommend one of the above and wait. Claim and begin only when "
+                 "they say continue, or name a task. Starting work unasked costs "
+                 "them a commit and a file lock they did not agree to.")
+        L.append("")
     L.append("HOW TO WORK HERE (you are %s)" % name)
     L.append("  py tools\\agops.py status                     the whole board")
     L.append("  py tools\\agops.py next                       ranked work for you")

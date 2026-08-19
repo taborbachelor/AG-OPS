@@ -151,5 +151,6 @@
     ]
   },
   "known_agents": {},
-  "lead": null
+  "lead": null,
+  "auto_claim": false
 }

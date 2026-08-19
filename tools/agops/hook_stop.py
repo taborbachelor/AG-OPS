@@ -10,9 +10,12 @@ Runs when the agent finishes a turn. Three jobs, all cheap:
 2.  **Deliver mail.** A teammate's message is worthless if nobody reads it. Any
     unread message is injected here, at the natural moment the agent is between
     pieces of work.
-3.  **Point at the next task.** An idle agent with a queue in front of it should
-    not be asking the human what to do. This surfaces the ranked candidates; the
-    agent decides and claims.
+3.  **Point at the next task -- without taking it.** An idle agent should know
+    what is available without the human having to look it up. Whether it may
+    ACT on that is the `auto_claim` policy, and it is off by default: proposing
+    costs a sentence, claiming commits an agent, a file lock and a commit. A
+    session asked for a status report once claimed a task and shipped a feature,
+    which is the behaviour this default exists to prevent.
 
 Never blocks, never fails loudly.
 """
@@ -57,15 +60,22 @@ def main():
     if not cur_task:
         nxt = core.next_tasks(agent=me, limit=3)
         if nxt:
+            auto = core.load_config().get("auto_claim", False)
             lines.append("You hold no task. Ranked available work:")
             for t in nxt:
                 lines.append("  %s  [%s]  %s%s"
                              % (t["task_id"], t["priority"], t["title"][:50],
                                 "" if t["_conflict"] == "NONE"
                                 else "  (conflict: %s)" % t["_conflict"]))
-            lines.append("Claim one with: py tools\\agops.py claim <TASK-ID>  "
-                         "-- or tell the human why none of these is the right "
-                         "next move.")
+            if auto:
+                lines.append("auto_claim is ON: claim the best fit with "
+                             "py tools\\agops.py claim <TASK-ID> and begin.")
+            else:
+                lines.append(
+                    "DO NOT CLAIM ANY OF THESE YET. Tell the human which one you "
+                    "would take and why, in one or two lines, then STOP and wait. "
+                    "Claim and start only when they say continue (or name a task). "
+                    "This applies however obvious the next step looks.")
 
     if not lines:
         return 0

@@ -22,8 +22,9 @@ reality, not about how finished you feel.
 5. **Complete it:**
    `py tools\agops.py complete TASK-0XX "<what changed and what was verified>" --tests-passed --commit <sha>`
    This automatically unblocks any dependent tasks and tells you which.
-6. **Take the next one.** `py tools\agops.py next`, then claim the best fit and
-   begin. Only stop and ask the human if nothing suitable exists, the next step
-   needs their judgement, or continuing would create a conflict.
+6. **Propose the next one, then STOP.** `py tools\agops.py next`, say which you
+   would take and why in a line or two, and wait. Do not claim it. The human
+   says *continue* (or `/agops-continue`) when they want you to carry on —
+   claiming commits them to a file lock and a commit they did not ask for.
 
 $ARGUMENTS

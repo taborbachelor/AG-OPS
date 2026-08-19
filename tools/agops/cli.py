@@ -378,6 +378,10 @@ def cmd_admin(a):
         cfg["coordination_enabled"] = False
     elif a.action == "resume":
         cfg["coordination_enabled"] = True
+    elif a.action == "auto-claim":
+        if a.value not in ("on", "off"):
+            raise AgopsError("auto-claim takes on | off")
+        cfg["auto_claim"] = (a.value == "on")
     elif a.action == "enforcement":
         if a.value not in ("advisory", "blocking", "off"):
             raise AgopsError("enforcement must be advisory | blocking | off")
@@ -450,8 +454,9 @@ def cmd_admin(a):
     else:
         raise AgopsError("unknown admin action %r" % a.action)
     core.save_config(cfg)
-    out(a, cfg, "coordination_enabled=%s enforcement=%s"
-        % (cfg["coordination_enabled"], cfg["enforcement"]))
+    out(a, cfg, "coordination_enabled=%s enforcement=%s auto_claim=%s"
+        % (cfg["coordination_enabled"], cfg["enforcement"],
+           cfg.get("auto_claim", False)))
 
 
 def cmd_events(a):
@@ -605,8 +610,9 @@ def build_parser():
     s = sub.add_parser("drop"); s.add_argument("resource"); s.set_defaults(fn=cmd_drop)
 
     s = sub.add_parser("admin", help="human override")
-    s.add_argument("action", choices=["pause", "resume", "enforcement", "assign",
-                                      "release", "cancel", "clear-locks"])
+    s.add_argument("action", choices=["pause", "resume", "enforcement",
+                                      "auto-claim", "assign", "release",
+                                      "cancel", "clear-locks"])
     s.add_argument("value", nargs="?"); s.add_argument("--task-id")
     s.set_defaults(fn=cmd_admin)
 

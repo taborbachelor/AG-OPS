@@ -592,6 +592,60 @@ class TestResourcesAndOverride(Base):
             self.assertIn(expected, kinds)
 
 
+class TestAutoClaimPolicy(Base):
+    """Idle agents propose work; they do not take it unless told they may.
+
+    A `claude -p` session that was asked only for a status report once claimed a
+    task, implemented it and committed it. Nothing was wrong with the code -- the
+    problem was that nobody asked for it. The Stop hook is where that impulse
+    comes from, so that is where the policy lives.
+    """
+
+    def _stop_hook(self, session):
+        return subprocess.run(
+            [sys.executable, os.path.join(TOOLS, "agops", "hook_stop.py")],
+            input=json.dumps({"session_id": session}), capture_output=True,
+            text=True, timeout=60, env=dict(os.environ, AGOPS_HOME=_TMP))
+
+    def _context(self, res):
+        try:
+            return json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        except Exception:
+            return ""
+
+    def setUp(self):
+        super().setUp()
+        core.register_agent(session_id="s-a", name="alpha")
+        core.create_task("something available", priority="HIGH")
+
+    def test_default_is_off(self):
+        self.assertFalse(core.load_config().get("auto_claim", False))
+
+    def test_idle_agent_is_told_to_wait(self):
+        ctx = self._context(self._stop_hook("s-a"))
+        self.assertIn("TASK-001", ctx, "the queue should still be surfaced")
+        self.assertIn("DO NOT CLAIM", ctx)
+        self.assertIn("continue", ctx)
+
+    def test_swarm_mode_can_be_turned_back_on(self):
+        cfg = core.load_config()
+        cfg["auto_claim"] = True
+        core.save_config(cfg)
+        ctx = self._context(self._stop_hook("s-a"))
+        self.assertIn("auto_claim is ON", ctx)
+        self.assertNotIn("DO NOT CLAIM", ctx)
+
+    def test_the_policy_does_not_disable_claiming_itself(self):
+        # The brake is on the agent's initiative, not on the mechanism: a human
+        # saying "continue" must still be able to claim instantly.
+        self.assertTrue(core.claim_task("TASK-001", "alpha")["ok"])
+
+    def test_a_busy_agent_is_not_nagged(self):
+        core.claim_task("TASK-001", "alpha")
+        ctx = self._context(self._stop_hook("s-a"))
+        self.assertNotIn("DO NOT CLAIM", ctx)
+
+
 class TestGracefulDegradation(Base):
     def test_doctor_reports_health_honestly(self):
         r = run_cli("doctor", "--json")

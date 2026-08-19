@@ -120,7 +120,27 @@ The loser gets `TASK-007 is already owned by alpha.` and cannot act as owner:
 `complete` and `release` re-check ownership and refuse. Six concurrent OS
 processes racing one claim is a test in the suite, not a hope.
 
-## 6. Discovery
+## 6. Discovery and the auto-claim brake
+
+**Agents do not pick up work on their own.** `auto_claim` in
+`.agops/project.json` is **false** by default: an idle agent surfaces the ranked
+queue, recommends one, and waits. It claims and starts only when the human says
+*continue* or runs `/agops-continue`.
+
+That default was earned. A `claude -p` session asked only for a status report
+claimed a task, implemented it, and committed it. The code was fine; nobody had
+asked for it. Proposing costs a sentence -- claiming commits an agent, a file
+lock and a commit the human did not agree to.
+
+```
+py tools\agops.py admin auto-claim on     # swarm mode: agents self-dispatch
+py tools\agops.py admin auto-claim off    # default: propose and wait
+```
+
+The brake is on the agent's *initiative*, not on the mechanism -- claiming stays
+instant the moment a human asks for it.
+
+## 6b. Ranking
 
 ```
 py tools\agops.py next

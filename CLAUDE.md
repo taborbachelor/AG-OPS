@@ -47,9 +47,13 @@ These are not advisory. Each one exists because breaking it cost real time.
    `py tools\agops.py take sitl-5760` … `drop` the moment you are done. A red
    SITL scenario during parallel work is more likely contention than a
    regression — re-run it holding the lock before believing it.
-8. **When you finish, take the next task.** `py tools\agops.py next`, claim, and
-   continue. Stop and ask the human only when nothing suitable exists, the
-   decision is theirs, you are blocked, or continuing would create a conflict.
+8. **When you finish, PROPOSE the next task and stop.** Run
+   `py tools\agops.py next`, say which one you would take and why in a line or
+   two, then wait. Claim and begin only when the human says *continue* (or names
+   a task). This holds no matter how obvious the next step looks: claiming
+   commits them to a file lock and a commit they did not ask for. The one
+   exception is if they have set `auto_claim: true` in `.agops/project.json`,
+   which turns the queue into a swarm.
 9. **Never destroy another agent's work.** No `reset`, `checkout --`, `clean`,
    `stash` or force-push over changes that are not yours. If an agent crashed,
    use the recovery path (`/agops-recover`), which preserves everything.
@@ -65,8 +69,8 @@ speculative work — every task you invent is one another agent has to read.
 
 ## Commands
 
-`/agops-join` · `/agops-status` · `/agops-complete` · `/agops-handoff` ·
-`/agops-recover`. Everything else is `py tools\agops.py <cmd>` (`--help` works on
+`/agops-join` · `/agops-status` · `/agops-continue` (the go-ahead to take work) ·
+`/agops-complete` · `/agops-handoff` · `/agops-recover`. Everything else is `py tools\agops.py <cmd>` (`--help` works on
 every subcommand), or the `agops_*` MCP tools if they are loaded.
 
 ## Engineering rules that predate the team system

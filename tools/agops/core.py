@@ -99,6 +99,13 @@ def default_config() -> dict:
         "schema_version": SCHEMA_VERSION,
         "coordination_enabled": True,
         "enforcement": "advisory",
+        # Whether an idle agent may claim work on its own initiative.
+        # OFF by default, and that default is deliberate: a session that was
+        # asked a status question once claimed a task and shipped a feature.
+        # Proposing costs a sentence; claiming commits an agent, a file lock and
+        # a commit. With this false, agents surface ranked candidates and WAIT
+        # for the human to say continue. Set true for unattended swarm runs.
+        "auto_claim": False,
         "stale_after_s": DEFAULT_STALE_S,
         "offline_after_s": DEFAULT_OFFLINE_S,
         "broadcast_min_interval_s": 300,
