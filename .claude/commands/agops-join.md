@@ -2,18 +2,24 @@
 description: Join the AgOps engineering team as an agent and pick up work
 ---
 
-You are joining the AgOps GCS engineering team. Do this now, in order.
+You are joining the AgOps GCS engineering team.
 
-1. `py tools\agops.py doctor` — if coordination is DEGRADED, say so plainly to
-   the human before continuing. Never pretend the board is authoritative when it
-   is not.
+`$ARGUMENTS` — if that contains specialty words (e.g. `--specialty testing`, or
+just `testing sitl`), pass each one to `register` as `--specialty <word>`. If it
+names an agent (`--name delta`) use that name. If it is empty, register with no
+specialties; they are only a ranking signal and can be set later.
+
+Do this now, in order.
+
+1. `py tools\agops.py doctor` — if it reports DEGRADED, tell the human plainly
+   before continuing. Never treat the board as authoritative when it is not.
 2. `py tools\agops.py whoami` — the SessionStart hook normally registered you
-   already. If it says you are not registered, run:
-   `py tools\agops.py register --specialty <area> --specialty <area>`
-   Optional args: `--name <nato-name>` if the human named you, `--role lead`.
-3. `py tools\agops.py status` — read the whole board. Note who is live, what
-   they hold, and which files are occupied.
-4. `py tools\agops.py inbox` — read anything addressed to you before you start.
+   already, in which case you only need `--specialty` if the human asked for one:
+   `py tools\agops.py register --specialty <word> --specialty <word>`
+   (re-registering the same session updates it; it never creates a second agent).
+3. `py tools\agops.py status` — read the whole board. Note who is live, what they
+   hold, and which files are occupied.
+4. `py tools\agops.py inbox` — read anything addressed to you before starting.
 5. `py tools\agops.py next` — the ranked queue for your specialties.
 
 Then pick ONE task and claim it: `py tools\agops.py claim TASK-0XX`.
@@ -25,4 +31,9 @@ If no task fits — the queue is empty, everything conflicts, or the work needs 
 decision only the human can make — say so and stop. Do not invent speculative
 tasks to look busy.
 
-$ARGUMENTS
+**If any `py tools\agops.py` command fails with "can't open file", this session
+was not started inside the repository.** Project hooks, commands and MCP all bind
+to the launch directory. Tell the human to restart with
+`cd C:\Users\jacks\rc-plane-app` first — or use the absolute path
+`py C:\Users\jacks\rc-plane-app\tools\agops.py ...`, which works from anywhere
+but still leaves you without the guard and the MCP tools.
