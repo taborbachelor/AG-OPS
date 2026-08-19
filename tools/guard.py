@@ -35,10 +35,14 @@ CLAIM = os.path.join(HERE, "claim.py")
 # exclusions a plain `pytest ... 2>&1 | tail` reads as a mutation, and every
 # path mentioned anywhere on the line gets checked -- which blocked a read-only
 # test run on this very repo.
+#
+# The redirect clause also refuses to fire on `->` and `=>`. Arrows are
+# pervasive in printed output and comments ("bank -> load factor"), and reading
+# one as a redirect made a read-only diagnostic script look like a file write.
 MUTATORS = re.compile(
     r"(^|[\s;|&])(sed\s+-i|rm\b|mv\b|cp\b|tee\b|truncate\b|dd\b|"
     r"npm\s+(run\s+)?build|pyinstaller|git\s+(checkout|restore|reset|clean|apply|revert))"
-    r"|>>?\s*(?!&)(?!/dev/null)(?!NUL)\S", re.I)
+    r"|(?<![-=<>])>>?\s*(?!&)(?!/dev/null)(?!NUL)\S", re.I)
 
 PATHISH = re.compile(r"[\w./\\-]+\.(py|jsx|js|ts|tsx|css|html|ps1|sh|json|md|spec)\b")
 
@@ -108,9 +112,27 @@ def main():
                     fh.write(session)
                 return 0
 
+        # A shell command's relative paths are relative to wherever it `cd`s to,
+        # NOT to the session cwd in the payload. Without this, `cd backend &&
+        # grep app/guardian.py` resolves to <repo>/app/guardian.py, which
+        # matches nobody's claim -- so a file the session genuinely owns reads
+        # as foreign and gets blocked.
+        base = payload.get("cwd") or REPO
+        if tool in ("Bash", "PowerShell"):
+            cds = re.findall(r"(?:^|[\s;|&])cd\s+[\"']?([^\"'\s;|&]+)",
+                             _strip_heredocs(ti.get("command") or ""))
+            if cds:
+                last = cds[-1]
+                base = last if os.path.isabs(last) else os.path.join(base, last)
+
         for target in _targets(tool, ti):
             if not os.path.isabs(target):
-                target = os.path.join(payload.get("cwd") or REPO, target)
+                candidates = [os.path.join(base, target),
+                              os.path.join(payload.get("cwd") or REPO, target),
+                              os.path.join(REPO, target)]
+                # Prefer a candidate that actually exists; otherwise the first.
+                target = next((c for c in candidates if os.path.exists(c)),
+                              candidates[0])
             # Only guard files inside THIS repo.
             if os.path.commonpath([os.path.abspath(target), REPO]) != REPO:
                 continue
