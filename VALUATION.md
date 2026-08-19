@@ -16,7 +16,7 @@ project repo, so it is reachable from any machine at
 
 | | Amount | What it means |
 |---|---:|---|
-| **Token cost to date** | **$1,767** | Claude usage at Anthropic API list price. A billing proxy — real cash is far less. |
+| **Token cost to date** | **$1,773** | Claude usage at Anthropic API list price. A billing proxy — real cash is far less. |
 | **All-in cost to date** | **≈ $8,500** | Token cost + Tabor's hours at a conservative $75/hr. Under $500 of this is actual money. |
 | **Replacement cost** | **$180k – $340k** | What a contract team would charge to rebuild it. The ceiling, and not collectable here. |
 | **Recommended ask** | **$7,500** | Phase 1 fixed fee + retainer + royalty. See *Negotiating position*. |
@@ -37,13 +37,19 @@ Sonnet $3/$15; cache writes 1.25× (5 min) / 2× (1 hour) the input rate, cache 
 | 2026-08-15 → 08-16 | Backend hardening (~35 findings), guardian EKF/vibration/airspeed monitors, docs + merge | 3 sessions, **not measurable** ¹ | ~$120 | ~$144 |
 | 2026-08-18 | Lane A — guardian SITL proof, bank angle, wind, keepout proximity, scorecard, alert unification | `303e824a` | $129.26 | $155.11 |
 | 2026-08-18 | Lane B — powerline keepouts, connector-leg rerouting, coverage analysis, cross-lane fix | `04d27772` | $179.05 | $214.86 |
-| 2026-08-19 | Valuation + this ledger | `69aaf91a` | $10.98 | $13.18 |
-| | | | **$1,767** | **$2,120** |
+| 2026-08-19 | Valuation + this ledger | `69aaf91a` | $16.49 ² | $19.79 |
+| | | | **$1,773** | **$2,127** |
 
 ¹ Those three sessions ran on the previous laptop. Claude Code transcripts live under the Windows
 profile of the machine that ran them (`~/.claude/projects/C--Users-<profile>-…/`), and that profile
 is gone, so the rows are a considered estimate rather than a measurement. **Never let a re-run of
 `session_cost.py` silently delete them** — the script can only see what is on the current machine.
+Recoverable if that laptop ever comes back: see *Open items*.
+
+² A session cannot fully count itself — the row is priced at the moment it is written and the
+session keeps spending afterward. Every last row in this table is therefore slightly low. Correct
+it next session with `py tools\session_cost.py --session <id>`; `--new` will not surface it,
+because the id is already in this file.
 
 ---
 
@@ -57,7 +63,7 @@ first event to last — which is an **upper bound** on attended time, not a time
 | 2026-07-10 → 08-16 (all sessions on retired machines) | ~55 – 75 | Estimated: ~9 sessions, sized against the measured ones |
 | 2026-08-18 Lane A `303e824a` | 8.7 | Measured |
 | 2026-08-18 Lane B `04d27772` | 8.4 | Measured |
-| 2026-08-19 `69aaf91a` | 9.8 | Measured (50% of the session was on this project) |
+| 2026-08-19 `69aaf91a` | 10.3 | Measured (51% of the session was on this project; wall clock includes idle) |
 | **Total attended** | **≈ 82 – 102 h** | Working figure: **90 h** |
 
 At $75/hr (conservative internal rate) → **$6,750**. At $125/hr (market) → **$11,250**.
@@ -158,7 +164,22 @@ chemicals over other people's land — that clause is not boilerplate.
 
 ---
 
-## 6. How to update this file
+## 6. Open items
+
+Everything the numbers depend on that isn't settled. Short list on purpose.
+
+| Item | Owner | Note |
+|---|---|---|
+| **No agreement with Caleb exists.** Nothing invoiced since 2026-08-14. | Tabor | This is the only item that actually matters. The arithmetic is done; the conversation is not. Every session that ships work without it widens the gap. |
+| Recover the 2026-08-15/16 cost row | Tabor | Currently a ~$120 estimate. If the previous laptop is ever accessible, run `py tools\session_cost.py --since 2026-08-15` **on that machine** and replace the row with the measurement. Otherwise it stays an estimate forever. |
+| Top up the last ledger row | next session | See footnote ². One command, takes a second. |
+| Labour hours before 2026-08-18 are estimated | Tabor | ~55–75 h, unmeasurable for the same profile reason. Only worth revisiting if the old laptop resurfaces; the working figure of 90 h total is conservative either way. |
+| First real flight, spray hardware layer | Caleb (hardware) / us (software) | Both are section 5 milestones worth $15k–50k each to Frame B. Neither is scheduled. |
+| `spreader-project` has no ledger | Tabor | Same partner, same unpaid pattern, and it has a commercial target (USC LLC supply agreement). If it goes anywhere, it needs its own `VALUATION.md` — `tools\session_cost.py` works there with `PROJECT_MARKER` changed. |
+
+---
+
+## 7. How to update this file
 
 At the end of any session that did work on this project:
 
@@ -172,10 +193,11 @@ Then:
 1. **Append** the printed rows to section 1 (period, one-line description, session id, cost).
    Append — never rewrite. Old rows are the record.
 2. **Append** the hours to section 2 and update the working total.
+   Also correct the previous session's row with `--session <id>` (footnote 2 in section 1).
 3. If any *Inputs* in section 3 changed materially (say, +2,000 lines or a new subsystem),
    re-run those commands and recompute Frame A.
 4. If a section 4 milestone landed, move Frames B and C and say so in the row.
-5. Update *Last reconciled* at the top. Commit and push — that is what makes it reachable
+5. Update *Last reconciled* at the top, and section 6 if an open item moved. Commit and push — that is what makes it reachable
    from the next machine.
 
 The script only sees transcripts on the **current** machine. `--min-share` (default 0.5) decides

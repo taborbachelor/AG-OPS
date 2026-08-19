@@ -9,7 +9,14 @@ to paste into the ledger.
     py tools\\session_cost.py                     # every session found
     py tools\\session_cost.py --since 2026-08-15  # only sessions starting on/after
     py tools\\session_cost.py --new               # only sessions NOT already in VALUATION.md
+    py tools\\session_cost.py --session 69aaf91a  # one session, to correct a logged row
     py tools\\session_cost.py --json              # machine-readable
+
+A session cannot fully count itself: the row you write during a session is
+priced at that moment and the session keeps spending after you write it. So
+the last row in VALUATION.md is always a little low. Correct it next session
+with --session <its id>; --new will not surface it, because its id is already
+in the file.
 
 Costs are Anthropic API LIST PRICE, which is a billing proxy, not spend --
 Claude Code actually runs on a Max plan. See VALUATION.md for why we track it
@@ -166,6 +173,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--since", metavar="YYYY-MM-DD", help="only sessions starting on/after this date")
     ap.add_argument("--new", action="store_true", help="only sessions not already in VALUATION.md")
+    ap.add_argument("--session", metavar="PREFIX",
+                    help="just this session id (prefix match). Use it to CORRECT a row already "
+                         "in the ledger -- notably the row for the session that wrote the ledger, "
+                         "which always undercounts itself (see --new note below)")
     ap.add_argument("--min-share", type=float, default=0.5, metavar="F",
                     help="fraction of a session that must be in this project to count it "
                          "in the total (default 0.5); anything below is listed as mixed")
@@ -173,6 +184,8 @@ def main():
     args = ap.parse_args()
 
     rows = collect()
+    if args.session:
+        rows = [r for r in rows if r["id"].startswith(args.session)]
     if args.since:
         rows = [r for r in rows if r["start"][:10] >= args.since]
     if args.new:
