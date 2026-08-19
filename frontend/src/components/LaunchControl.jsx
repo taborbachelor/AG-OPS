@@ -8,7 +8,7 @@ function LaunchControl({ telemetry, connected }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null); // { msg, kind }
   const [override, setOverride] = useState(false);   // bypass blocking checks
-  const [showChecks, setShowChecks] = useState(true);
+  const [showChecks, setShowChecks] = useState(false);
   const [preflight, setPreflight] = useState(null);  // server verdicts (M6)
 
   // The checklist is EVALUATED by the backend (the same gate that refuses
@@ -91,48 +91,75 @@ function LaunchControl({ telemetry, connected }) {
     setBusy(false);
   };
 
-  const gpsReady = telemetry.gps_fix >= 3;
+  // ONE verdict, and it is the server's. There is deliberately no client-side
+  // fallback: the old one computed "ready" from two locally-invented checks
+  // (link + GPS) whenever the poll had not landed, so the panel could show a
+  // pass the backend would refuse -- the exact UI-disagrees-with-the-server
+  // failure M6 exists to remove. No verdict now renders as UNKNOWN, never as
+  // a pass, and OVERRIDE remains available for the operator who needs it.
+  const checks = preflight ? preflight.checks : [];
+  const labelFor = (id) => {
+    const c = checks.find((x) => x.id === id);
+    return c ? c.label : id;
+  };
+  const verdict = !preflight ? 'unknown' : preflight.ready ? 'ready' : 'blocked';
+  const failedBlockers = (preflight && preflight.failed_blockers) || [];
+  const failedAdvisories = (preflight && preflight.advisories_failing) || [];
 
-  // Server verdicts when available; a minimal local fallback (link + GPS)
-  // when the poll hasn't landed yet, so the panel is never blank.
-  const checks = preflight
-    ? preflight.checks.map((c) => ({
-        label: c.label, ok: c.ok, block: c.blocker,
-        warn: c.detail || undefined,
-      }))
-    : [
-        { label: 'Link', ok: connected, block: true },
-        { label: 'GPS 3D fix', ok: gpsReady, block: true },
-      ];
-  const blockersPass = preflight ? preflight.ready
-    : checks.filter((c) => c.block).every((c) => c.ok);
-  const canLaunch = blockersPass || override;
+  // One plain sentence, assembled from the server's own verdict and labels --
+  // no thresholds and no re-derivation of readiness happen here.
+  const sentence =
+    verdict === 'unknown'
+      ? 'The pre-flight gate has not answered, so readiness is unknown.'
+      : verdict === 'blocked'
+        ? `Cannot arm: ${failedBlockers.map(labelFor).join(', ')}.`
+        : failedAdvisories.length
+          ? `Ready to fly. Not passing: ${failedAdvisories.map(labelFor).join(', ')}.`
+          : 'Ready to fly. Every check passes.';
+
+  const canLaunch = verdict === 'ready' || override;
 
   return (
     <div className="launch-control glass-panel">
       {!telemetry.armed && connected && (
         <div className="checklist">
-          <div className="checklist-head" onClick={() => setShowChecks((s) => !s)}>
-            <span>PRE-FLIGHT {blockersPass ? '✓' : '— NOT READY'}</span>
-            <span className="checklist-chevron">{showChecks ? '▾' : '▸'}</span>
+          <div className={`pf-verdict pf-${verdict}`}>
+            <span className="pf-state">
+              {verdict === 'ready' ? 'READY'
+                : verdict === 'blocked' ? 'NOT READY' : 'CHECKING…'}
+            </span>
+            <button type="button" className="pf-disclosure"
+              aria-expanded={showChecks}
+              onClick={() => setShowChecks((v) => !v)}>
+              {showChecks ? '▾' : '▸'}{' '}
+              {checks.length ? `${checks.length} checks` : 'detail'}
+            </button>
           </div>
+
+          <div className="pf-sentence">{sentence}</div>
+
+          {/* An action, not detail -- it stays reachable while detail is closed. */}
+          {verdict !== 'ready' && (
+            <label className={`force-toggle ${override ? 'on' : ''}`}
+              title="Launch despite failed blocking checks">
+              <input type="checkbox" checked={override}
+                onChange={(e) => setOverride(e.target.checked)} />
+              OVERRIDE
+            </label>
+          )}
+
           {showChecks && (
             <div className="checklist-items">
+              {checks.length === 0 && (
+                <span className="check-item warn">No verdict from the server yet.</span>
+              )}
               {checks.map((c) => (
-                <span key={c.label}
-                  className={`check-item ${c.ok ? 'ok' : c.block ? 'bad' : 'warn'}`}>
-                  {c.ok ? '✓' : c.block ? '✕' : '△'} {c.label}
-                  {!c.ok && c.warn ? ` (${c.warn})` : ''}
+                <span key={c.id}
+                  className={`check-item ${c.ok ? 'ok' : c.blocker ? 'bad' : 'warn'}`}>
+                  {c.ok ? '✓' : c.blocker ? '✕' : '△'} {c.label}
+                  {!c.ok && c.detail ? ` (${c.detail})` : ''}
                 </span>
               ))}
-              {!blockersPass && (
-                <label className={`force-toggle ${override ? 'on' : ''}`}
-                  title="Launch despite failed blocking checks">
-                  <input type="checkbox" checked={override}
-                    onChange={(e) => setOverride(e.target.checked)} />
-                  OVERRIDE
-                </label>
-              )}
             </div>
           )}
         </div>
@@ -177,9 +204,6 @@ function LaunchControl({ telemetry, connected }) {
         </div>
       )}
 
-      {!gpsReady && !telemetry.armed && (
-        <div className="launch-hint">Waiting for GPS 3D fix…</div>
-      )}
       {status && <div className={`launch-status ${status.kind}`}>{status.msg}</div>}
     </div>
   );

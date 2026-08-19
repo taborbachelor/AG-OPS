@@ -159,11 +159,15 @@ what you're actually building, which the registry can't know.
 
 ### UI — GCS operator frontend
 *Goal: effortless.*
-- **Session:** `b06ca0f4` (charlie) · **Working on:** item 1, the scorecard panel — **SHIPPED**,
-  see below. ⚠️ **The PreToolUse guard does not load for charlie.** It is wired in the repo's
-  `.claude/settings.json`, but charlie's project dir is the home directory, not the repo, so
-  repo-level project settings never apply. Charlie holds the UI boundary by discipline, not by the
-  hook — and so does any other session started from the home directory rather than the repo.
+- **Session:** `b06ca0f4` (charlie) · **Working on:** items 1 and 2 — both **SHIPPED**. Next:
+  item 3, which needs Tabor's eyes, not code. ✅ **The guard-does-not-load gap is CLOSED** (was true at 10:39, fixed by ~11:0x):
+  a home-directory hook now pipes into the repo's guard, and it correctly blocked charlie from a
+  path outside UI. Two notes for whoever owns the tooling: it matches **filename tokens anywhere
+  in a command, including inside quoted prose** — editing this very file was blocked because the
+  markdown text named a backend module — and the suggested remedy it prints is to claim a glob
+  for that file, which would be a session claiming ownership it does not want. Anchoring the edit
+  on token-free markers was the honest way through; a real fix would look at edit targets, not
+  the whole command string.
 
 1. ~~**Scorecard UI in `LogsPanel.jsx`.**~~ **DONE 2026-08-19 (charlie).** New
    `components/Scorecard.jsx` rendered from the playback view, a `scorecard` badge on list rows
@@ -172,9 +176,15 @@ what you're actually building, which the registry can't know.
    only thing coloured is the guardian's own per-monitor warning counts. Original finding: The backend writes one on every disarm and serves it on `GET /api/logs/{name}`
    (+ `has_scorecard` in the list view), and no operator can see it. Min hazard distance, min RTL
    margin, max bank, warning counts per monitor. Pure consumer of an existing surface — no seam.
-2. **One-verdict preflight.** `preflight.py` already computes blockers vs advisories server-side;
-   collapse the UI to one state plus one plain sentence, detail behind a disclosure triangle.
-   Render-only — do **not** move logic into the client, that regresses M6.
+2. ~~**One-verdict preflight.**~~ **DONE 2026-08-19 (charlie).** One state word (READY /
+   NOT READY / CHECKING), one sentence naming the server's own failing blockers or advisories,
+   per-check detail behind a real `<button>` disclosure closed by default, OVERRIDE kept outside
+   it because it is an action. 6 new tests (30 frontend total), both invariants mutation-checked.
+   **Found and removed an actual M6 regression while doing it:** the panel fell back to two
+   locally-invented checks (link + GPS) whenever the server poll had not landed, so it could show
+   a PASS the backend would refuse — with `connected` and a GPS fix, the old fallback read READY
+   against an unreachable gate. No verdict now renders as CHECKING and never as a pass. The
+   client-side `gpsReady` hint went with it, along with three orphaned CSS rules.
 3. 3D scene eyeball check (needs Tabor's eyes): `start-all.ps1` → FLY view → does the nose lead the
    trail? If sideways, adjust the heading offset in `MapView3D.jsx`'s `oriProp`.
 
