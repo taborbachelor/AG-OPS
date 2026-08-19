@@ -2,7 +2,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from app import onboard_fence, preflight
+from app import onboard_fence, onboard_rally, preflight
 from app.guardian import config_to_dict
 from app.vehicle_manager import vehicle_manager
 
@@ -155,6 +155,16 @@ class GuardianConfigUpdate(BaseModel):
     keepout_sustained_s: Optional[float] = Field(None, ge=0, le=60)
 
 
+class RallyCandidate(BaseModel):
+    """An operator-picked alternate destination for link-loss RTL, validated
+    against the loaded hazard rings before it is ever uploaded."""
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    alt: float = Field(ge=-500, le=10000)                       # m, relative to home
+    break_alt: Optional[float] = Field(None, ge=-500, le=10000)  # defaults to alt
+    land_dir: float = Field(0.0, ge=0, le=360)
+
+
 class KeepoutLoad(BaseModel):
     """Rings the current mission was planned against, for the live proximity
     monitor. Accepts the coverage response's `zones` shape directly, so the UI
@@ -168,6 +178,13 @@ class KeepoutLoad(BaseModel):
     # less dangerous when the laptop is out of range. Opt out for a bench run
     # where you don't want the FC's fence storage touched.
     push_to_vehicle: bool = True
+    # Optional operator-picked rally point candidates, validated against
+    # these same rings and pushed alongside the fence -- so a link-loss RTL
+    # has somewhere clear to go instead of a straight line home through
+    # whatever this mission's hazards are. Empty by default: unlike the
+    # fence (built automatically from the rings), a rally point needs a
+    # LOCATION nobody but the operator can supply.
+    rally_points: list[RallyCandidate] = []
 
 
 @router.get("/keepouts")
@@ -211,15 +228,33 @@ def load_keepouts(req: KeepoutLoad):
             # let this read as a successful fence.
             fence.update({"ok": False, "error": str(exc)})
 
+    rally = {"attempted": False}
+    if req.rally_points:
+        rally["attempted"] = True
+        if not vehicle_manager.connected:
+            rally.update({"ok": False, "error": "not connected"})
+        else:
+            try:
+                built = onboard_rally.build_rally_items(
+                    [p.model_dump() for p in req.rally_points],
+                    prepared, home=vehicle_manager.home_position())
+                rally.update(vehicle_manager.upload_rally(built["items"]))
+            except ValueError as exc:
+                # A candidate too close to a hazard, or a home<->rally leg
+                # that isn't clear. Never upload a rally point the check
+                # couldn't verify -- report why instead.
+                rally.update({"ok": False, "error": str(exc)})
+
     return {"status": "ok", "hazards": prepared["n_hazards"],
             "keepouts": prepared["n_keepouts"],
             "dropped": prepared["dropped"],
             "hazard_buffer_m": prepared["hazard_buffer_m"],
-            "fence": fence}
+            "fence": fence,
+            "rally": rally}
 
 
 @router.delete("/keepouts")
-def clear_keepouts(clear_fence: bool = False):
+def clear_keepouts(clear_fence: bool = False, clear_rally: bool = False):
     """Disarm the live monitor. Does NOT clear the onboard fence by default.
 
     The asymmetry is deliberate. Stale RINGS are worse than none -- they read
@@ -232,12 +267,20 @@ def clear_keepouts(clear_fence: bool = False):
     So clearing the fence is an explicit act -- `?clear_fence=true` -- for when
     the operator genuinely means "this aircraft no longer has surveyed
     hazards", not a side effect of tidying up a monitor.
+
+    `?clear_rally=true` is the same act for rally points, for the same
+    reason: a mapped hazard didn't move because the mission changed, so the
+    alternate destination it justified shouldn't disappear as a side effect
+    either -- only on an explicit "no surveyed hazards" from the operator.
     """
     vehicle_manager.clear_mission_keepouts(reason="operator")
-    out = {"status": "cleared", "fence_cleared": False}
+    out = {"status": "cleared", "fence_cleared": False, "rally_cleared": False}
     if clear_fence and vehicle_manager.connected:
         out["fence"] = vehicle_manager.clear_fence()
         out["fence_cleared"] = bool(out["fence"].get("ok"))
+    if clear_rally and vehicle_manager.connected:
+        out["rally"] = vehicle_manager.clear_rally()
+        out["rally_cleared"] = bool(out["rally"].get("ok"))
     return out
 
 
@@ -256,6 +299,20 @@ def get_exclusions():
     """
     supported, why = vehicle_manager.fence_transfer_supported()
     items = vehicle_manager.download_fence() if vehicle_manager.connected else []
+    return {"supported": supported, "reason": why or None,
+            "points": len(items), "items": items}
+
+
+@router.get("/rally")
+def get_rally():
+    """Rally points the VEHICLE actually holds -- the alternate destinations
+    a link-loss RTL will divert to instead of flying straight home.
+
+    Read back off the vehicle rather than reported from local state, same
+    reasoning as `/exclusions`: a send is not proof the FC holds it.
+    """
+    supported, why = vehicle_manager.rally_transfer_supported()
+    items = vehicle_manager.download_rally() if vehicle_manager.connected else []
     return {"supported": supported, "reason": why or None,
             "points": len(items), "items": items}
 

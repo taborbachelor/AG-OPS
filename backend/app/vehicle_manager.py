@@ -2226,6 +2226,166 @@ class VehicleManager:
                     mavutil.mavlink.MAV_MISSION_ACCEPTED, mission_type=ftype)
         return out
 
+    # ---- Rally points (MISSION_TYPE_RALLY) -------------------------------
+
+    def rally_transfer_supported(self) -> tuple[bool, str]:
+        """Can this build address the RALLY mission type at all?
+
+        Same MAVLink-1-vs-2 hazard as `fence_transfer_supported` -- the
+        `mission_type` field is a MAVLink 2 extension, and on bindings that
+        lack it a rally transfer would be accepted as a REGULAR mission and
+        silently replace the flight plan. Checked separately (not delegated
+        to `fence_transfer_supported`) so a future change to one path can't
+        silently change the other's guarantee.
+        """
+        try:
+            send = self.connection.mav.mission_count_send if self.connection \
+                else mavutil.mavlink.MAVLink.mission_count_send
+            if "mission_type" not in inspect.signature(send).parameters:
+                return False, (
+                    "link is bound to MAVLink 1 bindings "
+                    f"({mavutil.mavlink.__name__}), which have no mission_type "
+                    "field -- a rally transfer would overwrite the flight "
+                    "mission. Enable MAVLink 2 (MAVLINK20=1) and re-verify.")
+        except (AttributeError, TypeError, ValueError) as exc:
+            return False, f"could not determine rally protocol support: {exc}"
+        return True, ""
+
+    def upload_rally(self, items: list[dict]) -> dict:
+        """Upload rally points (from `onboard_rally.build_rally_items`).
+
+        Mirrors upload_fence's transfer loop exactly -- vehicle-driven, the
+        requested seq answered rather than a local counter (retransmit-safe
+        on a lossy radio), bounded iterations, and a cancel that closes a
+        half-open transaction. The differences are mission_type=RALLY,
+        command=MAV_CMD_NAV_RALLY_POINT, MAV_FRAME_GLOBAL_RELATIVE_ALT (a
+        rally point's altitude is meaningful, unlike a fence vertex), and
+        param1/param2 carrying break_alt/land_dir.
+
+        An empty list clears the rally points, which is a legitimate
+        operation -- it hands link-loss RTL back to a straight line home.
+        """
+        if not self.connection:
+            return {"ok": False, "error": "not connected"}
+        ok_proto, why = self.rally_transfer_supported()
+        if not ok_proto:
+            log_event("rally", "upload", level="ERROR", ok=False, error=why)
+            return {"ok": False, "error": why}
+
+        conn = self.connection
+        rtype = getattr(mavutil.mavlink, "MAV_MISSION_TYPE_RALLY", 2)
+
+        def _send_item(seq: int):
+            it = items[seq]
+            with self._send_lock:
+                conn.mav.mission_item_int_send(
+                    conn.target_system, conn.target_component, seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                    int(it["command"]), 0, 1,
+                    float(it["break_alt"]), float(it["land_dir"]), 0.0, 0.0,
+                    int(float(it["lat"]) * 1e7), int(float(it["lon"]) * 1e7),
+                    float(it["alt"]),
+                    mission_type=rtype,
+                )
+
+        ack = None
+        error = None
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.mission_count_send(
+                    conn.target_system, conn.target_component, len(items),
+                    mission_type=rtype)
+            for _ in range(10 * len(items) + 20):
+                msg = self._recv_blocking(
+                    conn, ["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"], 5)
+                if msg is None:
+                    error = "rally transfer timed out (no request/ack from vehicle)"
+                    break
+                # A vehicle mid-mission-transfer can interleave requests for a
+                # DIFFERENT mission type. Answering one with a rally point
+                # would corrupt whichever transfer it belonged to.
+                if getattr(msg, "mission_type", rtype) != rtype:
+                    continue
+                if msg.get_type() == "MISSION_ACK":
+                    ack = msg
+                    break
+                if 0 <= msg.seq < len(items):
+                    try:
+                        _send_item(msg.seq)
+                    except Exception as e:
+                        error = f"rally item {msg.seq} failed to send: {e}"
+                        break
+            else:
+                error = "rally transfer did not complete (vehicle kept re-requesting)"
+            if ack is None:
+                try:
+                    with self._send_lock:
+                        conn.mav.mission_ack_send(
+                            conn.target_system, conn.target_component,
+                            mavutil.mavlink.MAV_MISSION_OPERATION_CANCELLED,
+                            mission_type=rtype)
+                except Exception:
+                    pass
+
+        ok = ack is not None and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED
+        result = {"ok": ok, "ack": (ack.type if ack else None), "points": len(items)}
+        if not ok:
+            result["error"] = error or \
+                f"vehicle rejected rally points (MISSION_ACK type {ack.type})"
+        log_event("rally", "upload", level="INFO" if ok else "ERROR",
+                  ok=ok, points=len(items), ack=result["ack"],
+                  error=result.get("error"))
+        return result
+
+    def clear_rally(self) -> dict:
+        """Remove every rally point from the vehicle (count 0 transfer)."""
+        return self.upload_rally([])
+
+    def download_rally(self) -> list[dict]:
+        """Read the rally points back off the vehicle.
+
+        Read-back is the only way to know the FC actually holds what we
+        think it holds -- same reasoning as `download_fence`. Returns []
+        when the protocol is unsupported rather than raising, since callers
+        treat this as a check.
+        """
+        if not self.connection:
+            return []
+        ok_proto, _ = self.rally_transfer_supported()
+        if not ok_proto:
+            return []
+        conn = self.connection
+        rtype = getattr(mavutil.mavlink, "MAV_MISSION_TYPE_RALLY", 2)
+        out = []
+        with self._link_lock:
+            with self._send_lock:
+                conn.mav.mission_request_list_send(
+                    conn.target_system, conn.target_component, mission_type=rtype)
+            count_msg = self._recv_blocking(conn, "MISSION_COUNT", 5)
+            if not count_msg or getattr(count_msg, "mission_type", rtype) != rtype:
+                return []
+            for i in range(count_msg.count):
+                with self._send_lock:
+                    conn.mav.mission_request_int_send(
+                        conn.target_system, conn.target_component, i,
+                        mission_type=rtype)
+                item = self._recv_blocking(
+                    conn, ["MISSION_ITEM_INT", "MISSION_ITEM"], 5)
+                if item is None or getattr(item, "mission_type", rtype) != rtype:
+                    continue
+                if item.get_type() == "MISSION_ITEM_INT":
+                    lat, lon = item.x / 1e7, item.y / 1e7
+                else:
+                    lat, lon = item.x, item.y
+                out.append({"seq": item.seq, "lat": lat, "lon": lon,
+                            "alt": item.z, "break_alt": item.param1,
+                            "land_dir": item.param2})
+            with self._send_lock:
+                conn.mav.mission_ack_send(
+                    conn.target_system, conn.target_component,
+                    mavutil.mavlink.MAV_MISSION_ACCEPTED, mission_type=rtype)
+        return out
+
 
 def _json_sanitize(obj):
     """Replace non-finite floats (NaN/inf) with None, recursively.
