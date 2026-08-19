@@ -292,6 +292,31 @@ Newest first isn't required — kept chronological. This section is an append-on
 add a new dated entry here rather than editing old ones. Everything above the `---` is the
 "living" reference — keep that current and reorganize freely.
 
+#### Cross-lane gap: the live proximity monitor was never armed (2026-08-18)
+- **Lane A built the live keepout-proximity monitor end to end** — `keepout_watch.py`,
+  `POST/GET/DELETE /api/safety/keepouts`, guardian integration, telemetry plumbing, unit tests,
+  a SITL scenario. **Nothing ever called `POST /api/safety/keepouts`.** The monitor ran with zero
+  rings and could never warn. The backend half was Lane A's; the missing frontend half
+  (`SprayPanel.jsx`) is a Lane B file, so it fell exactly between the two sessions.
+- **Fixed here:** mission upload now arms the monitor with the zones the plan was built against
+  and the operator's ACTUAL `powerline_buffer` (not the default). This is required by design, not
+  an oversight of Lane A's — their endpoint docstring is explicit that mission upload deliberately
+  CLEARS the monitor, because the aircraft can fly a mission the GCS never planned and pretending
+  we know its keepouts would be worse than admitting we don't. The UI therefore has to re-arm it.
+- **Failure is stated, never implied away:** if arming fails the upload status says the monitor is
+  NOT armed and cannot warn in flight, rather than reporting a clean upload. Re-planning clears
+  the armed state, since it no longer matches what the monitor holds.
+- **Also fixed:** `NumField` used a `<span>`, so every number input in the spray panel had no
+  accessible name — failing the project's own WCAG commitment ("proper `<label>` on all form
+  inputs") and making the controls unreachable by screen reader. Now a real `<label>`.
+- 3 new frontend tests (16 total), mutation-checked. 379 backend tests green on the combined
+  Lane A + Lane B state.
+- **Process lesson — the seam between parallel lanes is where features die.** Both lanes were
+  individually green and individually "done". The integration between them was owned by nobody.
+  When lanes are split by file, someone has to explicitly check the seams: a backend endpoint with
+  no caller, a UI reading a field nothing sets, two defaults that must agree. Worth a deliberate
+  pass at the end of every parallel session.
+
 #### Coverage analysis + real-Sabetha planner validation (2026-08-18)
 - **Validated the whole planner against REAL Sabetha zone data first** (the actual operating area
   and demo site), applying the day's lesson that fixtures lie. Three 40-acre fields around town:

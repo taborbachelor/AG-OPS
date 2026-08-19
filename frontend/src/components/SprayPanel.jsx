@@ -24,13 +24,17 @@ function polyAcres(pts) {
 const fmt = (v, digits) => (Number.isFinite(v) ? v.toFixed(digits) : '—');
 
 function NumField({ label, value, unit, onChange }) {
+  // A real <label> wrapping the input, not a <span>: without it these number
+  // fields have no accessible name at all, which fails the project's own
+  // WCAG commitment ("proper <label> on all form inputs") and leaves the
+  // controls unreachable to a screen reader.
   return (
-    <div className="safety-field">
+    <label className="safety-field">
       <span className="safety-label">{label}</span>
-      <input type="number" value={value}
+      <input type="number" value={value} aria-label={label}
         onChange={(e) => onChange(Number(e.target.value))} style={{ width: 70 }} />
       <span className="safety-unit">{unit}</span>
-    </div>
+    </label>
   );
 }
 
@@ -73,6 +77,8 @@ function SprayPanel({
   const [zonesBlocked, setZonesBlocked] = useState(false);
   const [hazardOverflights, setHazardOverflights] = useState(0);
   const [hazardBlocked, setHazardBlocked] = useState(false);
+  // What the in-flight proximity monitor is armed with; null = not armed.
+  const [keepoutArmed, setKeepoutArmed] = useState(null);
   const [homeLegHazard, setHomeLegHazard] = useState(false);
 
   // Bumped on every job mutation (field added/removed/cleared). An in-flight
@@ -88,6 +94,7 @@ function SprayPanel({
     setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
     setZonesBlocked(false);
     setHazardOverflights(0); setHomeLegHazard(false); setHazardBlocked(false);
+    setKeepoutArmed(null);
   };
 
   // Exclusive input modes: draw / area / snap.
@@ -314,9 +321,43 @@ function SprayPanel({
         body: JSON.stringify({ items }),
       });
       const data = await res.json();
-      setUpStatus(res.ok
-        ? { ok: true, msg: `Mission uploaded — ${data.count != null ? data.count : items.length} items ✓` }
-        : { ok: false, msg: `Upload failed: ${data.detail || res.status}` });
+      if (!res.ok) {
+        setUpStatus({ ok: false, msg: `Upload failed: ${data.detail || res.status}` });
+        setBusy(false);
+        return;
+      }
+      const count = data.count != null ? data.count : items.length;
+
+      // ARM THE LIVE PROXIMITY MONITOR with the zones this plan was built
+      // against. Mission upload deliberately CLEARS the monitor backend-side
+      // (the aircraft can fly a mission the GCS never planned, and pretending
+      // we know its keepouts would be worse than admitting we don't), so the
+      // UI has to re-arm it explicitly with what it actually planned against.
+      // Without this the monitor runs with zero rings and can never warn.
+      let armed = null;
+      if (zones) {
+        try {
+          const kr = await fetch(`${API}/safety/keepouts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zones, hazard_buffer_m: bufPowerline }),
+          });
+          const kd = await kr.json();
+          armed = kr.ok ? kd : null;
+        } catch (e) {
+          armed = null;
+        }
+      }
+      setKeepoutArmed(armed);
+      setUpStatus(armed
+        ? { ok: true,
+            msg: `Mission uploaded — ${count} items ✓ · proximity monitor armed `
+                 + `(${armed.hazards} hazard, ${armed.keepouts} keepout rings)` }
+        // Never imply the monitor is watching when it is not.
+        : { ok: false,
+            msg: `Mission uploaded — ${count} items, but the live proximity `
+                 + 'monitor is NOT armed. It cannot warn you about keepouts '
+                 + 'in flight.' });
     } catch (e) {
       setUpStatus({ ok: false, msg: 'Upload error — is the backend running?' });
     }
