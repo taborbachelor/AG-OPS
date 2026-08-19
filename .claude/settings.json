@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/claim.py\" status 2>/dev/null | sed 's/^/  /' | { out=$(cat); printf '%s' \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"SessionStart\\\",\\\"additionalContext\\\":\\\"AgOps GCS repo. Parallel sessions are coordinated by a claim registry - read LANES.md, then claim a work area BEFORE editing: py tools/claim.py claim --session <your session_id> --area <AIR|PLANNER|UI|OPS|DOCS>. A PreToolUse hook blocks edits into another session's area. Current registry state follows.\\\"}}\"; } 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py \"${CLAUDE_PROJECT_DIR:-.}/tools/guard.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

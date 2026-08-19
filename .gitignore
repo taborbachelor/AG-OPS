@@ -29,3 +29,6 @@ sitl/terrain/
 sitl/_scenario/
 
 .claude/worktrees/
+
+# Parallel-session claim registry (runtime state, machine-local)
+.claim/
