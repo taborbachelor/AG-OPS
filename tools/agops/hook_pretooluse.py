@@ -45,6 +45,49 @@ def _load_guard():
     return mod
 
 
+def _commit_paths(command, cwd):
+    """What a `git commit` in this command is about to commit -- or None.
+
+    One working tree means one git index. "Stage explicit paths, never
+    git add -A" stops you sweeping another agent's UNSTAGED work; it does
+    nothing about their STAGED work. Two agents staged simultaneously on the
+    evening this was written, and either committing would have taken the
+    other's files under their own name and message, having broken no documented
+    rule.
+
+    `git commit -- path...` commits exactly those paths and ignores the rest of
+    the index, so when a pathspec is present those are the paths at risk.
+    Otherwise everything staged is.
+
+    Deliberately conservative: a commit message containing " -- " is misread as
+    a pathspec, which makes this check skip rather than fire. Every ambiguity
+    resolves toward allowing the commit -- a guard that blocks legitimate work
+    trains people to route around the mechanism.
+    """
+    import subprocess
+
+    if not command or "git" not in command or "commit" not in command:
+        return None
+    # Crude but sufficient: some form of `git ... commit`, not `git log commit`.
+    if not any(seg.strip().startswith("git ") and " commit" in seg
+               for seg in command.replace("\n", ";").split(";")):
+        return None
+
+    if " -- " in command:
+        tail = command.split(" -- ", 1)[1]
+        paths = [p.strip().strip("'\"") for p in tail.split() if not p.startswith("-")]
+        return [p.replace("\\", "/") for p in paths if p] or None
+
+    try:
+        out = subprocess.run(["git", "-C", cwd, "diff", "--cached", "--name-only"],
+                             capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    return [p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip()]
+
+
 def _targets(tool, ti):
     if tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
         p = ti.get("file_path") or ti.get("notebook_path")
@@ -90,6 +133,38 @@ def main():
     live = [a for a in core.list_agents(include_offline=False) if not a["stale"]]
     if len(live) < 2:
         return 0                       # solo: nothing to collide with
+
+    def owned_by_others(paths):
+        """Trim always_open, then ask the same ownership question as an edit."""
+        keep = list(paths)
+        for pattern in cfg.get("always_open", []):
+            keep = [p for p in keep if not core._match(p, pattern)]
+        if not keep:
+            return []
+        found = core.check_conflicts(keep, agent=me)
+        return [c for c in found["conflicts"] if c["level"] == "BLOCKING"]
+
+    if tool in ("Bash", "PowerShell"):
+        at_risk = _commit_paths(ti.get("command") or "", cwd)
+        if at_risk:
+            theirs = owned_by_others(at_risk)
+            if theirs and mode in ("advisory", "blocking"):
+                c = theirs[0]
+                sys.stderr.write(
+                    "BLOCKED by AgOps: this commit would include %s, which %s "
+                    "owns under %s.\n"
+                    "One working tree means ONE git index -- staging only your "
+                    "own paths does not stop a bare `git commit` taking whatever "
+                    "else is staged, under your name and your message.\n"
+                    "  commit only yours:  git commit -F msg.txt -- path/one "
+                    "path/two\n"
+                    "  (new files need `git add <path>` first -- a pathspec "
+                    "cannot name a file git has never seen)\n"
+                    "  then verify:        git show --stat HEAD\n"
+                    "If you have genuinely agreed to commit their work, say so "
+                    "to them first: py tools\\agops.py message %s \"...\"\n"
+                    % (c["path"], c["owner"], c["task_id"], c["owner"]))
+                return 2
 
     targets = _targets(tool, ti)
     if not targets:

@@ -1009,6 +1009,61 @@ class TestGracefulDegradation(Base):
                           "%s did not fail open (rc=%d)" % (hook, p.returncode))
 
 
+class TestSharedIndexGuard(Base):
+    """One working tree means one git index.
+
+    "Stage explicit paths, never git add -A" stops you sweeping another agent's
+    UNSTAGED work and does nothing about their STAGED work. Two agents had files
+    staged simultaneously on the evening this was written; either committing
+    would have taken the other's under their own name and message, having broken
+    no documented rule.
+    """
+
+    HOOK = os.path.join(TOOLS, "agops", "hook_pretooluse.py")
+
+    def setUp(self):
+        super().setUp()
+        core.register_agent(session_id="s-a", name="alpha")
+        core.register_agent(session_id="s-b", name="bravo")
+        core.create_task("bravo's work", files=["backend/app/routers/sim.py"])
+        core.claim_task("TASK-001", "bravo")
+
+    def _run(self, command, session="s-a"):
+        payload = json.dumps({
+            "session_id": session, "tool_name": "Bash", "cwd": REPO,
+            "tool_input": {"command": command},
+        })
+        return subprocess.run([sys.executable, self.HOOK], input=payload,
+                              capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, AGOPS_HOME=_TMP))
+
+    def test_committing_another_agents_path_is_refused(self):
+        r = self._run("git commit -F m.txt -- backend/app/routers/sim.py")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("bravo", r.stderr)
+        self.assertIn("ONE git index", r.stderr)
+
+    def test_committing_only_your_own_paths_is_allowed(self):
+        r = self._run("git commit -F m.txt -- tools/agops/statusline.py")
+        self.assertEqual(r.returncode, 0)
+
+    def test_an_ordinary_command_is_untouched(self):
+        for cmd in ("git log --oneline", "git status", "pytest -q", "echo commit"):
+            self.assertEqual(self._run(cmd).returncode, 0, cmd)
+
+    def test_always_open_paths_never_block_a_commit(self):
+        core.create_task("docs", files=["LANES.md"])
+        core.claim_task("TASK-002", "bravo")
+        r = self._run("git commit -F m.txt -- LANES.md")
+        self.assertEqual(r.returncode, 0, "the decisions log is shared on purpose")
+
+    def test_solo_work_is_never_guarded(self):
+        core.unregister_agent("bravo")
+        r = self._run("git commit -F m.txt -- backend/app/routers/sim.py")
+        self.assertEqual(r.returncode, 0,
+                         "with nobody else live there is nobody to collide with")
+
+
 class TestMcpServer(Base):
     """The MCP surface must expose the same core and refuse the same things."""
 
