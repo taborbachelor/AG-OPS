@@ -71,8 +71,15 @@ ownership, because an agent that claims under a guessed id gets locked out of it
 own files by its own claim.
 
 Names come from the NATO alphabet in order (`alpha`, `bravo`, `charlie`,
-`delta`, …). Existing names are never reassigned, and re-registering the same
-session re-attaches instead of forking a second agent.
+`delta`, …). Re-registering the same session re-attaches instead of forking a
+second agent, and names are never reassigned while a session is live. But a
+NEW session arriving while **nobody** is live marks the start of a fresh work
+session: agents holding no work are pruned first, so the day's sessions start
+over at `alpha` instead of marching through the alphabet (three launch batches
+once burned `kilo` through `sierra` in one morning). An offline agent that
+still owns a task is kept, name and all — same guard as `admin clear-agents` —
+and a recycled name never inherits its predecessor's unread mail. Off switch:
+`recycle_names_on_fresh_start: false` in `project.json`.
 
 Statuses: `STARTING IDLE WORKING BLOCKED REVIEWING WAITING OFFLINE ERROR`.
 
@@ -339,12 +346,16 @@ py tools\agops.py events --limit 40              # who did what, when
 ## 13. Starting a new agent
 
 Open Claude Code in this repository. That is the whole procedure — the
-SessionStart hook registers the session, assigns the next NATO name, and briefs
-it on the team, the occupied files, the available work and the commands.
+SessionStart hook registers the session, assigns a NATO name, and briefs
+it on the team, the occupied files, the available work and the commands. The
+first session of a fresh start (nobody live) gets `alpha` again — see §3 on
+name recycling.
 
 Optional, and worth it: `claude --session-id <uuid>` makes the identity
-deterministic across restarts, and `claude --worktree <name>` gives the agent its
-own working tree.
+deterministic across restarts — a MID-SESSION relaunch without it re-registers
+as a new agent and takes a new name, which recycling does not fix while others
+are still live. `claude --worktree <name>` gives the agent its own working
+tree.
 
 Then in the session: `/agops-join` (optionally with specialties).
 

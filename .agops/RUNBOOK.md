@@ -35,14 +35,17 @@ type anything, is
 No banner means the session is not on the team. Close it and relaunch from the
 repo.
 
-Open as many as you want. Each gets the next NATO name — alpha, bravo, charlie,
-delta… They appear on the board within a second.
+Open as many as you want. They appear on the board within a second, named in
+NATO order. **The first session of a fresh start — nobody live on the board —
+recycles the roster and gets `alpha` again**; sessions arriving while others
+are live take the next name. An offline agent that still owns a task keeps its
+name through the recycle (same guard as `admin clear-agents`), so a crashed
+session's work is never orphaned by a fresh morning.
 
-**Use `claude --session-id <uuid>` as your standard launch line, not an
-optional extra.** It makes an agent's identity survive a restart, so reopening
-that terminal gets the same name back rather than the next one — and stranding a
-task under a name nobody is using is the failure it prevents. Keep the four uuids
-somewhere you can paste them.
+**Still use `claude --session-id <uuid>` for a MID-SESSION relaunch.** Fresh
+starts name themselves now, but reopening a terminal while the rest of the team
+is live re-registers as a NEW agent unless you relaunch with the same uuid —
+and stranding a task under a name nobody is using is the failure that prevents.
 
 **Once running, each window tells you who it is.** The status line under the
 prompt shows the agent's name, its current task, any resource locks it holds, and

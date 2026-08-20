@@ -1195,5 +1195,75 @@ class TestMcpServer(Base):
         self.assertIn("no such task", body)
 
 
+class TestNameRecycling(Base):
+    """A fresh work session starts back at alpha instead of marching on
+    through the NATO alphabet -- unless someone is live or still holds work.
+    Built after three launch batches burned kilo through sierra in one
+    morning (2026-08-20)."""
+
+    def _register(self, sid):
+        return core.register_agent(session_id=sid, cwd=REPO)["agent"]["name"]
+
+    def test_fresh_start_restarts_names_at_alpha(self):
+        self.assertEqual(self._register("day1-a"), "alpha")
+        self.assertEqual(self._register("day1-b"), "bravo")
+        core.unregister_agent("alpha")
+        core.unregister_agent("bravo")
+        # Next work session: nobody live, nobody holds work -> recycled.
+        self.assertEqual(self._register("day2-a"), "alpha")
+        self.assertEqual(self._register("day2-b"), "bravo")
+
+    def test_mid_session_arrivals_still_take_the_next_name(self):
+        self._register("s-a")                          # alpha, stays live
+        self.assertEqual(self._register("s-b"), "bravo")
+        core.unregister_agent("bravo")
+        # alpha is live, so this is NOT a fresh start: no recycling.
+        self.assertEqual(self._register("s-c"), "charlie")
+
+    def test_an_agent_holding_work_survives_the_recycle(self):
+        self._register("s-a")
+        self._register("s-b")
+        t = core.create_task("keep me")["task_id"]
+        core.claim_task(t, "bravo")
+        core.unregister_agent("alpha")
+        core.unregister_agent("bravo")
+        # bravo owns an IN_PROGRESS task: kept, name and all. alpha frees.
+        self.assertEqual(self._register("day2"), "alpha")
+        names = {a["name"] for a in core.list_agents(include_offline=True)}
+        self.assertIn("bravo", names)
+        self.assertEqual(core.get_task(t)["owner"], "bravo")
+
+    def test_a_recycled_name_does_not_inherit_unread_mail(self):
+        self._register("s-a")
+        self._register("s-b")
+        core.send_message("bravo", "alpha", "for the OLD alpha")
+        core.unregister_agent("alpha")
+        core.unregister_agent("bravo")
+        self.assertEqual(self._register("day2"), "alpha")
+        self.assertEqual(core.inbox("alpha", unread_only=True,
+                                    mark_read=False), [])
+
+    def test_recycle_frees_a_stale_ghosts_resource(self):
+        # A session that died without its end hook: never marked OFFLINE, but
+        # its heartbeat is far past the stale window and it holds sitl-5760.
+        self._register("ghost")
+        core.take_resource("sitl-5760", "alpha")
+        conn = core.connect()
+        conn.execute("UPDATE agents SET last_heartbeat=? WHERE name='alpha'",
+                     (time.time() - 10 * 3600,))
+        conn.close()
+        self.assertEqual(self._register("day2"), "alpha")
+        conn = core.connect()
+        r = conn.execute(
+            "SELECT holder FROM resources WHERE name='sitl-5760'").fetchone()
+        conn.close()
+        self.assertIsNone(r["holder"])
+
+    def test_the_toggle_turns_it_off(self):
+        write_config(recycle_names_on_fresh_start=False)
+        core.unregister_agent(self._register("day1-a"))    # alpha, offline
+        self.assertEqual(self._register("day2-a"), "bravo")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -117,6 +117,13 @@ def default_config() -> dict:
         "auto_claim": False,
         "stale_after_s": DEFAULT_STALE_S,
         "offline_after_s": DEFAULT_OFFLINE_S,
+        # A NEW session registering while nobody is live marks the start of a
+        # fresh work session: offline agents holding no work are pruned first,
+        # so the day's sessions start over at alpha instead of marching through
+        # the NATO alphabet (three launch batches burned kilo through sierra in
+        # one morning). Agents that still hold work keep their names -- the
+        # same guard `admin clear-agents` has.
+        "recycle_names_on_fresh_start": True,
         "broadcast_min_interval_s": 300,
         "always_open": ["LANES.md", ".agops/*", ".agops/**", ".claim/*", "*.log"],
         "areas": {},
@@ -349,6 +356,53 @@ def _assign_name(conn, preferred=None) -> str:
     return "agent-%d" % i
 
 
+def _recycle_roster(conn, cfg) -> list:
+    """Free the NATO names when a fresh work session begins.
+
+    Runs only while registering a session the roster has never seen, inside
+    that registration's transaction. If anyone is live -- non-OFFLINE with a
+    heartbeat inside the stale window -- this is a mid-session arrival and
+    does nothing. When nobody is live, the arriving session is the start of a
+    fresh work session, and every agent holding no work is pruned so names
+    start over at alpha.
+
+    Agents still holding work are KEPT, name and all -- the same guard
+    `admin clear-agents` has: an owned task on a dead session is either live
+    work or a crash worth recovering, and forgetting who had it loses both.
+    A pruned agent's inbound mail is marked read under its old name first, so
+    the next session to wear the name does not inherit a ghost's unread
+    count, and any resource a pruned ghost still held is freed the same way
+    session-end frees them.
+    """
+    if not cfg.get("recycle_names_on_fresh_start", True):
+        return []
+    now = _now()
+    stale_after = cfg.get("stale_after_s", DEFAULT_STALE_S)
+    if conn.execute("SELECT 1 FROM agents WHERE status<>'OFFLINE' "
+                    "AND last_heartbeat>=? LIMIT 1",
+                    (now - stale_after,)).fetchone():
+        return []
+    keep = {r["name"] for r in conn.execute(
+        "SELECT name FROM agents WHERE current_task IS NOT NULL")}
+    keep |= {r["owner"] for r in conn.execute(
+        "SELECT DISTINCT owner FROM tasks WHERE owner IS NOT NULL AND "
+        "(status='IN_PROGRESS' OR needs_recovery=1)")}
+    gone = [r["name"] for r in conn.execute("SELECT name FROM agents")
+            if r["name"] not in keep]
+    for n in gone:
+        conn.execute(
+            "INSERT OR IGNORE INTO message_reads(message_id, agent, read_at) "
+            "SELECT id, ?, ? FROM messages WHERE recipient=? OR recipient='ALL'",
+            (n, now, n))
+        conn.execute("DELETE FROM resource_waits WHERE agent=?", (n,))
+        conn.execute("UPDATE resources SET holder=NULL WHERE holder=?", (n,))
+        conn.execute("DELETE FROM agents WHERE name=?", (n,))
+    if gone:
+        _event(conn, "system", "team.recycle", "",
+               {"freed": gone, "kept": sorted(keep)})
+    return gone
+
+
 def register_agent(session_id=None, name=None, specialties=None, role=None,
                    cwd=None, pid_=None, worktree=None, project=None) -> dict:
     """Register or re-attach a session. Idempotent per session_id.
@@ -383,6 +437,11 @@ def register_agent(session_id=None, name=None, specialties=None, role=None,
             return {"created": False,
                     "agent": _row(conn.execute("SELECT * FROM agents WHERE agent_id=?",
                                                (agent_id,)).fetchone())}
+        # BEGIN IMMEDIATE so recycle + name pick + insert are one atomic step:
+        # two first-of-the-day launches serialize here instead of both pruning
+        # an all-offline roster and both choosing "alpha".
+        conn.execute("BEGIN IMMEDIATE")
+        recycled = _recycle_roster(conn, cfg)
         chosen = _assign_name(conn, name or known.get(agent_id))
         conn.execute(
             "INSERT INTO agents(agent_id, name, project_id, session_id, cwd, "
@@ -394,7 +453,8 @@ def register_agent(session_id=None, name=None, specialties=None, role=None,
              "STARTING", now, now, pid_))
         _event(conn, chosen, "agent.register", chosen,
                {"session_id": session_id, "cwd": cwd})
-        return {"created": True,
+        conn.execute("COMMIT")
+        return {"created": True, "recycled": recycled,
                 "agent": _row(conn.execute("SELECT * FROM agents WHERE agent_id=?",
                                            (agent_id,)).fetchone())}
     finally:

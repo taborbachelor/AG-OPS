@@ -113,6 +113,12 @@
 > - **Agent identity fix** (`496b0bf`) — the CLI read `CLAUDE_SESSION_ID`; Claude Code sets
 >   `CLAUDE_CODE_SESSION_ID`, so every `/agops-join` minted a ghost agent. Six appeared in one evening.
 >   **Launch sessions with `claude --session-id <uuid>`** to keep names across restarts.
+> - **Names recycle at fresh starts (added 2026-08-20 pm, 115 tooling tests green)** — the first
+>   session to register while NOBODY is live prunes every agent holding no work, so a new work
+>   session starts at `alpha` again instead of marching down the NATO list (three launch batches
+>   burned kilo→sierra in one morning). Task holders survive the recycle, name and all; a recycled
+>   name never inherits old unread mail. Toggle: `recycle_names_on_fresh_start` in
+>   `.agops/project.json`. `--session-id` still matters for MID-session relaunches.
 >
 > #### Board state at handoff — clean slate
 > **TASK-001…014 all COMPLETE and PUSHED. Nothing in progress. No agent is registered live.**
