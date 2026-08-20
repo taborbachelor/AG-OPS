@@ -279,7 +279,11 @@ def render_monitor(st, commit_state=None) -> str:
         sha = (t["commit_hash"] or "")[:7]
         state = commit_state.get(t["commit_hash"], "")
         if not sha:
-            mark = "no commit recorded"
+            # An empty sha now only reaches the board with a stated reason
+            # (complete refuses otherwise), so show the reason rather than the
+            # blank -- a claim someone can disagree with beats a silent gap.
+            why = (t.get("verification_status") or "")
+            mark = why if why.startswith("no commit:") else "no commit recorded"
         elif state == "pushed":
             mark = "%s PUSHED" % sha
         elif state == "local":
@@ -555,6 +559,7 @@ def cmd_complete(a):
         tests = False
     r = core.complete_task(a.task_id, who, a.summary, verification=a.verification or "",
                            commit_hash=a.commit or "", tests_passed=tests,
+                           no_commit_reason=getattr(a, "no_commit_reason", "") or "",
                            project=a.project)
     msg = "COMPLETE %s" % a.task_id
     if r["unblocked"]:
@@ -921,6 +926,9 @@ def build_parser():
     s.add_argument("summary"); s.add_argument("--verification")
     s.add_argument("--commit"); s.add_argument("--tests-passed", action="store_true")
     s.add_argument("--tests-failed", action="store_true")
+    s.add_argument("--no-commit-reason",
+                   help="only when the work genuinely produced no commit; the "
+                        "board shows this in place of a sha")
     s.set_defaults(fn=cmd_complete)
 
     s = sub.add_parser("block"); s.add_argument("task_id"); s.add_argument("reason")

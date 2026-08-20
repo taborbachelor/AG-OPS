@@ -904,12 +904,21 @@ def unblock_task(tid, agent, project=None) -> dict:
 
 
 def complete_task(tid, agent, summary, verification="", commit_hash="",
-                  tests_passed=None, project=None) -> dict:
+                  tests_passed=None, no_commit_reason="", project=None) -> dict:
     """Mark COMPLETE and unblock whatever was waiting on it.
 
-    Completion demands a summary and refuses outright when the caller reports
-    failing tests. An agent that believes it is done is not evidence that it is;
-    the record has to carry what was verified so the next agent can trust it.
+    Completion demands a summary, a commit, and refuses outright when the caller
+    reports failing tests. An agent that believes it is done is not evidence that
+    it is; the record has to carry what was verified so the next agent can trust
+    it.
+
+    The commit requirement is the newest of the three. TASK-005 sat on the board
+    as COMPLETE with "no commit recorded" for most of a day -- the exe was
+    reportedly rebuilt and nothing could say whether the binary existed or what
+    was in it. COMPLETE has to mean something a later session can go and look at.
+    Work that genuinely produces no commit passes `no_commit_reason` and the
+    board shows that instead, which is a claim someone can disagree with rather
+    than a silent blank.
     """
     require_project(project)
     # Order matters: failing tests are the more urgent refusal, and hearing
@@ -941,11 +950,24 @@ def complete_task(tid, agent, summary, verification="", commit_hash="",
             raise AgopsError(
                 "%s is %s, not yours to complete. Claim it first "
                 "(py tools\\agops.py claim %s)." % (tid, t["status"], tid))
+        # Last of the refusals, deliberately: an agent completing a task it does
+        # not own needs to hear that, not a lecture about commit hashes.
+        if not (commit_hash or "").strip() and not (no_commit_reason or "").strip():
+            raise AgopsError(
+                "completion needs a commit: --commit <sha>. COMPLETE is a claim "
+                "the next session acts on, and one that points at nothing cannot "
+                "be checked -- TASK-005 sat COMPLETE with no commit for a day and "
+                "nobody could tell whether the exe existed or what was in it. If "
+                "this genuinely produced no commit, say why: "
+                "--no-commit-reason \"...\".")
         conn.execute(
             "UPDATE tasks SET status='COMPLETE', completed_by=?, completion_summary=?, "
             "verification_status=?, commit_hash=?, completed_at=?, updated_at=?, "
             "needs_recovery=0 WHERE task_id=?",
-            (name, summary, verification or ("tests passed" if tests_passed else ""),
+            (name, summary,
+             verification or ("tests passed" if tests_passed else "")
+             or ("no commit: " + no_commit_reason.strip()
+                 if no_commit_reason.strip() else ""),
              commit_hash, _now(), _now(), tid))
         if a:
             conn.execute("UPDATE agents SET current_task=NULL, status='IDLE', "

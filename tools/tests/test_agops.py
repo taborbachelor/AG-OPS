@@ -200,7 +200,7 @@ class TestAtomicClaiming(Base):
         core.claim_task("TASK-001", "bravo")
         # Pretending is not enough: ownership is checked on every mutation.
         with self.assertRaises(AgopsError):
-            core.complete_task("TASK-001", "bravo", "I did it, honestly")
+            core.complete_task("TASK-001", "bravo", "I did it, honestly", commit_hash="abc1234")
         with self.assertRaises(AgopsError):
             core.release_task("TASK-001", "bravo")
         self.assertEqual(core.get_task("TASK-001")["owner"], "alpha")
@@ -225,7 +225,7 @@ class TestDependencies(Base):
 
         core.claim_task("TASK-001", "alpha")
         res = core.complete_task("TASK-001", "alpha",
-                                 "foundation landed; 12 unit tests green", tests_passed=True)
+                                 "foundation landed; 12 unit tests green", tests_passed=True, commit_hash="abc1234")
         self.assertEqual(res["unblocked"], ["TASK-002"])
         self.assertEqual(core.get_task("TASK-002")["status"], "AVAILABLE")
 
@@ -243,7 +243,7 @@ class TestDependencies(Base):
         core.create_task("c", depends_on=["TASK-002"])
         core.claim_task("TASK-001", "alpha")
         core.complete_task("TASK-001", "alpha",
-                           "task a is done and its unit tests pass")
+                           "task a is done and its unit tests pass", commit_hash="abc1234")
         self.assertEqual(core.get_task("TASK-002")["status"], "AVAILABLE")
         self.assertEqual(core.get_task("TASK-003")["status"], "BLOCKED")
 
@@ -254,11 +254,11 @@ class TestDependencies(Base):
         core.create_task("c", depends_on=["TASK-001", "TASK-002"])
         core.claim_task("TASK-001", "alpha")
         core.complete_task("TASK-001", "alpha",
-                           "first prerequisite done and verified")
+                           "first prerequisite done and verified", commit_hash="abc1234")
         self.assertEqual(core.get_task("TASK-003")["status"], "BLOCKED")
         core.claim_task("TASK-002", "alpha")
         core.complete_task("TASK-002", "alpha",
-                           "second prerequisite done and verified")
+                           "second prerequisite done and verified", commit_hash="abc1234")
         self.assertEqual(core.get_task("TASK-003")["status"], "AVAILABLE")
 
 
@@ -547,7 +547,7 @@ class TestDiscoveryAndCompletion(Base):
         core.create_task("unclaimed work")
         with self.assertRaises(AgopsError) as ctx:
             core.complete_task("TASK-001", "alpha",
-                               "implemented the parser and verified it in SITL")
+                               "implemented the parser and verified it in SITL", commit_hash="abc1234")
         self.assertIn("Claim it first", str(ctx.exception))
         self.assertEqual(core.get_task("TASK-001")["status"], "AVAILABLE")
 
@@ -556,7 +556,7 @@ class TestDiscoveryAndCompletion(Base):
         core.claim_task("TASK-001", "alpha")
         for thin in ("done", "did the thing", "fixed it all up"):
             with self.assertRaises(AgopsError):
-                core.complete_task("TASK-001", "alpha", thin)
+                core.complete_task("TASK-001", "alpha", thin, commit_hash="abc1234")
 
     def test_completion_refuses_when_tests_fail(self):
         core.create_task("work")
@@ -564,9 +564,38 @@ class TestDiscoveryAndCompletion(Base):
         with self.assertRaises(AgopsError) as ctx:
             core.complete_task("TASK-001", "alpha",
                                "implemented the parser and its round-trip",
-                               tests_passed=False)
+                               tests_passed=False, commit_hash="abc1234")
         self.assertIn("failing", str(ctx.exception))
         self.assertEqual(core.get_task("TASK-001")["status"], "IN_PROGRESS")
+
+    def test_completion_without_a_commit_or_a_reason_is_refused(self):
+        """COMPLETE is a claim the next session acts on. One that points at
+        nothing cannot be checked -- TASK-005 sat COMPLETE with no commit for a
+        day and nobody could tell whether the exe existed or what was in it."""
+        core.create_task("work")
+        core.claim_task("TASK-001", "alpha")
+        with self.assertRaises(AgopsError) as ctx:
+            core.complete_task("TASK-001", "alpha",
+                               "rebuilt the exe and smoke-tested it")
+        self.assertIn("needs a commit", str(ctx.exception))
+        self.assertEqual(core.get_task("TASK-001")["status"], "IN_PROGRESS")
+
+    def test_a_stated_reason_is_accepted_in_place_of_a_commit(self):
+        core.create_task("work")
+        core.claim_task("TASK-001", "alpha")
+        core.complete_task("TASK-001", "alpha",
+                           "answered the question, nothing to build here",
+                           no_commit_reason="investigation only")
+        self.assertEqual(core.get_task("TASK-001")["status"], "COMPLETE")
+
+    def test_not_owning_it_outranks_the_missing_commit(self):
+        """An agent completing a task it does not own needs to hear that, not a
+        lecture about commit hashes."""
+        core.create_task("unclaimed work")
+        with self.assertRaises(AgopsError) as ctx:
+            core.complete_task("TASK-001", "alpha",
+                               "implemented the parser and verified it in SITL")
+        self.assertIn("Claim it first", str(ctx.exception))
 
     def test_completion_records_the_commit(self):
         core.create_task("work")
@@ -583,7 +612,8 @@ class TestDiscoveryAndCompletion(Base):
         core.create_task("work")
         core.claim_task("TASK-001", "alpha")
         core.complete_task("TASK-001", "alpha",
-                           "finished the work and verified it end to end")
+                           "finished the work and verified it end to end",
+                           commit_hash="1111111")
         me = [a for a in core.list_agents() if a["name"] == "alpha"][0]
         self.assertIsNone(me["current_task"])
         self.assertEqual(me["status"], "IDLE")
@@ -850,10 +880,18 @@ class TestMonitor(Base):
         # a tidy dashboard look broken.
         self._monitor().stdout.encode("ascii")
 
-    def test_completed_without_a_commit_says_so(self):
+    def test_completed_without_a_commit_shows_the_stated_reason(self):
+        """The board's job here is honesty, and a reason beats a blank.
+
+        This used to render "no commit recorded" against a silent gap. A gap is
+        not a claim anyone can disagree with, which is how TASK-005 sat COMPLETE
+        for a day with nobody able to say whether the exe existed.
+        """
         core.complete_task("TASK-001", "alpha",
-                           "did the work and verified it properly")
-        self.assertIn("no commit recorded", self._monitor().stdout)
+                           "did the work and verified it properly",
+                           no_commit_reason="documentation only, nothing to build")
+        out = self._monitor().stdout
+        self.assertIn("no commit: documentation only", out)
 
     def test_local_only_commit_is_called_out(self):
         # A real commit that is not an ancestor of origin/main: HEAD itself,
