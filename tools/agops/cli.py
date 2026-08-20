@@ -63,10 +63,17 @@ def current_agent(explicit=None):
         try:
             r = conn.execute("SELECT name FROM agents WHERE agent_id=? OR session_id=?",
                              (sid, sid)).fetchone()
-            if r:
-                return r["name"]
         finally:
             conn.close()
+        # A session id that matches nothing is POSITIVE evidence this session is
+        # not on the team -- so stop, rather than falling through to the guess
+        # below. Observed live: a planning session with three stale agents and
+        # one live one ran `whoami` and was told it was alpha. Every unqualified
+        # command it ran would have acted as alpha, including complete.
+        return r["name"] if r else None
+    # No session id at all means a human in a plain terminal. Naming the only
+    # live agent is a convenience there, and there is nobody it could be confused
+    # with.
     live = [a for a in core.list_agents(include_offline=False) if not a["stale"]]
     if len(live) == 1:
         return live[0]["name"]

@@ -509,6 +509,24 @@ class TestRestart(Base):
         self.assertNotIn("alpha", r.stdout)
         self.assertNotIn("bravo", r.stdout)
 
+    def test_an_unknown_session_is_not_adopted_by_the_last_live_agent(self):
+        """The single-live-agent fallback must not swallow a real session.
+
+        Observed live: a planning session, with three agents gone stale and one
+        still live, ran whoami and was told it was alpha. Every unqualified
+        command it ran would have acted as alpha -- including complete, which
+        would have closed alpha's task under alpha's name.
+        """
+        core.register_agent(session_id="s-a", name="alpha")
+        r = run_cli("whoami", env={"CLAUDE_CODE_SESSION_ID": "s-nobody"})
+        self.assertNotIn("alpha", r.stdout)
+
+    def test_a_plain_terminal_still_gets_the_convenience(self):
+        """No session id at all is a human at a shell -- nobody to confuse."""
+        core.register_agent(session_id="s-a", name="alpha")
+        r = run_cli("whoami", env={"CLAUDE_CODE_SESSION_ID": "", "AGOPS_AGENT": ""})
+        self.assertIn("alpha", r.stdout)
+
 
 # --- discovery / completion ----------------------------------------------------
 
