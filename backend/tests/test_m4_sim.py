@@ -3,12 +3,18 @@
 Pure-fake coverage of the new surface so `pytest` (no SITL) still proves the
 plumbing; the flight-truth of each fault lives in tests/sitl/ scenarios.
 """
+import inspect
+import os
+import socket
+import threading
+import time
 import unittest
 from unittest import mock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app import param_meta
+from app import config, param_meta
 from app.main import app
 from app.routers import sim
 from app.vehicle_manager import VehicleManager, vehicle_manager
@@ -81,6 +87,104 @@ class TestSimSpawnConfig(unittest.TestCase):
                              "stale scenario eeprom must be wiped")
             self.assertEqual(demo_eeprom.read_bytes(), b"demo state",
                              "demo eeprom next to the binary must never be touched")
+
+
+class TestSitlInstanceConfig(unittest.TestCase):
+    """SITL_INSTANCE is what lets two sessions run the scenario suite at once.
+
+    The suite is single-occupancy on one port; without this, parallel runs fail a
+    different set of scenarios each time, always at the connection level.
+    """
+
+    def _instance(self, raw):
+        env = {k: v for k, v in os.environ.items() if k != "SITL_INSTANCE"}
+        if raw is not None:
+            env["SITL_INSTANCE"] = raw
+        with mock.patch.dict(os.environ, env, clear=True):
+            return config._sitl_instance()
+
+    def test_unset_or_blank_is_instance_zero(self):
+        self.assertEqual(self._instance(None), 0)
+        self.assertEqual(self._instance(""), 0)
+        self.assertEqual(self._instance("   "), 0)
+
+    def test_valid_instance_is_read(self):
+        self.assertEqual(self._instance("3"), 3)
+        self.assertEqual(self._instance(" 2 "), 2)
+
+    def test_garbage_fails_loudly_rather_than_defaulting_to_zero(self):
+        """A typo must not silently mean instance 0 — that is the collision this
+        setting exists to prevent, and it would look like a working run."""
+        for bad in ("one", "1.5", "0x2", "--1"):
+            with self.assertRaises(ValueError, msg=f"{bad!r} was accepted"):
+                self._instance(bad)
+
+    def test_out_of_range_fails_loudly(self):
+        for bad in ("-1", str(config.SITL_MAX_INSTANCE + 1)):
+            with self.assertRaises(ValueError, msg=f"{bad!r} was accepted"):
+                self._instance(bad)
+
+    def test_port_derives_from_instance_and_is_reported(self):
+        self.assertEqual(sim.SITL_PORT,
+                         sim.SITL_BASE_PORT + 10 * config.SITL_INSTANCE)
+        self.assertEqual(sim.SITL_CONN, f"tcp:127.0.0.1:{sim.SITL_PORT}")
+
+    def test_default_instance_keeps_the_historical_port(self):
+        self.assertEqual(sim.SITL_BASE_PORT + 10 * 0, 5760)
+
+    def test_build_args_passes_the_instance_to_sitl(self):
+        """-I is what actually offsets the ports; without it every instance
+        would still bind 5760 while we merrily reported otherwise."""
+        args = sim._build_args(1.0)
+        i = args.index("-I")
+        self.assertEqual(args[i + 1], str(config.SITL_INSTANCE))
+
+    def test_scenario_scratch_dir_is_per_instance(self):
+        """Each SITL writes eeprom.bin into its cwd, so concurrent instances
+        sharing one scratch dir would hand each other their parameters."""
+        self.assertEqual(sim._scenario_dir_name(0), "_scenario")
+        self.assertNotEqual(sim._scenario_dir_name(1), sim._scenario_dir_name(0))
+        self.assertNotEqual(sim._scenario_dir_name(2), sim._scenario_dir_name(1))
+
+    def test_status_reports_where_sitl_listens(self):
+        """The scenario harness reads the port from here instead of keeping its
+        own copy — so status must always carry it, running or not."""
+        client = TestClient(app)
+        with mock.patch.object(sim, "_running", return_value=False):
+            body = client.get("/api/sim/status").json()
+        self.assertEqual(body["port"], sim.SITL_PORT)
+        self.assertEqual(body["connection_string"], sim.SITL_CONN)
+        self.assertEqual(body["instance"], config.SITL_INSTANCE)
+
+
+class TestWaitPortFree(unittest.TestCase):
+    """Teardown's proof that the port really is free. The old code slept a flat
+    second and never checked, which is how a scenario ended up connecting to a
+    SITL that had not finished dying."""
+
+    def test_returns_immediately_when_free(self):
+        with mock.patch.object(sim, "_port_listening", return_value=False) as p:
+            self.assertTrue(sim.wait_port_free(timeout=5.0))
+        self.assertEqual(p.call_count, 1, "should not sleep when already free")
+
+    def test_returns_false_when_never_frees(self):
+        with mock.patch.object(sim, "_port_listening", return_value=True):
+            self.assertFalse(sim.wait_port_free(timeout=0.3, interval=0.05))
+
+    def test_waits_for_a_late_release(self):
+        states = [True, True, False]
+        with mock.patch.object(sim, "_port_listening",
+                               side_effect=lambda _port=None: states.pop(0)):
+            self.assertTrue(sim.wait_port_free(timeout=5.0, interval=0.01))
+        self.assertEqual(states, [])
+
+    def test_never_connect_probes(self):
+        """A connect-and-close readiness probe kills this SITL build. The waiter
+        must go through the passive check and nothing else."""
+        with mock.patch.object(sim, "_port_listening", return_value=False), \
+             mock.patch("socket.socket") as sock:
+            sim.wait_port_free(timeout=1.0)
+        sock.assert_not_called()
 
 
 class TestStartEndpointCompat(unittest.TestCase):
@@ -294,6 +398,174 @@ class TestGuardianProofFaults(unittest.TestCase):
     def test_new_faults_appear_in_status(self):
         for name in ("gps_noise", "airspeed"):
             self.assertIn(name, sim._faults)
+
+
+class TestPortDetectionAgainstARealSocket(unittest.TestCase):
+    """The one test that proves the port guard actually works.
+
+    Everything else here mocks _port_listening, which proves the WAITING logic
+    but assumes away the thing it rests on: that the check really does see a
+    listening socket on this platform. If netstat parsing were wrong,
+    wait_port_free() would cheerfully report "free" forever and every scenario
+    would sail past the guard into the exact collision it exists to stop — and
+    the mocked tests would all still pass.
+
+    So: bind a real socket, watch the real check find it, release it, watch the
+    check clear. No SITL, no mocks in the detection path.
+
+    Deliberately on an OS-assigned ephemeral port, never SITL_PORT: binding 5760
+    here would itself block a SITL another session is legitimately running, and
+    a test that sabotages a teammate's run to prove a point about collisions
+    would be its own punchline.
+    """
+
+    def setUp(self):
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(1)
+        self.port = self.srv.getsockname()[1]
+        self.assertNotEqual(self.port, sim.SITL_PORT,
+                            "test must never bind the real SITL port")
+
+    def tearDown(self):
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+
+    def test_a_real_listening_socket_is_detected(self):
+        self.assertTrue(sim._port_listening(self.port),
+                        "a bound, listening socket was not seen — the port "
+                        "check is broken and the guard protects nothing")
+
+    def test_a_free_port_reads_as_free(self):
+        self.srv.close()
+        self.assertTrue(sim.wait_port_free(timeout=20.0, port=self.port))
+
+    def test_wait_does_not_return_while_the_port_is_held(self):
+        """The real assertion: it WAITS. Returning False early would be just as
+        wrong as returning True — the caller would give up on a port that was
+        about to free."""
+        timeout = 1.0
+        started = time.monotonic()
+        result = sim.wait_port_free(timeout=timeout, interval=0.05,
+                                    port=self.port)
+        elapsed = time.monotonic() - started
+        self.assertFalse(result, "reported a held port as free")
+        self.assertGreaterEqual(
+            elapsed, timeout,
+            f"gave up after {elapsed:.2f}s on a {timeout:.1f}s timeout — it "
+            f"did not actually wait")
+
+    def test_wait_returns_once_the_port_is_released(self):
+        """Held, then released mid-wait: the whole point of the function, since
+        SITL frees its port asynchronously after the GCS disconnects."""
+        released_at = []
+
+        def release_soon():
+            time.sleep(0.6)
+            released_at.append(time.monotonic())
+            self.srv.close()
+
+        t = threading.Thread(target=release_soon)
+        started = time.monotonic()
+        t.start()
+        try:
+            result = sim.wait_port_free(timeout=25.0, interval=0.1,
+                                        port=self.port)
+        finally:
+            t.join()
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(result, "did not notice the port being released")
+        self.assertTrue(released_at, "release thread never ran")
+        self.assertGreaterEqual(
+            elapsed, 0.5,
+            "returned before the socket was released — it cannot have checked")
+
+    def test_conftest_hard_fails_while_the_port_is_listening(self):
+        """The setup guard, end to end against a real socket: real bind -> real
+        netstat -> real port_is_free -> real pytest.fail. SITL_PORT is pointed at
+        the test's own socket so the whole default path runs untouched.
+
+        This is the behaviour change that matters. Before it, a scenario finding
+        the port busy connected anyway and died later with a bare WinError 10061
+        that read like a regression in the code under test.
+        """
+        from tests.sitl import conftest as sitl_conftest
+
+        # Short timeout only so the test does not sit out the real 20s budget;
+        # everything in the detection path stays real.
+        with mock.patch.object(sim, "SITL_PORT", self.port), \
+             mock.patch.object(sitl_conftest, "PORT_FREE_TIMEOUT", 1.0):
+            with self.assertRaises(pytest.fail.Exception) as ctx:
+                sitl_conftest._require_free_port()
+
+        msg = str(ctx.exception)
+        self.assertIn(str(self.port), msg)
+        self.assertIn("SITL_INSTANCE", msg)
+
+    def test_conftest_guard_passes_once_the_port_is_free(self):
+        """The other half — the guard must not block a legitimate run."""
+        from tests.sitl import conftest as sitl_conftest
+
+        self.srv.close()
+        with mock.patch.object(sim, "SITL_PORT", self.port):
+            sitl_conftest._require_free_port()   # must not raise
+
+
+class TestHarnessPortGuard(unittest.TestCase):
+    """The scenario harness's port guard, unit-tested without SITL.
+
+    It gates every scenario, so a bug here (refusing a free port, or accepting a
+    busy one) would either break all 15 or restore the original silent-collision
+    bug. Both are worth pinning cheaply.
+    """
+
+    def setUp(self):
+        from tests.sitl import harness
+        self.h = harness
+
+    def test_free_port_is_accepted(self):
+        with mock.patch.object(sim, "_port_listening", return_value=False):
+            self.assertTrue(self.h.port_is_free(timeout=1.0))
+
+    def test_occupied_port_is_refused(self):
+        with mock.patch.object(sim, "_port_listening", return_value=True):
+            self.assertFalse(self.h.port_is_free(timeout=0.2))
+
+    def test_harness_keeps_no_second_copy_of_the_port(self):
+        """The original bug: harness.py hardcoded tcp:127.0.0.1:5760 while
+        sim.py separately hardcoded 5760, so parameterising one silently left
+        the other behind. There must be exactly one source."""
+        src = inspect.getsource(self.h)
+        self.assertNotIn("5760", src,
+                         "harness.py must not hardcode a port — ask the backend")
+
+    def test_contention_message_names_the_cause_and_the_fix(self):
+        """This string is the entire value of the guard: the failure it replaces
+        was a bare connection error that read like a code regression."""
+        msg = self.h.port_contention_message()
+        self.assertIn(str(sim.SITL_PORT), msg)
+        self.assertIn("SITL_INSTANCE", msg)
+        self.assertIn("parallel", msg.lower())
+
+    def test_conn_comes_from_the_backend_not_a_constant(self):
+        client = TestClient(app)
+        self.assertEqual(self.h.sitl_conn(client), sim.SITL_CONN)
+
+    def test_conn_fails_loudly_if_the_backend_stops_reporting_it(self):
+        """A silently-missing connection_string must not degrade into some
+        default port — that is the drift this whole change removes."""
+
+        class _NoConnClient:
+            def get(self, _url):
+                return mock.Mock(status_code=200, text="{}",
+                                 json=lambda: {"available": True,
+                                               "running": False})
+
+        with self.assertRaises(AssertionError):
+            self.h.sitl_conn(_NoConnClient())
 
 
 class TestSimParamRanges(unittest.TestCase):

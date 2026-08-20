@@ -50,3 +50,38 @@ TELEM_RATE_HZ = _int_env("TELEM_RATE_HZ", 0)
 # ArduPilot 4.5+ renamed SYSID_MYGCS -> MAV_GCS_SYSID. connect() aligns whichever
 # one the vehicle actually has (tried in this order), so we work across versions.
 GCS_SYSID_PARAM_CANDIDATES = ("MAV_GCS_SYSID", "SYSID_MYGCS")
+
+# --- Built-in SITL ---
+# Which SITL instance this process spawns and talks to. ArduPilot's -I N offsets
+# EVERY port the simulator binds by 10*N — SERIAL0's TCP listener, RC-in, and the
+# physics sockets — so two GCS+SITL pairs can share a machine without colliding on
+# some port nobody thought to check. 0 keeps the historical 5760.
+#
+# This exists because the scenario suite is single-occupancy on 5760: two sessions
+# running it at once fail a DIFFERENT set of scenarios each time, always at the
+# connection level, never on an assertion. Give each run its own instance.
+SITL_MAX_INSTANCE = 9
+
+
+def _sitl_instance() -> int:
+    """Read SITL_INSTANCE, loudly.
+
+    Deliberately NOT _int_env: that falls back to the default on a bad value, and
+    a typo'd instance silently meaning 0 would recreate the exact port collision
+    this setting exists to prevent. A misconfigured run must not look like a
+    working one.
+    """
+    raw = os.environ.get("SITL_INSTANCE")
+    if raw is None or not raw.strip():
+        return 0
+    try:
+        n = int(raw)
+    except ValueError:
+        raise ValueError(f"SITL_INSTANCE must be an integer 0..{SITL_MAX_INSTANCE}, "
+                         f"got {raw!r}") from None
+    if not 0 <= n <= SITL_MAX_INSTANCE:
+        raise ValueError(f"SITL_INSTANCE must be 0..{SITL_MAX_INSTANCE}, got {n}")
+    return n
+
+
+SITL_INSTANCE = _sitl_instance()

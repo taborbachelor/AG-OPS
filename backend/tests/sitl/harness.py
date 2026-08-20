@@ -14,13 +14,23 @@ Timing rules learned the hard way (see CLAUDE-CALEB.md dev-loop notes):
     heartbeat every N SIM seconds — so any scenario that enables the GCS
     failsafe (FS_GCS_ENABL) must run at speedup 1, or the vehicle would RTL
     spuriously mid-test. Scenarios that run fast keep FS_GCS_ENABL=0.
+  - The SITL port is NOT hardcoded here. The backend spawns SITL, so the backend
+    picks the port (app.config.SITL_INSTANCE) and we ask it — see sitl_conn().
+    Set SITL_INSTANCE=<n> to run a second suite on the same machine without the
+    two colliding; conftest.py enforces that the port is genuinely ours.
 """
 import math
 import time
 
-SITL_CONN = "tcp:127.0.0.1:5760"
+from app.config import SITL_MAX_INSTANCE
+from app.routers import sim
+
 # Sabetha, KS — must match sim.SITL_HOME.
 HOME_LAT, HOME_LON = 39.9042, -95.7997
+
+# Generous: a SITL told to die frees the port in well under a second, so anything
+# approaching this bound means something else owns it.
+PORT_FREE_TIMEOUT = 20.0
 
 # Telemetry keys worth showing when a wait times out (full snapshots are noisy).
 _DEBUG_KEYS = ("armed", "mode", "altitude", "groundspeed", "gps_fix",
@@ -65,9 +75,48 @@ def stop_sim(client):
     client.post("/api/sim/stop")
 
 
+def port_contention_message() -> str:
+    """Why a scenario refused to start, in the operator's terms.
+
+    Worth its own function because the whole point of the setup guard is that
+    the message names contention explicitly — the failure it replaces was a bare
+    WinError 10061 mid-scenario, which reads like a regression in the code under
+    test and cost real time being chased as one.
+    """
+    return (
+        f"TCP {sim.SITL_PORT} was still LISTENING {PORT_FREE_TIMEOUT:.0f}s into "
+        f"setup, so this scenario never ran.\n"
+        f"Something else owns SITL instance {sim.SITL_INSTANCE}: a hand-started "
+        f"run_sitl.bat, a SITL leaked by an earlier scenario, or a parallel test "
+        f"session.\n"
+        f"This is a hard stop rather than a silent reuse — scenarios need their "
+        f"own SITL (fresh eeprom, scenario speedup), and adopting a stranger's "
+        f"would quietly test the wrong vehicle.\n"
+        f"Fix: close the other SITL, or give this run its own port with "
+        f"SITL_INSTANCE=<n> (0-{SITL_MAX_INSTANCE}).")
+
+
+def port_is_free(timeout: float = PORT_FREE_TIMEOUT,
+                 port: int | None = None) -> bool:
+    """True once this instance's SITL port is free. See sim.wait_port_free."""
+    return sim.wait_port_free(timeout, port=port)
+
+
+def sitl_conn(client) -> str:
+    """Where this process's SITL listens, straight from the backend that spawns
+    it. Asked fresh rather than cached in a module constant: the port is the
+    backend's to choose, and a second copy here is precisely how the two end up
+    disagreeing about which simulator a scenario is talking to."""
+    r = client.get("/api/sim/status")
+    assert r.status_code == 200, f"sim status failed: {r.status_code} {r.text}"
+    conn = r.json().get("connection_string")
+    assert conn, f"sim status reported no connection_string: {r.text}"
+    return conn
+
+
 def connect(client) -> dict:
     r = client.post("/api/connection/connect",
-                    json={"connection_string": SITL_CONN, "baud": 115200})
+                    json={"connection_string": sitl_conn(client), "baud": 115200})
     assert r.status_code == 200, f"connect failed: {r.status_code} {r.text}"
     return r.json()
 

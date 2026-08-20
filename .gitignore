@@ -27,6 +27,7 @@ sitl/mav.parm
 sitl/*.tlog
 sitl/terrain/
 sitl/_scenario/
+sitl/_scenario_i*/
 
 .claude/worktrees/
 

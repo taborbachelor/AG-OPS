@@ -28,6 +28,10 @@ M4 additions for the scenario harness:
 SITL location search order:
   - packaged exe:  <dir of the exe>/sitl/ArduPlane.exe
   - dev checkout:  rc-plane-app/sitl/ArduPlane.exe
+
+Ports: SITL_INSTANCE (app.config) selects which instance this process owns;
+SITL_PORT is derived from it and reported by /status, so nothing else has to
+hardcode 5760. Default 0 is exactly the historical behaviour.
 """
 import subprocess
 import sys
@@ -39,17 +43,37 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+from app.config import SITL_INSTANCE
 from app.eventlog import log_event
 from app.vehicle_manager import vehicle_manager
 
 router = APIRouter()
 
-SITL_PORT = 5760
+# THIS MODULE OWNS THE PORT. It is the thing that spawns SITL, so it is the only
+# place allowed to decide where SITL listens; everyone else (the scenario
+# harness included) asks via /api/sim/status. A second hardcoded copy of the
+# port elsewhere is how the two silently drift apart.
+SITL_BASE_PORT = 5760
+# -I N adds 10*N to every port SITL binds (see app.config.SITL_INSTANCE).
+SITL_PORT = SITL_BASE_PORT + 10 * SITL_INSTANCE
+SITL_CONN = f"tcp:127.0.0.1:{SITL_PORT}"
 # Same home as run_sitl.bat: Sabetha, KS (lat, lon, alt_m, heading)
 SITL_HOME = "39.9042,-95.7997,408,0"
 # Subdir (next to the binary) used for fresh_eeprom runs, so scenario runs
-# never mutate the demo eeprom.bin that lives beside ArduPlane.exe.
-SCENARIO_DIR_NAME = "_scenario"
+# never mutate the demo eeprom.bin that lives beside ArduPlane.exe. Per-instance:
+# concurrent instances each write their own eeprom.bin in cwd, so sharing one
+# scratch dir would hand each the other's parameters.
+SCENARIO_DIR_BASE = "_scenario"
+
+
+def _scenario_dir_name(instance: int) -> str:
+    # Instance 0 keeps the bare "_scenario" name it has always had, so existing
+    # checkouts and .gitignore entries are undisturbed.
+    return (SCENARIO_DIR_BASE if instance == 0
+            else f"{SCENARIO_DIR_BASE}_i{instance}")
+
+
+SCENARIO_DIR_NAME = _scenario_dir_name(SITL_INSTANCE)
 
 _proc: subprocess.Popen | None = None
 # Options of the currently running (router-spawned) SITL, for /status.
@@ -126,7 +150,10 @@ def _sitl_exe() -> Path | None:
 
 
 def _build_args(speedup: float) -> list[str]:
-    return ["-M", "plane", "-O", SITL_HOME, "--speedup", str(speedup)]
+    # -I is always passed: -I 0 is a no-op offset, so one code path covers both
+    # the default and a parallel instance.
+    return ["-M", "plane", "-O", SITL_HOME, "--speedup", str(speedup),
+            "-I", str(SITL_INSTANCE)]
 
 
 def _resolve_cwd(exe: Path, fresh_eeprom: bool) -> Path:
@@ -149,20 +176,25 @@ def _resolve_cwd(exe: Path, fresh_eeprom: bool) -> Path:
     return scratch
 
 
-def _port_listening() -> bool:
+def _port_listening(port: int | None = None) -> bool:
     """Passively check whether something is LISTENING on the SITL port.
 
     Must NOT probe by connecting: this SITL build exits when a client
     disconnects, so a connect-and-close readiness probe kills the very
     simulator it's checking on (found the hard way).
+
+    `port` defaults to this instance's SITL_PORT and exists so the check can be
+    proven against a real listening socket in a test without binding 5760 —
+    which would block a SITL that another session is legitimately running.
     """
+    port = SITL_PORT if port is None else port
     if sys.platform == "win32":
         flags = subprocess.CREATE_NO_WINDOW
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True, text=True, timeout=10, creationflags=flags,
         )
-        suffix = f":{SITL_PORT}"
+        suffix = f":{port}"
         for line in out.stdout.splitlines():
             parts = line.split()
             if (len(parts) >= 4 and parts[0] == "TCP"
@@ -170,7 +202,29 @@ def _port_listening() -> bool:
                 return True
         return False
     out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True, timeout=10)
-    return f":{SITL_PORT}" in out.stdout
+    return f":{port}" in out.stdout
+
+
+def wait_port_free(timeout: float = 20.0, interval: float = 0.25,
+                   port: int | None = None) -> bool:
+    """Block until nothing is LISTENING on this instance's SITL port.
+
+    Returns True once free, False if still occupied at the deadline — the caller
+    decides how loud to be about it. Exists because "the process is gone" and
+    "the port is free" are not the same instant: this SITL exits asynchronously
+    after its TCP client disconnects, and a scenario that starts in that window
+    connects to a dying simulator and fails at the connection level with no hint
+    that timing, not the code under test, was the problem.
+
+    Passive check only, for the reason in _port_listening.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if not _port_listening(port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
 
 
 def _running() -> bool:
@@ -229,7 +283,8 @@ def _start_blocking(req: SimStartRequest) -> dict:
         stderr=subprocess.DEVNULL,
         creationflags=flags,
     )
-    _run_info = {"speedup": req.speedup, "fresh_eeprom": req.fresh_eeprom}
+    _run_info = {"speedup": req.speedup, "fresh_eeprom": req.fresh_eeprom,
+                 "instance": SITL_INSTANCE, "port": SITL_PORT}
     _reset_faults()
     log_event("sim", "sitl_started", speedup=req.speedup,
               fresh_eeprom=req.fresh_eeprom)
@@ -243,13 +298,20 @@ def _start_blocking(req: SimStartRequest) -> dict:
         if _port_listening():
             return {"status": "started", **_run_info}
         time.sleep(0.5)
-    raise HTTPException(status_code=500, detail="SITL did not open TCP 5760 within 20s")
+    raise HTTPException(status_code=500,
+                        detail=f"SITL did not open TCP {SITL_PORT} within 20s")
 
 
 @router.get("/status")
 def sim_status():
+    # port/connection_string are reported whether or not SITL is running: they
+    # describe where THIS process's SITL lives, which is what a caller needs to
+    # know before it starts one. The scenario harness reads connection_string
+    # instead of keeping its own copy of the port.
     return {"available": _sitl_exe() is not None, "running": _running(),
-            "run": _run_info, "faults": dict(_faults)}
+            "run": _run_info, "faults": dict(_faults),
+            "instance": SITL_INSTANCE, "port": SITL_PORT,
+            "connection_string": SITL_CONN}
 
 
 @router.post("/start")
