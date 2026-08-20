@@ -27,6 +27,23 @@ from agops.core import AgopsError  # noqa: E402
 
 # --- identity ----------------------------------------------------------------
 
+def session_id():
+    """This Claude Code session's id, or None outside one.
+
+    Claude Code exports it as CLAUDE_CODE_SESSION_ID. It was read here as
+    CLAUDE_SESSION_ID, which is never set -- so every in-session `register`
+    minted a fresh anonymous agent under the next NATO name instead of
+    re-attaching, and `whoami` could not identify its own session. Six ghost
+    agents in one evening, and worse: with the lookup dead, `current_agent`
+    falls through to "the only live agent", which binds a command to somebody
+    else's name the moment one session is left standing. The older name is kept
+    as a fallback so an environment that does set it still works.
+    """
+    return (os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or None)
+
+
 def current_agent(explicit=None):
     """Resolve who is running this command.
 
@@ -40,7 +57,7 @@ def current_agent(explicit=None):
     env = os.environ.get("AGOPS_AGENT")
     if env:
         return env
-    sid = os.environ.get("CLAUDE_SESSION_ID")
+    sid = session_id()
     if sid:
         conn = core.connect()
         try:
@@ -411,7 +428,7 @@ def out(args, obj, text=None):
 # --- commands ----------------------------------------------------------------
 
 def cmd_register(a):
-    r = core.register_agent(session_id=a.session or os.environ.get("CLAUDE_SESSION_ID"),
+    r = core.register_agent(session_id=a.session or session_id(),
                             name=a.name, specialties=a.specialty or None,
                             role=a.role, cwd=os.getcwd(), pid_=os.getpid(),
                             project=a.project)

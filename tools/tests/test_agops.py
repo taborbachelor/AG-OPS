@@ -478,6 +478,37 @@ class TestRestart(Base):
         core.register_agent(session_id="s-b")
         self.assertEqual(len(core.list_agents()), 2)
 
+    def test_register_from_inside_a_session_re_attaches(self):
+        """The CLI must see the same session the SessionStart hook saw.
+
+        It read CLAUDE_SESSION_ID, which Claude Code does not set -- so every
+        in-session `register` (what /agops-join runs) minted a fresh anonymous
+        agent under the next NATO name. Six ghosts appeared in one evening
+        before anyone noticed the board was lying about who was live.
+        """
+        core.register_agent(session_id="s-a", name="alpha")
+        r = run_cli("register", env={"CLAUDE_CODE_SESSION_ID": "s-a"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("re-attached", r.stdout)
+        self.assertEqual(len(core.list_agents()), 1,
+                         "an in-session register forked a second agent")
+
+    def test_whoami_resolves_the_session_not_the_only_live_agent(self):
+        """Two agents live, so the single-live-agent fallback cannot mask it."""
+        core.register_agent(session_id="s-a", name="alpha")
+        core.register_agent(session_id="s-b", name="bravo")
+        r = run_cli("whoami", env={"CLAUDE_CODE_SESSION_ID": "s-b"})
+        self.assertIn("bravo", r.stdout)
+        self.assertNotIn("alpha", r.stdout)
+
+    def test_an_unknown_session_is_never_guessed_into_a_name(self):
+        """Binding a command to somebody else's name is the whole hazard."""
+        core.register_agent(session_id="s-a", name="alpha")
+        core.register_agent(session_id="s-b", name="bravo")
+        r = run_cli("whoami", env={"CLAUDE_CODE_SESSION_ID": "s-nobody"})
+        self.assertNotIn("alpha", r.stdout)
+        self.assertNotIn("bravo", r.stdout)
+
 
 # --- discovery / completion ----------------------------------------------------
 
