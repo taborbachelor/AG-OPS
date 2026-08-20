@@ -351,12 +351,22 @@ export default function MapView3D({
       }
     }
 
-    // Planned flight legs at altitude ([lat, lon, alt?] point lists).
+    // Planned flight legs at altitude ([lat, lon, alt] point lists).
+    //
+    // The altitude is READ, never guessed. coverage_multi.py's _leg() states
+    // an explicit alt on every transit point (spray altitude), so there is
+    // nothing left to infer. This used to be `al ?? 60`, which drew transits
+    // 40 m above the 20 m spray passes — a climb between fields that the
+    // aircraft does not fly. If a point somehow arrives without an alt, cart()
+    // puts the leg on the ground, where a missing number LOOKS missing instead
+    // of looking like a plan. The twin readers of this same stated value are
+    // coverage_multi.py (_leg, the producer) and SprayPanel.jsx's upload
+    // backfill; App.jsx only passes the triples through.
     for (const leg of sprayLegs || []) {
       const style = LEG_STYLE[leg.kind] || LEG_STYLE.hop;
       add({
         polyline: {
-          positions: leg.pts.map(([la, lo, al]) => cart(la, lo, al ?? 60)),
+          positions: leg.pts.map(([la, lo, al]) => cart(la, lo, al)),
           width: style.width, material: style.color,
         },
       });

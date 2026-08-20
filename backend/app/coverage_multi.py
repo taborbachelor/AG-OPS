@@ -9,7 +9,8 @@ Ordering: greedy nearest-endpoint tour starting from `home` (or the first
 field). Each field's serpentine can be flown from either end, so the tour may
 REVERSE a field's waypoints when entering from the far end shortens transit.
 
-Transit legs fly at spray altitude between pattern endpoints. They are NOT
+Transit legs fly at spray altitude between pattern endpoints, and every transit
+point STATES that altitude so no consumer has to guess it. They are NOT
 rerouted around ordinary keepouts — overflying a pond with the sprayer off
 costs nothing — but they ARE rerouted around `hazards` (powerlines), because
 crossing one of those is a crash rather than a wasted pass. Before this,
@@ -161,10 +162,21 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
 
         Returns the leg dict; its "pts" carry any detour vertices, so the UI
         draws — and the mission flies — the path actually planned.
+
+        Every point STATES its altitude: the spray altitude, which is what the
+        aircraft has always flown here. It was previously left unset, so each
+        consumer guessed — MapView3D.jsx guessed 60 m and drew a climb between
+        fields that never happens, while SprayPanel.jsx's upload backfill
+        guessed the panel's spray altitude and was right by accident. Stating
+        it gives the number one home; both of those consumers now read it.
+
+        This does NOT decide whether a transit SHOULD have its own altitude
+        (seam S7) — that is Tabor + AIR's call. Do not invent a different
+        number here to answer it.
         """
         nonlocal transit_overflights, transit_reroutes
-        pts = [{"lat": a["lat"], "lon": a["lon"]},
-               {"lat": b["lat"], "lon": b["lon"]}]
+        pts = [{"lat": a["lat"], "lon": a["lon"], "alt": alt_m},
+               {"lat": b["lat"], "lon": b["lon"], "alt": alt_m}]
         kind = "direct"
         if transit_hulls:
             lat0, lon0, m_per_deg, cos_lat = job_proj
@@ -185,7 +197,7 @@ def plan_multi(fields, swath_m, alt_m, keepouts=None, keepout_buffer_m=0.0,
                 mid = []
                 for (x, y) in detour:
                     dlat, dlon = _unproject(x, y, job_proj)
-                    mid.append({"lat": dlat, "lon": dlon})
+                    mid.append({"lat": dlat, "lon": dlon, "alt": alt_m})
                 pts = ([pts[0]] + mid + [pts[-1]])
         length = sum(_dist_m(pts[i - 1], pts[i]) for i in range(1, len(pts)))
         return {"from": origin, "pts": pts, "length_m": round(length, 1),
