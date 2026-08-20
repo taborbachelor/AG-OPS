@@ -10,17 +10,35 @@
 #   .\scenarios.ps1 airspeed-stall  # guardian stall-margin monitor, live
 #   .\scenarios.ps1 bank-angle      # guardian bank-angle monitor, live
 #   .\scenarios.ps1 keepout-prox    # live keepout/hazard proximity
+#   .\scenarios.ps1 linkless        # fence + rally enforced with the link cut
 #   .\scenarios.ps1 all             # full scenario suite (~10-20 min)
 # Each scenario spawns the bundled SITL itself — close any hand-started SITL first.
+#
+# -Instance <n> runs against SITL instance n (ports offset by 10*n) so a second
+# session can run the suite concurrently instead of silently fighting over 5760:
+#   .\scenarios.ps1 all -Instance 1
+# Without it the suite uses instance 0 / port 5760, exactly as it always has.
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("field-test", "link-loss", "gps-failure", "battery-fault",
                  "rtl-recovery", "link-watchdog", "guardian", "preflight",
                  "ekf-variance", "airspeed-stall", "bank-angle",
-                 "keepout-prox",
+                 "keepout-prox", "linkless",
                  "bench", "soak", "all")]
-    [string]$Scenario
+    [string]$Scenario,
+
+    [ValidateRange(0, 9)]
+    [int]$Instance
 )
+
+# Only override the environment when actually asked, so an instance exported by
+# the surrounding shell keeps working.
+if ($PSBoundParameters.ContainsKey('Instance')) {
+    $env:SITL_INSTANCE = $Instance
+}
+if ($env:SITL_INSTANCE) {
+    Write-Host "SITL instance $($env:SITL_INSTANCE) (TCP $(5760 + 10 * [int]$env:SITL_INSTANCE))" -ForegroundColor Cyan
+}
 
 $map = @{
     "field-test"    = "tests\sitl\test_scenario_field_test.py"
@@ -34,6 +52,7 @@ $map = @{
     "airspeed-stall" = "tests\sitl\test_scenario_airspeed_stall.py"
     "bank-angle"     = "tests\sitl\test_scenario_bank_angle.py"
     "keepout-prox"   = "tests\sitl\test_scenario_keepout_proximity.py"
+    "linkless"       = "tests\sitl\test_scenario_linkless.py"
     "preflight"     = "tests\sitl\test_scenario_preflight.py"
     "bench"         = "tests\sitl\test_scenario_bench.py"
     "soak"          = "tests\sitl\test_scenario_soak.py"
