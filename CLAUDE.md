@@ -39,11 +39,29 @@ These are not advisory. Each one exists because breaking it cost real time.
 3. **Never mark work COMPLETE on unverified or failing tests.** Run the tests
    that cover your change. Failing tests mean the task stays IN_PROGRESS or gets
    BLOCKED with a reason. Reporting success you did not observe is the single
-   most damaging thing you can do to a team that trusts the board.
-4. **Stage explicit paths. Never `git add -A`.** Other agents have uncommitted
-   work in this shared tree; `-A` commits it as if it were yours. For the same
-   reason, a "tests pass" claim covers the tree as it is — say whose work was in
-   it if that matters.
+   most damaging thing you can do to a team that trusts the board. Completion
+   also needs `--commit <sha>` — COMPLETE is a claim the next session acts on,
+   and one that points at nothing cannot be checked. Work that genuinely
+   produced no commit says why: `--no-commit-reason "..."`.
+4. **Put the paths on the commit itself: `git commit -F msg.txt -- path/one`.**
+   Never `git add -A` — other agents have uncommitted work in this shared tree
+   and `-A` commits it as if it were yours. But staging your own paths is not
+   enough either: one working tree means **one git index**, so a bare
+   `git commit` also takes whatever anyone else has staged, under your name and
+   your message. A pathspec cannot name a file git has never seen, so new files
+   still need `git add <path>` first. Verify with `git show --stat HEAD` before
+   you push. The PreToolUse guard now refuses a commit that would include a live
+   agent's owned file, but the habit is yours to keep. For the same reason, a
+   "tests pass" claim covers the tree as it is — say whose work was in it if
+   that matters.
+4b. **A backend surface with no caller is not done.** Run
+   `py tools\seam_check.py` before you complete anything that adds a route, and
+   `--ui` for the sharper question: which routes can no operator reach. This
+   repo has shipped that bug four times — the keepout monitor running with zero
+   rings, the scorecard, the turn-geometry stats — each one complete, tested,
+   green and invisible. If the other half of the seam is not yours to build,
+   open it in `LANES.md` with a named owner and say so in your completion
+   summary.
 5. **Tell people what crosses into their area.** A changed schema, API shape,
    shared default or file contract goes to the affected agent:
    `py tools\agops.py message <agent> "..."`. Broadcast is for architecture
@@ -55,7 +73,10 @@ These are not advisory. Each one exists because breaking it cost real time.
    single-occupancy), `serial-fc`, `exe-build`, `git-push`.
    `py tools\agops.py take sitl-5760` … `drop` the moment you are done. A red
    SITL scenario during parallel work is more likely contention than a
-   regression — re-run it holding the lock before believing it.
+   regression — re-run it holding the lock before believing it. If it is held,
+   `take <resource> --queue` gets you in line and `drop` messages you the moment
+   it frees; do not sit idle behind a "ping me when you're done" agreement that
+   only works if the holder remembers.
 8. **When you finish, report and STOP.** Say what landed, then — only if asked
    — recommend what you would do next in a line or two. Do not take it. Tabor
    decides what happens next and dispatches it. This holds no matter how obvious
@@ -76,6 +97,10 @@ code, a discovered blocker, an explicit plan. Do not fill the queue with
 speculative work — every task you invent is one another agent has to read.
 
 ## Commands
+
+`py tools\seam_check.py` (routes nothing calls) · `take <r> --queue` /
+`waiting` (line up for a lock) · the status line in your prompt (who you are,
+your task, your locks, unread count).
 
 `/agops-monitor` (the full board) · `/agops-assign` (dispatch work) ·
 `/agops-continue` (go-ahead to take it) · `/agops-join` · `/agops-status` ·
