@@ -18,7 +18,12 @@ a = Analysis(
     ['run_gcs.py'],
     pathex=[],
     binaries=[],
-    datas=[('../frontend/build', 'frontend_build')],
+    # Terrain tiles are BUNDLED, not fetched (LANES decision 2026-08-19), so they
+    # have to be inside the exe — a GCS that needed the internet to know the
+    # ground height would re-introduce the dependency the airframe refuses.
+    # ~12.5 MB. terrain_store.bundled_dir() resolves this via sys._MEIPASS.
+    datas=[('../frontend/build', 'frontend_build'),
+           ('../terrain', 'terrain')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

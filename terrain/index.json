@@ -1,0 +1,94 @@
+{
+  "format": "ardupilot-terrain-dat",
+  "format_version": 1,
+  "version_minor": 1,
+  "grid_spacing_m": 100,
+  "vehicle_param": {
+    "TERRAIN_ENABLE": 1,
+    "TERRAIN_SPACING": 100
+  },
+  "source": "https://terrain.ardupilot.org/tilesdat3/<TILE>.DAT.gz",
+  "built_for": {
+    "centre": {
+      "lat": 39.9042,
+      "lon": -95.7997
+    },
+    "radius_km": 50.0,
+    "name": "Sabetha, KS"
+  },
+  "tiles": [
+    {
+      "name": "N39W096",
+      "lat_degrees": 39,
+      "lon_degrees": -96,
+      "covers": {
+        "lat": [
+          39,
+          40
+        ],
+        "lon": [
+          -96,
+          -95
+        ]
+      },
+      "blocks": 1551,
+      "bytes": 3176448,
+      "sha256": "b64177de787b92612688e93d48901ca5996f5c6545624ad4896ebd8f4a9cb83b"
+    },
+    {
+      "name": "N39W097",
+      "lat_degrees": 39,
+      "lon_degrees": -97,
+      "covers": {
+        "lat": [
+          39,
+          40
+        ],
+        "lon": [
+          -97,
+          -96
+        ]
+      },
+      "blocks": 1551,
+      "bytes": 3176448,
+      "sha256": "0a25f57b1bd47aeed84692c083043879a7aef7cadae7e5e1117d634a3a4e69cf"
+    },
+    {
+      "name": "N40W096",
+      "lat_degrees": 40,
+      "lon_degrees": -96,
+      "covers": {
+        "lat": [
+          40,
+          41
+        ],
+        "lon": [
+          -96,
+          -95
+        ]
+      },
+      "blocks": 1504,
+      "bytes": 3080192,
+      "sha256": "030baca4b502620e32c2881e3ceee02f990b60b39ee96946d6238d6bed8474fc"
+    },
+    {
+      "name": "N40W097",
+      "lat_degrees": 40,
+      "lon_degrees": -97,
+      "covers": {
+        "lat": [
+          40,
+          41
+        ],
+        "lon": [
+          -97,
+          -96
+        ]
+      },
+      "blocks": 1504,
+      "bytes": 3080192,
+      "sha256": "7cd9035ae0fd269e5f3c5eb3f068488f282e3f608a73beb54dac593694e304a7"
+    }
+  ],
+  "note": "Coverage is exactly the degree squares listed. Outside them the GCS refuses to plan or fly rather than assuming flat ground \u2014 see backend/app/terrain_store.py."
+}
