@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -188,13 +189,19 @@ def _wrap(text, width):
     return text if len(text) <= width else text[:width - 2] + ".."
 
 
-def render_monitor(st, commit_state=None) -> str:
+def _c(text, code, on):
+    """ANSI color when the terminal supports it, plain text when it does not."""
+    return "\033[%sm%s\033[0m" % (code, text) if on else text
+
+
+def render_monitor(st, commit_state=None, color=False) -> str:
     """The at-a-glance board: who is here, what is open, what shipped.
 
-    Grouped by what a human actually scans for, in that order: who is live, what
-    is being worked right now, what is free to hand out, what is stuck, and what
-    landed. Completion carries the commit AND whether it is pushed, because
-    those come apart and only one of them means other people can see the work.
+    Grouped by what a human actually scans for, in that order: what must not
+    be missed (FLAGS), who is live, what is being worked right now, what is
+    free to hand out, what is stuck, and what landed. Completion carries the
+    commit AND whether it is pushed, because those come apart and only one of
+    them means other people can see the work.
     """
     commit_state = commit_state or {}
     agents = st["agents"]
@@ -207,6 +214,18 @@ def render_monitor(st, commit_state=None) -> str:
     L.append("=" * _W)
     if not st["coordination_enabled"]:
         L.append(" !! COORDINATION PAUSED - claims and the guard are inert")
+
+    # --- flags: the things a glance must not miss ---------------------------
+    # Full text, wrapped -- everywhere else truncation is fine, but a flag cut
+    # short loses the instruction ("...wake it by hand"), which is its point.
+    for f in st.get("flags") or []:
+        words, line = f.split(), " !! "
+        for w in words:
+            if len(line) + len(w) + 1 > _W - 1:
+                L.append(_c(line.rstrip(), "91", color))
+                line = "    "
+            line += w + " "
+        L.append(_c(line.rstrip(), "91", color))
     L.append("")
 
     # --- sessions -----------------------------------------------------------
@@ -220,16 +239,27 @@ def render_monitor(st, commit_state=None) -> str:
     for a in agents:
         dot = "*" if a in live else ("!" if a["stale"] else "-")
         task = a["current_task"] or "--"
-        note = ""
+        tag = ",".join(a["specialties"])
+        if (a.get("role") or "") == "lead":
+            tag = "[LEAD] " + tag
         if a["status"] == "OFFLINE":
             note = "offline %s" % _ago(a["last_heartbeat"])
         elif a["stale"]:
             note = "STALE %s quiet" % _ago(a["last_heartbeat"])
+        elif a["status"] == "WAITING":
+            note = "standing by %s" % _ago(a["last_heartbeat"])
+        elif a.get("note"):
+            # "editing SprayPanel.jsx 40s" beats "40s quiet": it answers
+            # whether the agent is stuck, which is the question a human
+            # actually brings to this screen. Basename keeps the width.
+            note = "%s %s" % (_wrap(os.path.basename(a["note"]), 20),
+                              _ago(a["last_heartbeat"]))
         else:
             note = "%s quiet" % _ago(a["last_heartbeat"])
         L.append("  %s %-9s %-9s %-10s %-22s %s"
-                 % (dot, a["name"], a["status"], task,
-                    _wrap(",".join(a["specialties"]), 22), note))
+                 % (dot, a["name"], a["status"], task, _wrap(tag, 22), note))
+    for line in st.get("lead_lines") or []:
+        L.append("    " + _wrap(line, _W - 5))
     L.append("")
 
     # --- in progress --------------------------------------------------------
@@ -238,12 +268,25 @@ def render_monitor(st, commit_state=None) -> str:
     L.append(_rule())
     if not ip:
         L.append("   nothing being worked")
+    by_name = {a["name"]: a for a in agents}
     for t in ip:
         L.append("  %-10s %-8s %s" % (t["task_id"], t["priority"],
                                       _wrap(t["title"], 46)))
-        L.append("  %-10s taken by %s at %s  (%s ago)"
-                 % ("", t["owner"] or "?", _clock(t["claimed_at"]),
-                    _ago(t["claimed_at"])))
+        a = by_name.get(t["owner"] or "")
+        if (a and t["claimed_at"]
+                and (a["last_heartbeat"] or 0) < t["claimed_at"]
+                and time.time() - t["claimed_at"] > _UNACKED_GRACE_S):
+            # assign marks the task WORKING even when the terminal it went to
+            # is stopped; without this line a cold session reads as busy.
+            L.append(_c("  %-10s DISPATCHED? %s has shown no sign of life "
+                        "since the assign (%s ago)"
+                        % ("", t["owner"] or "?", _ago(t["claimed_at"])),
+                        "91", color))
+        else:
+            act = ("%s active %s ago" % (t["owner"], _ago(a["last_heartbeat"]))
+                   if a else "owner not on the roster")
+            L.append("  %-10s taken at %s (%s ago)  |  %s"
+                     % ("", _clock(t["claimed_at"]), _ago(t["claimed_at"]), act))
     L.append("")
 
     # --- open ---------------------------------------------------------------
@@ -277,8 +320,16 @@ def render_monitor(st, commit_state=None) -> str:
         L.append("")
 
     # --- complete -----------------------------------------------------------
-    done = st.get("completed") or []
-    L.append(" COMPLETE  (%d)" % len(done))
+    # Newest few only: this list grows forever, and a board taller than a
+    # screen is one nobody reads. Anything WRONG with an older completion
+    # (local-only, missing commit) still surfaces -- via FLAGS, not here.
+    done_all = st.get("completed") or []
+    shown = 6
+    done = done_all[-shown:] if len(done_all) > shown else done_all
+    L.append(" COMPLETE  (%d%s)"
+             % (len(done_all),
+                ", newest %d -- older: py tools\\agops.py tasks --status "
+                "COMPLETE" % shown if len(done_all) > shown else ""))
     L.append(_rule())
     if not done:
         L.append("   nothing finished yet")
@@ -292,11 +343,11 @@ def render_monitor(st, commit_state=None) -> str:
             why = (t.get("verification_status") or "")
             mark = why if why.startswith("no commit:") else "no commit recorded"
         elif state == "pushed":
-            mark = "%s PUSHED" % sha
+            mark = _c("%s PUSHED" % sha, "92", color)
         elif state == "local":
-            mark = "%s LOCAL ONLY" % sha
+            mark = _c("%s LOCAL ONLY" % sha, "91", color)
         elif state == "missing":
-            mark = "%s NOT IN REPO" % sha
+            mark = _c("%s NOT IN REPO" % sha, "91", color)
         else:
             mark = sha
         L.append("  %-10s %-35s %-8s %s"
@@ -366,7 +417,100 @@ def _board(a):
     st = core.project_status(project=a.project)
     st["completed"] = core.list_tasks(status="COMPLETE", project=a.project)
     states = core.commit_states([t["commit_hash"] for t in st["completed"]])
+    st["flags"] = _board_flags(st, states)
+    st["lead_lines"] = _lead_lines(st)
     return st, states
+
+
+# Grace before a silent assignee is flagged: an assignment reaching a LIVE
+# session takes a hook fire, not two minutes. Past this, no heartbeat since
+# claimed_at means the dispatch never reached anyone.
+_UNACKED_GRACE_S = 120
+
+
+def _board_flags(st, states):
+    """The problems a glance must not miss, computed from the same signals the
+    lead's runbook table uses -- one truth for the human and the manager."""
+    flags = []
+    now = time.time()
+    agents = {a["name"]: a for a in st["agents"]}
+
+    for t in st.get("completed") or []:
+        state = states.get(t["commit_hash"], "")
+        if state == "local":
+            flags.append("%s is COMPLETE but LOCAL ONLY (%s) -- push it"
+                         % (t["task_id"], (t["commit_hash"] or "")[:7]))
+        elif state == "missing":
+            flags.append("%s claims commit %s which is NOT IN THIS REPO"
+                         % (t["task_id"], (t["commit_hash"] or "")[:7]))
+
+    for t in st["tasks"].get("IN_PROGRESS") or []:
+        a = agents.get(t["owner"] or "")
+        if (a and t["claimed_at"]
+                and (a["last_heartbeat"] or 0) < t["claimed_at"]
+                and now - t["claimed_at"] > _UNACKED_GRACE_S):
+            flags.append("%s shows WORKING but %s has done NOTHING since the "
+                         "assign (%s ago) -- the dispatch never reached that "
+                         "terminal; wake it by hand"
+                         % (t["task_id"], t["owner"], _hms(now - t["claimed_at"])))
+        if a and a["stale"]:
+            flags.append("%s is held by %s, which has gone stale -- consider "
+                         "/agops-recover" % (t["task_id"], t["owner"]))
+
+    conn = core.connect()
+    try:
+        for name, a in agents.items():
+            if a["status"] == "OFFLINE" or a["current_task"]:
+                continue
+            last = conn.execute("SELECT kind FROM events WHERE actor=? "
+                                "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+            if last and last["kind"] == "agent.standby_expired":
+                flags.append("%s went cold after standby -- a new dispatch "
+                             "will NOT reach it until a human touches its "
+                             "terminal" % name)
+    finally:
+        conn.close()
+
+    # Leftover uncommitted work is only a flag when NOBODY is live to own it:
+    # during active work a dirty shared tree is the normal state of the world.
+    live_workers = [a for a in st["agents"]
+                    if a["status"] != "OFFLINE" and not a["stale"]
+                    and (a.get("role") or "worker") != "lead"]
+    if not live_workers:
+        try:
+            out_ = subprocess.run(["git", "-C", core.REPO, "status", "--porcelain"],
+                                  capture_output=True, text=True, timeout=10)
+            dirty = [l for l in out_.stdout.splitlines() if l.strip()]
+            if dirty:
+                flags.append("%d uncommitted path(s) in the tree with no "
+                             "worker live -- somebody's unfinished work is "
+                             "sitting unowned" % len(dirty))
+        except Exception:
+            pass
+    return flags
+
+
+def _lead_lines(st):
+    """One line per live lead: its last dispatch, so the board shows the
+    manager is actually managing rather than merely present."""
+    lines = []
+    conn = core.connect()
+    try:
+        for a in st["agents"]:
+            if (a.get("role") or "") != "lead" or a["status"] == "OFFLINE":
+                continue
+            e = conn.execute(
+                "SELECT * FROM events WHERE actor=? AND kind='task.assign' "
+                "ORDER BY id DESC LIMIT 1", (a["name"],)).fetchone()
+            if e:
+                lines.append("%s: last dispatch %s (%s) %s ago"
+                             % (a["name"], e["subject"], (e["detail"] or ""),
+                                _hms(time.time() - e["ts"])))
+            else:
+                lines.append("%s: on duty, no dispatch yet" % a["name"])
+    finally:
+        conn.close()
+    return lines
 
 
 def cmd_monitor(a):
@@ -378,7 +522,7 @@ def cmd_monitor(a):
 
     if not a.watch:
         st, states = _board(a)
-        print(render_monitor(st, states))
+        print(render_monitor(st, states, color=_enable_ansi()))
         return
 
     interval = max(1, a.watch)
@@ -390,7 +534,7 @@ def cmd_monitor(a):
         while True:
             try:
                 st, states = _board(a)
-                body = render_monitor(st, states).splitlines()
+                body = render_monitor(st, states, color=ansi).splitlines()
                 degraded = None
             except Exception as exc:
                 # A locked or missing database must not kill a board that has

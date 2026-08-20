@@ -888,7 +888,8 @@ class TestMonitor(Base):
     def test_in_progress_shows_who_and_when(self):
         r = self._monitor()
         self.assertIn("TASK-001", r.stdout)
-        self.assertIn("taken by alpha", r.stdout)
+        self.assertIn("taken at", r.stdout)
+        self.assertIn("alpha active", r.stdout)
 
     def test_blocked_shows_what_it_waits_on(self):
         self.assertIn("waiting:", self._monitor().stdout)
@@ -1263,6 +1264,74 @@ class TestNameRecycling(Base):
         write_config(recycle_names_on_fresh_start=False)
         core.unregister_agent(self._register("day1-a"))    # alpha, offline
         self.assertEqual(self._register("day2-a"), "bravo")
+
+
+class TestMonitorTruth(Base):
+    """The 2026-08-20 truth pass: the board must surface the states that used
+    to hide -- a cold assignee reading as WORKING, a local-only completion
+    buried mid-list, a lead indistinguishable from a worker."""
+
+    def _monitor(self):
+        return run_cli("monitor").stdout
+
+    def test_a_cold_assignee_is_flagged_not_shown_working(self):
+        core.register_agent(session_id="s-a")                   # alpha
+        core.create_task("work")
+        core.assign_task("TASK-001", "alpha")
+        conn = core.connect()
+        conn.execute("UPDATE tasks SET claimed_at=? WHERE task_id='TASK-001'",
+                     (time.time() - 300,))
+        conn.execute("UPDATE agents SET last_heartbeat=? WHERE name='alpha'",
+                     (time.time() - 400,))
+        conn.close()
+        out_ = self._monitor()
+        self.assertIn("DISPATCHED?", out_)
+        self.assertIn("never reached", out_)
+
+    def test_an_active_assignee_is_not_flagged(self):
+        core.register_agent(session_id="s-a")
+        core.create_task("work")
+        core.assign_task("TASK-001", "alpha")   # fresh heartbeat, fresh claim
+        self.assertNotIn("DISPATCHED?", self._monitor())
+
+    def test_a_bad_commit_claim_is_a_flag(self):
+        core.register_agent(session_id="s-a")
+        t = core.create_task("work")["task_id"]
+        core.claim_task(t, "alpha")
+        core.complete_task(t, "alpha",
+                           "Implemented and verified with the covering tests.",
+                           commit_hash="feedfacefeedface")   # not in this repo
+        self.assertIn("NOT IN THIS REPO", self._monitor())
+
+    def test_the_lead_is_visible_and_its_dispatch_shown(self):
+        core.register_agent(session_id="s-a")                   # alpha, worker
+        core.register_agent(session_id="s-l", role="lead")      # bravo, lead
+        core.create_task("work")
+        core.assign_task("TASK-001", "alpha", by="bravo")
+        out_ = self._monitor()
+        self.assertIn("[LEAD]", out_)
+        self.assertIn("last dispatch TASK-001", out_)
+
+    def test_what_an_agent_is_editing_shows_on_its_row(self):
+        core.register_agent(session_id="s-a")
+        conn = core.connect()
+        conn.execute("UPDATE agents SET note=? WHERE name='alpha'",
+                     ("editing frontend/src/components/SprayPanel.jsx",))
+        conn.close()
+        self.assertIn("SprayPanel.jsx", self._monitor())
+
+    def test_the_complete_list_is_capped(self):
+        core.register_agent(session_id="s-a")
+        for i in range(8):
+            t = core.create_task("task %d" % i)["task_id"]
+            core.claim_task(t, "alpha")
+            core.complete_task(t, "alpha",
+                               "Implemented task %d and verified it." % i,
+                               commit_hash="abc1234")
+        out_ = self._monitor()
+        self.assertIn("newest 6", out_)
+        self.assertNotIn("task 0", out_)     # oldest two fell off the board
+        self.assertIn("task 7", out_)
 
 
 class TestLeadAndDispatch(Base):

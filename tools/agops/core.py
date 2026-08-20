@@ -1058,8 +1058,11 @@ def complete_task(tid, agent, summary, verification="", commit_hash="",
                  if no_commit_reason.strip() else ""),
              commit_hash, _now(), _now(), tid))
         if a:
+            # note carries "editing <file>" while working; a completed task's
+            # last touch is stale information, so it clears here.
             conn.execute("UPDATE agents SET current_task=NULL, status='IDLE', "
-                         "last_heartbeat=? WHERE agent_id=?", (_now(), a["agent_id"]))
+                         "note=NULL, last_heartbeat=? WHERE agent_id=?",
+                         (_now(), a["agent_id"]))
         _event(conn, name, "task.complete", tid, summary[:200])
         dependents = [r["task_id"] for r in conn.execute(
             "SELECT task_id FROM task_deps WHERE depends_on=?", (tid,))]

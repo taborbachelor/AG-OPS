@@ -128,6 +128,22 @@ def main():
         if me:
             conn.execute("UPDATE agents SET last_heartbeat=? WHERE name=?",
                          (core._now(), me))
+            # Record WHAT is being edited, not just that a heartbeat happened:
+            # the board's "WORKING, 12m quiet" answers nothing; "editing
+            # SprayPanel.jsx, 2m ago" answers whether the agent is stuck.
+            if tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
+                raw = ti.get("file_path") or ti.get("notebook_path")
+                if raw:
+                    p = raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+                    p = os.path.abspath(p)
+                    try:
+                        if os.path.commonpath([p, REPO]) == REPO:
+                            conn.execute(
+                                "UPDATE agents SET note=? WHERE name=?",
+                                ("editing " + os.path.relpath(p, REPO)
+                                 .replace("\\", "/"), me))
+                    except ValueError:
+                        pass
     finally:
         conn.close()
 
