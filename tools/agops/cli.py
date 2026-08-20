@@ -657,15 +657,34 @@ def cmd_reclaim(a):
 
 
 def cmd_take(a):
-    r = core.take_resource(a.resource, need_agent(a), a.reason or "", project=a.project)
+    r = core.take_resource(a.resource, need_agent(a), a.reason or "",
+                           queue=getattr(a, "queue", False), project=a.project)
     out(a, r, r.get("message") or "took %s" % a.resource)
-    if not r.get("ok"):
+    # queued is a success: you asked to wait and you are waiting. Exiting 1
+    # would read as "the command failed" and invite a retry loop.
+    if not r.get("ok") and not r.get("queued"):
         sys.exit(1)
 
 
 def cmd_drop(a):
-    out(a, core.drop_resource(a.resource, need_agent(a), project=a.project),
-        "dropped %s" % a.resource)
+    r = core.drop_resource(a.resource, need_agent(a), project=a.project)
+    if r.get("notified"):
+        note = ("dropped %s -- handed to %s, who has been messaged"
+                % (a.resource, r["notified"]))
+    else:
+        note = "dropped %s" % a.resource
+    out(a, r, note)
+
+
+def cmd_waiting(a):
+    rows = core.resource_waiters(a.resource, project=a.project)
+    if not rows:
+        out(a, {"waiting": []}, "nobody is waiting")
+        return
+    lines = ["%-14s %-9s waiting %s"
+             % (w["resource"], w["agent"], _hms(core._now() - w["since"]))
+             for w in rows]
+    out(a, {"waiting": rows}, "\n".join(lines))
 
 
 def cmd_admin(a):
@@ -941,8 +960,12 @@ def build_parser():
     s.add_argument("--verified", action="store_true"); s.set_defaults(fn=cmd_reclaim)
 
     s = sub.add_parser("take"); s.add_argument("resource"); s.add_argument("--reason")
+    s.add_argument("--queue", action="store_true",
+                   help="if it is held, get in line and be messaged when it frees")
     s.set_defaults(fn=cmd_take)
     s = sub.add_parser("drop"); s.add_argument("resource"); s.set_defaults(fn=cmd_drop)
+    s = sub.add_parser("waiting"); s.add_argument("resource", nargs="?")
+    s.set_defaults(fn=cmd_waiting)
 
     s = sub.add_parser("admin", help="human override")
     s.add_argument("action", choices=["pause", "resume", "enforcement", "policy",

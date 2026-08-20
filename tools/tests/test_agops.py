@@ -605,6 +605,57 @@ class TestResourcesAndOverride(Base):
         core.drop_resource("sitl-5760", "alpha")
         self.assertTrue(core.take_resource("sitl-5760", "bravo")["ok"])
 
+    def test_the_waiter_is_messaged_the_moment_the_lock_frees(self):
+        """The handoff must not depend on the holder remembering to relay it.
+
+        bravo finished TASK-006's code, needed sitl-5760 to verify, and sat idle
+        behind a "ping me when you drop it" agreement. Nothing can wake a
+        stopped session, so drop has to send the message itself.
+        """
+        core.take_resource("sitl-5760", "alpha")
+        queued = core.take_resource("sitl-5760", "bravo", queue=True)
+        self.assertFalse(queued["ok"])
+        self.assertTrue(queued["queued"])
+        self.assertEqual(queued["place"], 1)
+
+        r = core.drop_resource("sitl-5760", "alpha")
+        self.assertEqual(r["notified"], "bravo")
+        inbox = core.inbox("bravo", unread_only=True, mark_read=False)
+        self.assertTrue(any("sitl-5760 is free" in m["content"] for m in inbox),
+                        "the next in line was not told")
+
+    def test_queueing_does_not_take_the_lock(self):
+        """Getting in line must never be mistaken for holding it."""
+        core.take_resource("sitl-5760", "alpha")
+        core.take_resource("sitl-5760", "bravo", queue=True)
+        held = core.project_status()["resources"]
+        self.assertEqual([r["holder"] for r in held if r["name"] == "sitl-5760"],
+                         ["alpha"])
+
+    def test_taking_it_clears_your_place_in_line(self):
+        core.take_resource("sitl-5760", "alpha")
+        core.take_resource("sitl-5760", "bravo", queue=True)
+        core.drop_resource("sitl-5760", "alpha")
+        core.take_resource("sitl-5760", "bravo")
+        self.assertEqual(core.resource_waiters("sitl-5760"), [])
+
+    def test_an_offline_waiter_is_skipped_not_handed_the_lock(self):
+        """Handing it to a closed terminal is worse than no queue: the next
+        agent in line believes someone else is using it."""
+        core.register_agent(session_id="s-c", name="charlie")
+        core.take_resource("sitl-5760", "alpha")
+        core.take_resource("sitl-5760", "bravo", queue=True)
+        core.take_resource("sitl-5760", "charlie", queue=True)
+        core.unregister_agent("bravo")
+        r = core.drop_resource("sitl-5760", "alpha")
+        self.assertEqual(r["notified"], "charlie")
+
+    def test_nobody_waiting_is_not_an_error(self):
+        core.take_resource("sitl-5760", "alpha")
+        r = core.drop_resource("sitl-5760", "alpha")
+        self.assertTrue(r["ok"])
+        self.assertIsNone(r["notified"])
+
     def test_human_can_pause_coordination(self):
         cfg = core.load_config()
         cfg["coordination_enabled"] = False

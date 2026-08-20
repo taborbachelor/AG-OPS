@@ -278,6 +278,14 @@ CREATE TABLE IF NOT EXISTS resources (
     reason   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS resource_waits (
+    resource TEXT NOT NULL,
+    agent    TEXT NOT NULL,
+    since    REAL NOT NULL,
+    note     TEXT,
+    PRIMARY KEY (resource, agent)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient);
 CREATE INDEX IF NOT EXISTS idx_msg_reads ON message_reads(agent, message_id);
@@ -1216,20 +1224,46 @@ def _git_dirty_report() -> dict:
 
 # --- resources ---------------------------------------------------------------
 
-def take_resource(name, agent, reason="", project=None) -> dict:
+def take_resource(name, agent, reason="", queue=False, project=None) -> dict:
+    """Take an exclusive resource, or optionally get in line for it.
+
+    `queue` exists because the manual alternative cost real time: bravo finished
+    TASK-006's code, needed sitl-5760 to verify, and sat idle behind a
+    "ping me when you drop it" handshake that depended on alpha remembering.
+    Nothing can wake a stopped session, so the handoff has to be a message the
+    holder's `drop` sends automatically rather than one a human relays.
+    """
     require_project(project)
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
         r = conn.execute("SELECT * FROM resources WHERE name=?", (name,)).fetchone()
         if r and r["holder"] and r["holder"] != agent:
+            holder = r["holder"]
+            if queue:
+                conn.execute(
+                    "INSERT INTO resource_waits(resource, agent, since, note) "
+                    "VALUES(?,?,?,?) ON CONFLICT(resource, agent) DO NOTHING",
+                    (name, agent, _now(), reason))
             conn.execute("COMMIT")
-            return {"ok": False, "resource": name, "holder": r["holder"],
-                    "message": "%s is held by %s" % (name, r["holder"])}
+            if queue:
+                _event(conn, agent, "resource.queue", name, reason)
+                ahead = [w["agent"] for w in conn.execute(
+                    "SELECT agent FROM resource_waits WHERE resource=? "
+                    "ORDER BY since", (name,))]
+                return {"ok": False, "queued": True, "resource": name,
+                        "holder": holder, "place": ahead.index(agent) + 1,
+                        "message": "%s is held by %s -- you are #%d in line and "
+                                   "will be messaged when it frees"
+                                   % (name, holder, ahead.index(agent) + 1)}
+            return {"ok": False, "resource": name, "holder": holder,
+                    "message": "%s is held by %s" % (name, holder)}
         conn.execute("INSERT INTO resources(name, holder, taken_at, reason) "
                      "VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
                      "holder=excluded.holder, taken_at=excluded.taken_at, "
                      "reason=excluded.reason", (name, agent, _now(), reason))
+        conn.execute("DELETE FROM resource_waits WHERE resource=? AND agent=?",
+                     (name, agent))
         conn.execute("COMMIT")
         _event(conn, agent, "resource.take", name, reason)
         return {"ok": True, "resource": name, "holder": agent}
@@ -1238,13 +1272,53 @@ def take_resource(name, agent, reason="", project=None) -> dict:
 
 
 def drop_resource(name, agent, project=None) -> dict:
+    """Release a resource and tell the next agent in line, if there is one.
+
+    Skips waiters that are OFFLINE rather than messaging a closed terminal and
+    calling the handoff done -- a queue that hands the lock to a dead session is
+    worse than no queue, because the next agent believes someone else has it.
+    """
     require_project(project)
     conn = connect()
     try:
         conn.execute("UPDATE resources SET holder=NULL WHERE name=? AND holder=?",
                      (name, agent))
         _event(conn, agent, "resource.drop", name)
-        return {"ok": True, "resource": name}
+
+        live = {a["name"] for a in list_agents(include_offline=False, project=project)}
+        nxt = None
+        for w in conn.execute("SELECT agent FROM resource_waits WHERE resource=? "
+                              "ORDER BY since", (name,)):
+            if w["agent"] in live and w["agent"] != agent:
+                nxt = w["agent"]
+                break
+        if nxt is None:
+            return {"ok": True, "resource": name, "notified": None}
+
+        conn.execute("DELETE FROM resource_waits WHERE resource=? AND agent=?",
+                     (name, nxt))
+        _event(conn, agent, "resource.handoff", name, nxt)
+    finally:
+        conn.close()
+
+    send_message(agent, nxt,
+                 "%s is free -- you were next in line. Take it now: "
+                 "py tools\\agops.py take %s" % (name, name),
+                 msg_type="INFO", project=project)
+    return {"ok": True, "resource": name, "notified": nxt}
+
+
+def resource_waiters(name=None, project=None) -> list:
+    """Who is in line, oldest first."""
+    require_project(project)
+    conn = connect()
+    try:
+        if name:
+            rows = conn.execute("SELECT * FROM resource_waits WHERE resource=? "
+                                "ORDER BY since", (name,))
+        else:
+            rows = conn.execute("SELECT * FROM resource_waits ORDER BY resource, since")
+        return [_row(r) for r in rows]
     finally:
         conn.close()
 
