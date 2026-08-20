@@ -55,6 +55,146 @@ function Stat({ v, l }) {
   );
 }
 
+// What the AIRCRAFT holds, as distinct from what this laptop is watching.
+//
+// The soft GCS proximity monitor and the hard onboard exclusion fence are two
+// different protections, and the difference is the entire point: the monitor
+// runs here and goes silent the moment the link drops, while the fence is
+// enforced by the autopilot with no link, no GCS and no companion computer.
+// Rally points are the third — they are what a link-loss RTL diverts to
+// instead of flying a straight line home through a mapped powerline.
+//
+// Seam S8 records what folding them into one line cost: `POST /safety/keepouts`
+// has always returned `fence` and `rally` result blocks, this panel read
+// neither, and it printed "proximity monitor armed ✓" from ring counts alone.
+// A surveyed powerline that could NOT be fenced looked identical to one that
+// was. So each protection states its own outcome here, and the rule every
+// branch below obeys is single: anything that is not an upload the aircraft
+// ACCEPTED reads as unprotected. Not silent, not neutral — unprotected.
+function OnboardProtection({ armed, error }) {
+  if (error) {
+    // We asked and it broke. That is not "no hazards" — we simply do not know
+    // what the FC holds, and unknown is never drawn as clear.
+    return (
+      <div className="spray-status err fence-line">
+        Onboard fence &amp; rally points: UNKNOWN — the safety call failed
+        ({error}). Do not assume the aircraft is holding this mission&rsquo;s
+        hazards.
+      </div>
+    );
+  }
+  if (!armed) return null;
+
+  const fence = armed.fence || {};
+  const rally = armed.rally || {};
+  // NOTE: `polygons` is set even when the transfer FAILS (safety.py assigns it
+  // after the upload result), so it is a count of polygons BUILT, never of
+  // polygons protecting anything. It may only be spoken of as protection on
+  // the ok === true branch.
+  const polygons = fence.polygons;
+  const notFenced = fence.not_fenced;
+
+  let fenceCls = 'spray-status err';
+  let fenceBody;
+  if (!fence.attempted) {
+    fenceBody = (
+      <>
+        Onboard fence: NOT pushed to the aircraft — no vehicle connected, or
+        push-to-vehicle is off. These hazards exist only in the GCS monitor,
+        which stops watching the instant the link drops.
+      </>
+    );
+  } else if (fence.ok !== true) {
+    fenceBody = (
+      <>
+        Onboard fence: FAILED — {fence.error || 'no reason reported'}.{' '}
+        {polygons > 0
+          ? `${polygons} hazard polygon(s) were built, but the aircraft did `
+            + 'NOT accept them.'
+          : 'Nothing was uploaded.'}{' '}
+        These hazards are NOT enforced onboard.
+      </>
+    );
+  } else if (!polygons) {
+    // ok:true with zero polygons is an EMPTY transfer, and an empty transfer
+    // clears the vehicle's fence (vehicle_manager.upload_fence: "An empty
+    // list clears the fence, which is a legitimate operation"). It is the one
+    // success that protects nothing, so it must not wear the success colour.
+    fenceCls = 'spray-note fence-cleared';
+    fenceBody = (
+      <>
+        Onboard fence: this plan has no powerline/hazard rings, so the
+        aircraft&rsquo;s exclusion fence was CLEARED. Nothing is fenced onboard.
+      </>
+    );
+  } else {
+    fenceCls = 'spray-status ok';
+    fenceBody = (
+      <>
+        Onboard fence: {polygons} hazard polygon(s)
+        {fence.points != null ? `, ${fence.points} points` : ''} accepted by
+        the aircraft ✓ — enforced with no link.
+      </>
+    );
+  }
+
+  let rallyCls = 'spray-status err';
+  let rallyBody;
+  if (!rally.attempted) {
+    // The honest reading of today's default. Nothing in the GCS sends rally
+    // candidates yet (TASK-020), and saying nothing here is what let that ship
+    // dead for six weeks.
+    rallyCls = 'spray-note';
+    rallyBody = (
+      <>
+        Rally points: none loaded. A link-loss RTL will fly a straight line
+        home and will NOT divert around a mapped powerline.
+      </>
+    );
+  } else if (rally.ok !== true) {
+    rallyBody = (
+      <>
+        Rally points: FAILED — {rally.error || 'no reason reported'}. Link-loss
+        RTL will fly a straight line home, with no diversion.
+      </>
+    );
+  } else if (!rally.points) {
+    rallyCls = 'spray-note';
+    rallyBody = (
+      <>
+        Rally points: the aircraft accepted the transfer but holds NONE.
+        Link-loss RTL will fly a straight line home.
+      </>
+    );
+  } else {
+    rallyCls = 'spray-status ok';
+    rallyBody = (
+      <>
+        Rally points: {rally.points} accepted by the aircraft ✓ — link-loss RTL
+        diverts to a point checked clear of these hazards.
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className={`${fenceCls} fence-line`}>{fenceBody}</div>
+      {notFenced > 0 && (
+        // Deliberate, not a failure: only airframe HAZARDS become hard
+        // fences. A hard fence around a farm pond fires FENCE_ACTION on a
+        // harmless overflight, and a pond between the field and home can
+        // block RTL. Named rather than hidden so the count adds up.
+        <div className="spray-hint fence-notfenced" style={{ textAlign: 'left' }}>
+          {notFenced} spray-quality keepout(s) — water, trees, buildings — are
+          deliberately not fenced onboard; a hard fence there would trigger a
+          failsafe on a harmless overflight. The GCS monitor covers them.
+        </div>
+      )}
+      <div className={`${rallyCls} rally-line`}>{rallyBody}</div>
+    </>
+  );
+}
+
 // Multi-field spray JOB panel: build a list of fields (draw / snap / auto-
 // detect inside a selected area / load from a customer order), then plan the
 // whole job at once — per-field spray patterns plus the transit legs between
@@ -90,8 +230,16 @@ function SprayPanel({
   const [zonesBlocked, setZonesBlocked] = useState(false);
   const [hazardOverflights, setHazardOverflights] = useState(0);
   const [hazardBlocked, setHazardBlocked] = useState(false);
-  // What the in-flight proximity monitor is armed with; null = not armed.
+  // The whole POST /safety/keepouts response: the soft monitor's ring counts
+  // AND the hard onboard fence / rally results. null = the call never
+  // succeeded, which is NOT the same as "nothing to protect" -- see
+  // keepoutError.
   const [keepoutArmed, setKeepoutArmed] = useState(null);
+  // Why the safety call failed, when it did. Held separately because "we
+  // asked and it broke" and "we never asked" have to render differently: the
+  // first leaves the aircraft's fence state UNKNOWN, and unknown must never
+  // be drawn as clear.
+  const [keepoutError, setKeepoutError] = useState(null);
   const [homeLegHazard, setHomeLegHazard] = useState(false);
 
   // Bumped on every job mutation (field added/removed/cleared). An in-flight
@@ -107,7 +255,7 @@ function SprayPanel({
     setPlan(null); setZones(null); setZonesNote(''); setUpStatus(null);
     setZonesBlocked(false);
     setHazardOverflights(0); setHomeLegHazard(false); setHazardBlocked(false);
-    setKeepoutArmed(null);
+    setKeepoutArmed(null); setKeepoutError(null);
   };
 
   // Exclusive input modes: draw / area / snap.
@@ -349,6 +497,7 @@ function SprayPanel({
       // UI has to re-arm it explicitly with what it actually planned against.
       // Without this the monitor runs with zero rings and can never warn.
       let armed = null;
+      let armError = null;
       if (zones) {
         try {
           const kr = await fetch(`${API}/safety/keepouts`, {
@@ -357,16 +506,24 @@ function SprayPanel({
             body: JSON.stringify({ zones, hazard_buffer_m: bufPowerline }),
           });
           const kd = await kr.json();
-          armed = kr.ok ? kd : null;
+          if (kr.ok) armed = kd;
+          // Keep the reason. The same call arms the soft monitor AND pushes
+          // the hard exclusion fence, so a failure here leaves BOTH unknown,
+          // and the read-out below has to say so rather than render nothing.
+          else armError = (kd && kd.detail) || `HTTP ${kr.status}`;
         } catch (e) {
-          armed = null;
+          armError = 'no response from the backend';
         }
       }
       setKeepoutArmed(armed);
+      setKeepoutError(armError);
       setUpStatus(armed
+        // "armed" is a claim about the GCS-side monitor ONLY. What the
+        // AIRCRAFT holds is a separate protection with its own outcome --
+        // rendered by <OnboardProtection>, never folded into this line.
         ? { ok: true,
             msg: `Mission uploaded — ${count} items ✓ · proximity monitor armed `
-                 + `(${armed.hazards} hazard, ${armed.keepouts} keepout rings)` }
+                 + `GCS-side (${armed.hazards} hazard, ${armed.keepouts} keepout rings)` }
         // Never imply the monitor is watching when it is not.
         : { ok: false,
             msg: `Mission uploaded — ${count} items, but the live proximity `
@@ -662,6 +819,9 @@ function SprayPanel({
           {upStatus && (
             <div className={`spray-status ${upStatus.ok ? 'ok' : 'err'}`}>{upStatus.msg}</div>
           )}
+          {/* What the AIRCRAFT holds, separately from what this laptop
+              watches. The fence is the protection that survives link loss. */}
+          <OnboardProtection armed={keepoutArmed} error={keepoutError} />
           <div className="spray-hint">
             Arming &amp; launch stay in Launch Control on the FLY view.
           </div>
