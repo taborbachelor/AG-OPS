@@ -113,6 +113,17 @@
 > - **Agent identity fix** (`496b0bf`) — the CLI read `CLAUDE_SESSION_ID`; Claude Code sets
 >   `CLAUDE_CODE_SESSION_ID`, so every `/agops-join` minted a ghost agent. Six appeared in one evening.
 >   **Launch sessions with `claude --session-id <uuid>`** to keep names across restarts.
+> - **The 2026-08-20 pm hardening wave (141 tooling tests green):** (a) **monitor truth pass** —
+>   FLAGS strip (local-only/missing commits, cold assignees, stale holders, standby-expired), a
+>   cold dispatch renders `DISPATCHED?` instead of WORKING, `[LEAD]` tag + last-dispatch line,
+>   agents show WHAT they're editing (guard writes it to `agents.note`), COMPLETE capped to
+>   newest 6, ANSI color; (b) **independent verification** — `create --requires-review` routes
+>   completion to REVIEW; `review <id> --approve/--reject --reason` (reviewer ≠ completer,
+>   rejection re-dispatches the owner, dependents stay blocked until verified); flag anything
+>   touching guardian/fences/rally/mission-upload/link; (c) **worktrees share ONE board** — a
+>   linked worktree resolves `.agops` through its `.git` pointer to the main checkout (RUNBOOK
+>   §2b pilot: UI/PLANNER in worktrees, AIR stays in the main tree); (d) **`py tools\task_cost.py`**
+>   — per-task cost from ownership windows × transcripts, limits printed not hidden.
 > - **The LEAD — a manager session (added 2026-08-20 pm, 126 tooling tests green).** One session,
 >   `register --role lead`, coordination only: dispatches from a written brief, verifies completions,
 >   recovers, escalates — **never takes tasks, cannot edit the product** (both enforced). Wake

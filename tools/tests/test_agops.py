@@ -1334,6 +1334,59 @@ class TestMonitorTruth(Base):
         self.assertIn("task 7", out_)
 
 
+class TestTaskCost(Base):
+    """task_cost.py: spend attributed by ownership window, absence reported
+    as absence (never as a zero)."""
+
+    def _iso(self, epoch):
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(
+            epoch, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def test_window_attribution_counts_inside_and_not_outside(self):
+        core.register_agent(session_id="sess-cost")             # alpha
+        t = core.create_task("costed work")["task_id"]
+        core.claim_task(t, "alpha")
+        core.complete_task(t, "alpha",
+                           "Implemented and verified with tests.",
+                           commit_hash="abc1234")
+        now = time.time()
+        conn = core.connect()
+        conn.execute("UPDATE tasks SET claimed_at=?, completed_at=? "
+                     "WHERE task_id=?", (now - 600, now, t))
+        conn.close()
+        tdir = os.path.join(_TMP, "transcripts", "proj")
+        os.makedirs(tdir, exist_ok=True)
+        usage = {"input_tokens": 1000, "output_tokens": 2000}
+        with open(os.path.join(tdir, "sess-cost.jsonl"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(json.dumps({"timestamp": self._iso(now - 300), "message": {
+                "model": "claude-fable-5", "usage": usage}}) + "\n")
+            fh.write(json.dumps({"timestamp": self._iso(now - 7200), "message": {
+                "model": "claude-fable-5", "usage": usage}}) + "\n")
+        os.environ["AGOPS_TRANSCRIPTS"] = os.path.join(_TMP, "transcripts")
+        try:
+            from task_cost import task_rows
+            row = [r for r in task_rows() if r["task_id"] == t][0]
+        finally:
+            del os.environ["AGOPS_TRANSCRIPTS"]
+        self.assertEqual(row["tokens"], 3000)     # in-window only
+        self.assertGreater(row["cost"], 0)
+
+    def test_a_missing_transcript_is_reported_not_zeroed(self):
+        core.register_agent(session_id="sess-elsewhere")
+        t = core.create_task("worked on another machine")["task_id"]
+        core.claim_task(t, "alpha")
+        os.environ["AGOPS_TRANSCRIPTS"] = os.path.join(_TMP, "no-such-dir")
+        try:
+            from task_cost import task_rows
+            row = [r for r in task_rows() if r["task_id"] == t][0]
+        finally:
+            del os.environ["AGOPS_TRANSCRIPTS"]
+        self.assertIsNone(row["cost"])
+        self.assertIn("no transcript", row["note"])
+
+
 class TestWorktreeBrain(unittest.TestCase):
     """Coordination state must live in exactly ONE place. A session launched
     in a linked worktree used to resolve <worktree>/.agops and silently fork
