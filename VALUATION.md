@@ -185,6 +185,23 @@ Get liability language written before first flight: software as-is, operator res
 airworthiness, Part 137, chemical licensing and airspace. This is a 60-lb aircraft dispensing
 chemicals over other people's land — that clause is not boilerplate.
 
+### 5.1 When to charge more than the $7,500
+
+The $7,500 is scoped explicitly as Phase 1 — **everything through first flight** — and stops
+covering work at that boundary, not at a dollar amount. Triggers to charge beyond it:
+
+| Trigger | Why | What to charge |
+|---|---|---|
+| Spray hardware layer starts | The subsystem the business actually sells (+$25k–50k Frame B); not in Phase 1 scope | Separate fee, or roll into the retainer |
+| First flight happens, dev continues | Phase 1 fee doesn't buy indefinite support | Start the $750–1,500/mo retainer |
+| Copter airframe support (M5) or any second airframe | Roughly doubles addressable operator base; ArduPlane-only build doesn't cover it | Separate fee |
+| Second operator licensed | Stops being a bespoke build, becomes a product — Frame B stops applying | Revisit the whole pricing model, likely per-seat/per-operator, not just the number |
+| Scope creep before first flight | Requirements pushing past what 27k lines / 92 h already covers | Renegotiate the fixed fee itself |
+
+Guardrail: tie every trigger to a **milestone landing**, not hours spent — don't bill hourly
+against Claude session time, since cost basis there is meaningless. And none of this is
+invoiceable yet regardless of trigger — see the open item below, no agreement with Caleb exists.
+
 ---
 
 ## 6. Open items
