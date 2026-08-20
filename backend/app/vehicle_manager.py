@@ -37,6 +37,7 @@ from app.eventlog import log_event
 from app import config
 from app import guardian, keepout_watch
 from app import param_meta
+from app.terrain_service import TerrainService
 
 # Flight logs live next to the app package.
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -98,6 +99,18 @@ _CMD_TO_MAV = {
     "RTL": mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
 }
 _MAV_TO_CMD = {v: k for k, v in _CMD_TO_MAV.items()}
+
+# Altitude frames a mission item may use. RELATIVE_ALT means "above home", which
+# equals AGL only while the ground stays level with the launch point -- true
+# enough at Sabetha, false as a general contract (seam S3). TERRAIN_ALT makes
+# `alt` mean metres above the ground beneath the aircraft, which is what a spray
+# pass at 20 m actually wants, and it is what makes the terrain data we serve
+# load-bearing rather than decorative.
+_FRAME_TO_MAV = {
+    "relative": mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+    "terrain": mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT,
+}
+_MAV_TO_FRAME = {v: k for k, v in _FRAME_TO_MAV.items()}
 
 
 class LinkState:
@@ -198,6 +211,18 @@ class TelemetryData:
     # very differently from one in still air.
     wind_speed: float = 0.0
     wind_direction: float = 0.0
+    # Terrain following (TERRAIN_REPORT) — the AIRCRAFT's own view of whether it
+    # has ground data where it is, which is the only view that matters once it
+    # is flying. `terrain_spacing` 0 means it has none: ArduPilot sends the
+    # report either way and signals "no data" by zeroing the spacing, so a
+    # height of 0.0 with spacing 0 must never be read as "sea level".
+    # `terrain_pending` > 0 means blocks are still outstanding — the aircraft
+    # will not pass its pre-arm terrain check until that reaches 0.
+    terrain_spacing: int = 0
+    terrain_height: Optional[float] = None          # ground AMSL, m
+    terrain_current_height: Optional[float] = None  # aircraft above that ground, m
+    terrain_pending: int = 0
+    terrain_loaded: int = 0
 
 
 class VehicleManager:
@@ -221,6 +246,12 @@ class VehicleManager:
         # and when this connection came up so early quality isn't penalized.
         self._hb_times = deque(maxlen=30)
         self._connected_at = 0.0
+        # Serves TERRAIN_DATA from the bundled tiles. Constructed eagerly but
+        # loads its tiles lazily, so a bad/absent bundle surfaces as a logged
+        # refusal on the first request rather than as a failure to start.
+        self._terrain = TerrainService()
+        self._terrain_refusal_key = None
+        self._terrain_refusal_at = 0.0
         # Recent STATUSTEXT from the vehicle (prearm failures, failsafe
         # announcements) — the messages Mission Planner shows in its HUD.
         self._statustext = deque(maxlen=50)
@@ -980,6 +1011,28 @@ class VehicleManager:
                       severity=sev_name, text=text)
             return
 
+        if msg_type == "TERRAIN_REQUEST":
+            # The aircraft asking us for ground data. Answering is the whole of
+            # terrain following: ArduPilot keeps its own SD-card copy and fills
+            # it from what a GCS sends, so an unanswered request means it flies
+            # with no terrain model at all.
+            self._serve_terrain_request(msg)
+            return
+
+        if msg_type == "TERRAIN_REPORT":
+            with self._telem_lock:
+                spacing = int(getattr(msg, "spacing", 0))
+                self.telemetry.terrain_spacing = spacing
+                # spacing 0 is ArduPilot's "I have no data here" — the height
+                # fields are meaningless then, so don't publish them as numbers.
+                self.telemetry.terrain_height = (
+                    float(msg.terrain_height) if spacing else None)
+                self.telemetry.terrain_current_height = (
+                    float(msg.current_height) if spacing else None)
+                self.telemetry.terrain_pending = int(getattr(msg, "pending", 0))
+                self.telemetry.terrain_loaded = int(getattr(msg, "loaded", 0))
+            return
+
         if msg_type == "AUTOPILOT_VERSION":
             # Protocol capabilities + firmware version, fetched once on connect.
             # Lets us verify MISSION_INT/COMMAND_INT support instead of assuming.
@@ -1118,6 +1171,84 @@ class VehicleManager:
                 self.telemetry.home_lat = self.home_lat
                 self.telemetry.home_lon = self.home_lon
 
+    def _serve_terrain_request(self, msg):
+        """Answer one TERRAIN_REQUEST out of the bundled tiles.
+
+        A full mask is 56 TERRAIN_DATA messages (~2.4 KB). That sounds like a
+        lot for a 57600-baud radio, but ArduPilot rate-limits itself to one
+        block per 2 s per link, which bounds this at roughly a fifth of the
+        link — and terrain that loads slowly is terrain the aircraft refuses to
+        arm on, so answering promptly is the cheaper failure.
+        """
+        conn = self.connection
+        if conn is None:
+            return
+        try:
+            payloads = self._terrain.serve(
+                int(msg.lat), int(msg.lon), int(msg.grid_spacing), int(msg.mask))
+        except Exception as e:                      # never kill the telemetry loop
+            log_event("terrain", "serve_failed", level="ERROR", error=str(e))
+            return
+
+        if not payloads:
+            self._log_terrain_refusal()
+            return
+
+        try:
+            for p in payloads:
+                with self._send_lock:
+                    conn.mav.terrain_data_send(p["lat"], p["lon"],
+                                               p["grid_spacing"], p["gridbit"],
+                                               p["data"])
+        except Exception as e:
+            # A partial burst is fine: the aircraft re-requests whatever bits
+            # are still unset, so a dropped send costs 2 s, not correctness.
+            log_event("terrain", "send_failed", level="WARN", error=str(e))
+
+    def _log_terrain_refusal(self):
+        """Report a refusal to serve terrain — once, not every two seconds.
+
+        The aircraft re-asks every 2 s for as long as it is missing data, so
+        logging each one would bury the ops log. But staying quiet about it
+        would hide exactly the condition the bundling decision says must be
+        loud, so: log on every change of reason, and re-log a standing one
+        every 60 s so a long flight outside coverage keeps saying so.
+        """
+        refusal = self._terrain.last_refusal
+        if not refusal:
+            return
+        now = time.time()
+        key = (refusal.get("reason"), refusal.get("detail"))
+        if key == self._terrain_refusal_key and now - self._terrain_refusal_at < 60.0:
+            return
+        self._terrain_refusal_key = key
+        self._terrain_refusal_at = now
+        log_event("terrain", "refused", level="WARN",
+                  reason=refusal.get("reason"), detail=refusal.get("detail"))
+
+    def request_terrain_report(self, lat: float, lon: float) -> bool:
+        """Ask the aircraft what terrain IT has at a point (TERRAIN_CHECK).
+
+        The answer arrives asynchronously as TERRAIN_REPORT and lands in
+        telemetry. This is how preflight can ask the aircraft directly rather
+        than inferring from our own tiles that it must be fine — the GCS having
+        a tile and the aircraft having loaded it are different facts.
+        """
+        conn = self.connection
+        if conn is None:
+            return False
+        try:
+            with self._send_lock:
+                conn.mav.terrain_check_send(int(lat * 1e7), int(lon * 1e7))
+            return True
+        except Exception as e:
+            log_event("terrain", "check_failed", level="WARN", error=str(e))
+            return False
+
+    def terrain_status(self) -> dict:
+        """What we have served and refused, plus the bundle's own coverage."""
+        return self._terrain.snapshot()
+
     def snapshot(self) -> dict:
         """Thread-safe copy of the vehicle state plus link-health fields.
         This is the single source the API serves — routers must not read
@@ -1145,6 +1276,8 @@ class VehicleManager:
             d["guardian"] = dict(self._guardian)
         with self._param_lock:
             d["param_sync"] = dict(self._param_sync)
+        # What we've served the aircraft, and any standing refusal to.
+        d["terrain"] = self._terrain.snapshot()
         # Link quality: fraction of expected 1Hz vehicle heartbeats actually
         # received over the last 10 s (window shrinks right after connect so a
         # fresh link isn't reported as degraded).
@@ -1957,10 +2090,12 @@ class VehicleManager:
             it = full[seq]
             cmd = _CMD_TO_MAV.get(it.get("command", "WAYPOINT"),
                                   mavutil.mavlink.MAV_CMD_NAV_WAYPOINT)
+            frame = _FRAME_TO_MAV.get(it.get("frame") or "relative",
+                                      mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT)
             with self._send_lock:
                 conn.mav.mission_item_int_send(
                     conn.target_system, conn.target_component, seq,
-                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                    frame,
                     cmd, 0, 1,
                     # param1 = hold time / command-specific; param3 = loiter
                     # radius for LOITER items (ArduPlane convention).
@@ -2013,11 +2148,13 @@ class VehicleManager:
         ok = ack is not None and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED
         if ok:
             self.telemetry.mission_count = len(items)
-        result = {"ok": ok, "ack": (ack.type if ack else None), "count": len(items)}
+        frames = sorted({(it.get("frame") or "relative") for it in items})
+        result = {"ok": ok, "ack": (ack.type if ack else None), "count": len(items),
+                  "frames": frames}
         if not ok:
             result["error"] = error or f"vehicle rejected mission (MISSION_ACK type {ack.type})"
         log_event("mission", "upload", level="INFO" if ok else "ERROR",
-                  ok=ok, count=len(items), ack=result["ack"],
+                  ok=ok, count=len(items), ack=result["ack"], frames=frames,
                   error=result.get("error"))
         return result
 
@@ -2048,8 +2185,11 @@ class VehicleManager:
                     lat, lon = item.x / 1e7, item.y / 1e7
                 else:
                     lat, lon = item.x, item.y
+                # Report the frame back so a download/upload round trip cannot
+                # silently demote a terrain-following leg to above-home.
                 result.append({"seq": item.seq, "command": cmd_name,
-                               "lat": lat, "lon": lon, "alt": item.z})
+                               "lat": lat, "lon": lon, "alt": item.z,
+                               "frame": _MAV_TO_FRAME.get(item.frame, "relative")})
             # Close the transaction so the vehicle stops expecting more requests.
             with self._send_lock:
                 conn.mav.mission_ack_send(conn.target_system, conn.target_component,

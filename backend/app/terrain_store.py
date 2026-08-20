@@ -198,6 +198,29 @@ class TerrainStore:
     def covers(self, lat: float, lon: float) -> bool:
         return (math.floor(lat), math.floor(lon)) in self._tiles
 
+    def has_tile(self, lat_degrees: int, lon_degrees: int) -> bool:
+        return (lat_degrees, lon_degrees) in self._tiles
+
+    def block_at(self, lat_degrees: int, lon_degrees: int,
+                 grid_idx_x: int, grid_idx_y: int) -> tf.Block:
+        """One raw block, addressed the way the aircraft addresses it.
+
+        This is what serving `TERRAIN_DATA` needs — whole blocks rather than an
+        interpolated height. Raises `TerrainCoverageError` if the tile is not
+        bundled or the indices fall outside it.
+        """
+        tile = self._tiles.get((lat_degrees, lon_degrees))
+        if tile is None:
+            name = tf.tile_name(lat_degrees, lon_degrees)
+            raise TerrainCoverageError(
+                "no bundled terrain for tile %s (have: %s)"
+                % (name, ", ".join(self.tile_names())), missing_tiles=[name])
+        if grid_idx_x < 0 or grid_idx_y < 0 or grid_idx_y >= tile.stride:
+            raise TerrainCoverageError(
+                "block index (%d, %d) is outside %s, whose rows are %u blocks wide"
+                % (grid_idx_x, grid_idx_y, tile.path.name, tile.stride))
+        return tile.block(tile.stride * grid_idx_x + grid_idx_y)
+
     def missing_for(self, points) -> list:
         """Tile names needed by these (lat, lon) points that we do not have."""
         missing = []
