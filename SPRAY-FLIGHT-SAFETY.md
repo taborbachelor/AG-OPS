@@ -41,9 +41,17 @@ Originally written 2026-08-14 from a read-only pass over the backend (`guardian.
 actively owned the repo.
 
 ## ~~Open question~~ ANSWERED 2026-08-18: a real spray pass flies **10–25 m AGL**
-Confirmed by the user. `CoverageRequest.alt` still defaults to 100 m, so the default is now known
-to be ~4-10x the real operating altitude — that default is a live decision to revisit, not a
-setting anyone has validated for spray work.
+Confirmed by the user. **The default now matches: `coverage.DEFAULT_SPRAY_ALT_M = 20.0` as of
+2026-08-19 (`0491ffd`), closing the PLANNER half of LANES seam S3.** It was 100 m — ~4-10x the real
+operating altitude — for the whole period the analysis below was written in, so read that analysis
+as the reasoning that led here, not as a description of the current default.
+
+**Two consequences that came with the change, both live:**
+- **Transit legs between fields inherit spray altitude**, so a multi-field job now crosses at 20 m
+  over roads, farmsteads and treelines, and those legs are deliberately NOT rerouted around
+  ordinary keepouts (only powerline hazards). LANES seam **S7** — undecided, not a bug.
+- **The customer site was missed by the fix:** `web/src/SprayPlanPreview.jsx:13` still posts
+  `PREVIEW_ALT_M = 100`, so the preview a customer sees is planned at the old placeholder.
 
 **What that answer reorders:** the low-altitude items below stop being theoretical. At 10–25 m
 the aircraft is inside the wire-strike envelope (rural distribution lines run ~8–12 m, transmission

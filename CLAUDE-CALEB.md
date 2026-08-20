@@ -34,6 +34,51 @@
 > decisions log** — the cross-lane agreements (bank limits, altitude semantics, who renders what)
 > live there and nothing replaced them.
 >
+> ### 🔴 SEAM PASS, 2026-08-19 evening (TASK-013, charlie) — READ BEFORE THE NEXT FLIGHT
+> **The one that matters: two safety features that landed today are not reachable, and a third
+> fails silently.** All three verified by hand, not taken from a summary.
+>
+> 1. **Rally points are dead in production.** `2a581b3` added them so a link-loss RTL diverts around
+>    mapped powerlines instead of flying home through one. **No frontend file ever sends
+>    `rally_points`** — 0 hits across `frontend/src` *and* `web/src` — so `rally.attempted` is always
+>    false and the feature has never run outside its tests. Seam **S8**.
+> 2. **A failed onboard fence upload reads as success.** `POST /api/safety/keepouts` returns
+>    `fence.ok` / `fence.error` / `fence.not_fenced` (`routers/safety.py:234-248`); the backend
+>    refuses bad geometry on purpose and its own comment says never let it "read as a successful
+>    fence". **`SprayPanel.jsx` references neither `fence` nor `rally`** — it prints "proximity
+>    monitor armed ✓" from the ring counts alone. A surveyed powerline that could not be fenced looks
+>    identical to one that was. The soft GCS monitor and the hard onboard fence are different
+>    protections and only the fence survives link loss. Seam **S8**.
+> 3. **The whole safety read-back layer has no UI.** `GET /safety/keepouts`, `/exclusions`, `/rally`,
+>    `/guardian` — 0 frontend callers each. Same for `guardian.monitors.*` (live metres-to-powerline,
+>    RTL energy margin, measured bank — `grep -ro "monitors" frontend/src` returns **0**) and for
+>    `statustext`, where ArduPilot's own "PreArm:" / "Polygon fence breached" / "EKF variance"
+>    messages land: **0 hits, case-insensitive, whole tree**. Seam **S9**.
+>
+> **Paired defaults that have drifted** (the operator-facing copy is the one that flies — now a
+> pinned decision in the LANES log):
+> - `swath`: backend `20` (`routers/coverage_multi.py:21`), UI `useState(40)`
+>   (`SprayPanel.jsx:70`). UI wins; an API client and the GCS plan the same field differently.
+> - `alt`: fixed today to 20 m in three backend models + `SprayPanel.jsx`, **but this pass found a
+>   fifth copy the fix missed** — `web/src/SprayPlanPreview.jsx:13` `PREVIEW_ALT_M = 100`. The
+>   customer site still previews at the placeholder altitude.
+> - battery: pre-flight fails the arm gate at `≤ 30` (`preflight.py:48`) while the advisory warns at
+>   `< 25` (`AlertCenter.jsx:30`). Between 25 and 30 the gate refuses with no prior warning.
+> - SITL: `sim.py` derives the port from `SITL_INSTANCE`, `ConnectionOverlay.jsx:87` hardcodes
+>   `tcp:127.0.0.1:5760`. Overlaps bravo's in-flight TASK-006 — do not fix from the UI side alone.
+>
+> **Test-only surfaces (green tests, no production caller):** the entire `bench` router (5 routes),
+> params backup/restore/sync, `/sim/{status,stop,fault}`, `/telemetry/` REST, `/logs/events`, and
+> `/connection/detect` — that last one added by charlie this evening in `8195f3a` and superseded by
+> `/ports` before it ever had a caller. **True orphans (nothing calls them at all):**
+> `/vehicle/modes`, `/coverage/plan_auto`, `/zones/`, `/fields/`, `GET /orders/`, and
+> `POST /orders/{id}/status` — meaning **nothing in the product can advance a customer order past
+> `paid`**.
+>
+> ⚠️ **SCOPE — this pass is NOT complete.** Its own task says to run it *after* the wave lands, and
+> alpha (TASK-004), bravo (TASK-006) and delta (TASK-008) were all still WORKING with uncommitted
+> files in the tree. **Committed work only was audited.** Those three need a second pass.
+>
 > **What landed 2026-08-19 after the block below was written** (all pushed):
 > - **Planner turn geometry** (`57f1a57`) — the serpentine demanded **73° of bank**, past what the
 >   airframe can fly, which is why SITL measured 50-65°: the autopilot was saturating its roll limit
@@ -76,7 +121,7 @@
 > while the gate was unreachable and would have refused to arm. Absent a verdict it now reads CHECKING
 > and never a pass. **42 frontend tests green** (was 16); every fix mutation-checked.
 > - 💰 **Billing + valuation now live in `VALUATION.md`** (repo root, added 2026-08-19). Cost ledger, labour ledger, three valuation frames with their inputs, the milestones that move the number, and the terms to ask Caleb for. Update it with **`py tools\session_cost.py --new`** at the end of any working session — do not hand-parse transcripts, and do not start a second table anywhere. Current state: token basis **$1,767**, all-in cost (labour included) **≈$8,500**, replacement cost **$180k–340k**, recommended ask **$7,500** + retainer + per-acre royalty. **Nothing has been invoiced since 2026-08-14** — everything from 08-15 onward is unbilled, and no agreement with Caleb exists yet. That conversation is the open item, not the arithmetic.
-> - 🔴 **`AgOpsGCS.exe` DOES NOT EXIST on this machine.** (It was built 2026-08-15 on the previous machine — 53.7MB, smoke-tested — but that binary is not here, and it predates everything since the hardening pass anyway.) **A Cube bench day right now would have nothing to run.** Rebuild per README: `cd frontend; npm run build` then `cd backend; .\venv\Scripts\pyinstaller.exe AgOpsGCS.spec --noconfirm`. Note the kill-by-name gotcha — the onefile bootloader spawns a child, so killing the launched pid leaves the server on :8000.
+> - ✅ **`AgOpsGCS.exe` EXISTS again** — `backend/dist/AgOpsGCS.exe`, 61.0 MB, rebuilt 2026-08-19 23:42 by delta (which also bundled the terrain tiles into it, `fd05851`). The long-standing red "a bench day has nothing to run" note is CLEARED. Rebuild per README: `cd frontend; npm run build` then `cd backend; .env\Scripts\pyinstaller.exe AgOpsGCS.spec --noconfirm`. Note the kill-by-name gotcha — the onefile bootloader spawns a child, so killing the launched pid leaves the server on :8000.
 >
 > **Next-work menu:**
 > 1. ~~**3D scene eyeball check (user's eyes required)**~~ **RESOLVED BY MEASUREMENT 2026-08-19
@@ -97,10 +142,10 @@
 > model reads as an aircraft (fin up, sane proportions) and that the CHASE camera frames it sensibly —
 > that path uses `HeadingPitchRange`, needs WebGL, and is not covered here.
 > 2. **Real Cube bench day** whenever hardware returns (Caleb's telemetry radio + receiver still pending): follow the `bench` scenario sequence — params backup → surface/servo tests → calibrations → first-flight bundle `POST /api/bench/first-flight-params {cells, apply:true}`. Data-USB → COM (115200); **PROP OFF; flight battery only after.**
-> 3. ~~**Turn-geometry bank constraint in `coverage.py`**~~ **DONE 2026-08-19** (session bravo, PLANNER lane). The planner stopped turning onto the adjacent pass: it flies every Nth line and fills the gaps on later sweeps so each reversal has `2·R_min` of room at the planned speed. **Coverage is bit-identical — only the flight ORDER changes** — and the cost is path length: **73.2° → 25.3° of commanded bank on a 40-acre Sabetha-shaped field, at +38% flight distance** (+19% on 400×200 m). Default ceiling `coverage.DEFAULT_MAX_BANK_DEG = 25.0`; `max_bank=0` on either coverage endpoint restores the old serpentine. **The number that reframes the whole finding: the old adjacent-line plan demanded 73°, which the airframe cannot fly — so the measured 50-65° was the autopilot saturating its roll limit against an unflyable plan, not a tuning problem.** Every plan now reports `stats.turn_bank_deg` / `turn_bank_ok` / `turn_radius_m` / `turn_max_speed_ms`; a field too narrow to meet the limit gets the widest turns available plus `turn_bank_ok: false` and the speed that WOULD meet it. **Open follow-ups:** nothing renders those numbers yet (LANES seam **S5**, UI lane), and the 25° vs guardian's 31.5° low-altitude threshold pairing is **seam S2, proposed by bravo and awaiting AIR**. Full writeup: `SPRAY-FLIGHT-SAFETY.md` closing section. The 100 m `CoverageRequest.alt` default is still a known-wrong placeholder — untouched here on purpose, it is seam **S3** (AIR + PLANNER jointly).
+> 3. ~~**Turn-geometry bank constraint in `coverage.py`**~~ **DONE 2026-08-19** (session bravo, PLANNER lane). The planner stopped turning onto the adjacent pass: it flies every Nth line and fills the gaps on later sweeps so each reversal has `2·R_min` of room at the planned speed. **Coverage is bit-identical — only the flight ORDER changes** — and the cost is path length: **73.2° → 25.3° of commanded bank on a 40-acre Sabetha-shaped field, at +38% flight distance** (+19% on 400×200 m). Default ceiling `coverage.DEFAULT_MAX_BANK_DEG = 25.0`; `max_bank=0` on either coverage endpoint restores the old serpentine. **The number that reframes the whole finding: the old adjacent-line plan demanded 73°, which the airframe cannot fly — so the measured 50-65° was the autopilot saturating its roll limit against an unflyable plan, not a tuning problem.** Every plan now reports `stats.turn_bank_deg` / `turn_bank_ok` / `turn_radius_m` / `turn_max_speed_ms`; a field too narrow to meet the limit gets the widest turns available plus `turn_bank_ok: false` and the speed that WOULD meet it. **Open follow-ups:** nothing renders those numbers yet (LANES seam **S5**, UI lane), and the 25° vs guardian's 31.5° low-altitude threshold pairing is **seam S2, proposed by bravo and awaiting AIR**. Full writeup: `SPRAY-FLIGHT-SAFETY.md` closing section. **S3 UPDATE:** the 100 m `CoverageRequest.alt` placeholder is GONE — `coverage.DEFAULT_SPRAY_ALT_M = 20.0` (`0491ffd`), closing S3's PLANNER half; AIR still owns the frame (`MAV_FRAME_GLOBAL_TERRAIN_ALT`). Consequence raised as seam **S7**: transit legs inherit spray altitude, so multi-field jobs now cross at 20 m.
 > 4. ~~**Headlands**~~ **DONE 2026-08-19** (session bravo, PLANNER lane). **The measurement changed the fix, so read this before assuming the old framing.** Mapping where the missed ground actually sits: on a field with a *traced* boundary, 0.93 acres missed — **0.76 along the field edge and only 0.17 around the keepout.** It is a boundary problem first, and the “perimeter passes close the strip alongside a keepout” framing this note used to carry was wrong on both counts. **Mechanism:** a pass sprays a swath-deep BAND but was clipped to where the boundary sits at the line through the band’s middle, so every row in the band where the field reaches further out was missed — a sawtooth along any edge not parallel to the passes. **Fix:** widen each pass to cover its own band; the extremes are exact rather than sampled (between vertices an edge is straight, so the widest crossing is at a band edge or a vertex inside the band). **Result: 97.6% to 99.6% coverage, 0.93 to 0.17 acres missed, +3.2% path length**, and `coverage_pct` is what verifies it, as predicted. **Deliberately NOT a perimeter lap** — a boundary ring’s corners are 90° turns at a point, the same unflyable geometry item 3 just removed; widening adds no passes and no turns. **Cost:** spray reaches up to half a swath past the boundary where an edge slants away (geometrically bounded; measured worst 9.1 m against a 10 m half-swath) — pass `headlands=false` on either coverage endpoint for an organic neighbour, road or waterway. The residual 0.17 acres is the keepout share, left unclosed on purpose: closing it means spraying inside a drift buffer that has tests asserting it.
 > 5. **SITL harness port fix (Lane D item 3)** — `tests/sitl/harness.py` hardcodes `tcp:127.0.0.1:5760`; teardown never proves the port is free. This is why parallel runs fail with a different scenario set each time. 14 scenarios now ride on it.
-> 6. **Rebuild `AgOpsGCS.exe`** — see the red note above; a bench day currently has nothing to run.
+> 6. ~~**Rebuild `AgOpsGCS.exe`**~~ **DONE 2026-08-19 (delta)** — see above; it now also carries the bundled SRTM tiles.
 > 7. ~~**Post-flight scorecard UI**~~ **DONE 2026-08-19 (charlie).** A scorecard panel rendered from the
 > playback view, with a badge on the list rows that have a card. It carries the writer's invariants
 > rather than softening them: an extreme that was never measured is `null` and renders as a dash, never
@@ -115,7 +160,7 @@
 > UNCLAIMED).** Every plan now reports `stats.turn_bank_deg` / `turn_bank_ok` / `turn_radius_m` /
 > `turn_max_speed_ms`, and **nothing renders any of them** — including `turn_bank_ok: false`, the case
 > where a field is too narrow to meet the bank limit and the operator most needs telling. This is the
-> SAME seam class as the two bugs charlie just fixed. The UI lane is free.
+> SAME seam class as the two bugs charlie just fixed. **CLOSED 2026-08-19 by `065abf6`** — `SprayPanel.jsx:389` renders the bank-limit warning and `:612-616` the limit and `turn_max_speed_ms`. Seam S5 is done; S6 (headland toggle) likewise, by `7513191`.
 >
 > **The 2026-08-19 three-session day, one line each:** **AIR/alpha** — onboard exclusion fences pushed
 > to the flight controller (`45faa48`), then the link moved to **MAVLink 2** with fences proven on the
@@ -288,8 +333,8 @@ Full interactive docs at `http://localhost:8000/docs` once the backend is runnin
 
 #### Still TODO (reordered 2026-08-18)
 - ~~**BLOCKING QUESTION** about spray altitude~~ **ANSWERED 2026-08-18: a real spray pass flies
-  10–25 m AGL.** `CoverageRequest.alt` still defaults to **100 m**, i.e. ~4-10x the real operating
-  altitude — that default is now a known-wrong placeholder to revisit, not a validated setting.
+  10–25 m AGL.** ~~`CoverageRequest.alt` still defaults to **100 m**~~ **FIXED 2026-08-19 (`0491ffd`):** the default is now 20 m AGL. The paragraph below is kept for the reasoning,
+  not for the number. NOTE the customer site was missed: `web/src/SprayPlanPreview.jsx:13` still previews at 100 m.
   Consequences: at 10–25 m the aircraft is INSIDE the wire-strike envelope (rural distribution
   lines ~8–12 m, transmission ~20–45 m), so powerline keepouts + connector-leg rerouting are
   airframe survival rather than spray quality; bank-angle (#4) and terrain/AGL (#8) move up,
@@ -731,7 +776,7 @@ parallel session is active.
 - **Still TODO rewritten and reordered** into a start-now list (SITL scenario proof → live
   keepout-proximity → powerline keepouts → post-flight scorecard → bank-angle/wind → M5 → M7 →
   alert-threshold unification), with the two blocking questions for Caleb promoted to the top:
-  the real spray altitude (`CoverageRequest.alt` still defaults to 100m AGL, which reorders every
+  the real spray altitude (`CoverageRequest.alt` defaulted to 100m AGL until `0491ffd` set it to 20 m, which reorders every
   low-altitude safety item) and what sensing the pump path actually has.
 - **Billing state corrected:** the resume block claimed 2026-08-15 was the only unbilled session.
   Four are unbilled — 2026-08-15 (hardening), 2026-08-15 (guardian monitors), 2026-08-16
