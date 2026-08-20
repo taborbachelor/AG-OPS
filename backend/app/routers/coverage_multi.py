@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.coverage import DEFAULT_MAX_BANK_DEG
+from app.coverage import DEFAULT_MAX_BANK_DEG, DEFAULT_SPRAY_ALT_M
 from app.coverage_multi import plan_multi
 from app.gis_zones import fetch_zones
 
@@ -19,7 +19,7 @@ class LatLon(BaseModel):
 class MultiRequest(BaseModel):
     fields: list = Field(min_length=1, max_length=25)  # list[list[LatLon]] checked below
     swath: float = Field(20, gt=0.5, lt=200)
-    alt: float = Field(100, gt=0, le=500)
+    alt: float = Field(DEFAULT_SPRAY_ALT_M, gt=0, le=500)
     speed: float = Field(18, gt=1, le=80)
     water_buffer: float = Field(15, ge=0, le=200)
     tree_buffer: float = Field(10, ge=0, le=200)

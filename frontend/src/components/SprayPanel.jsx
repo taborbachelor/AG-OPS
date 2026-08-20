@@ -6,6 +6,14 @@ const SQ_M_PER_ACRE = 4046.8564224;
 const EARTH_R = 6371000;
 const DEG = Math.PI / 180;
 
+// Metres AGL. This form always sends `alt`, so THIS is the number an operator
+// actually flies — the backend's request default only applies to API clients
+// that omit it. Must match coverage.py's DEFAULT_SPRAY_ALT_M, which carries the
+// full rationale (real spray is 10-25 m; the old 100 m was a placeholder, and
+// it put a "spray pass" above the altitude band guardian's low-altitude bank
+// limit assumes). Change both together. LANES.md seam S3.
+const DEFAULT_SPRAY_ALT_M = 20;
+
 // Planar shoelace on an equirectangular projection (x scaled by cos(lat)).
 function polyAcres(pts) {
   if (!pts || pts.length < 3) return 0;
@@ -60,7 +68,7 @@ function SprayPanel({
   const [orderId, setOrderId] = useState('');
   const [order, setOrder] = useState(null);
   const [swath, setSwath] = useState(40);
-  const [alt, setAlt] = useState(100);
+  const [alt, setAlt] = useState(DEFAULT_SPRAY_ALT_M);
   // Pass widening (backend default true): passes reach the full boundary at
   // the cost of up to half a swath of overspray past the edge. Off = spray
   // stops exactly at the line, but a thin strip near the boundary may go

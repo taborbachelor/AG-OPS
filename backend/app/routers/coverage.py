@@ -11,7 +11,8 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.coverage import DEFAULT_MAX_BANK_DEG, EARTH_RADIUS_M, plan_coverage
+from app.coverage import (DEFAULT_MAX_BANK_DEG, DEFAULT_SPRAY_ALT_M,
+                          EARTH_RADIUS_M, plan_coverage)
 from app.gis_zones import fetch_zones
 
 router = APIRouter()
@@ -27,7 +28,9 @@ class CoverageRequest(BaseModel):
     # against pathological payloads rather than real use.
     polygon: list[LatLon] = Field(..., min_length=3, max_length=500)
     swath: float = Field(20.0, gt=0.5, lt=200)   # m between passes
-    alt: float = Field(100.0, gt=0, le=500)      # m AGL for every waypoint
+    # m AGL for every waypoint. The ceiling stays 500 — a ferry or scouting
+    # plan may legitimately fly high; only the DEFAULT is a spray altitude.
+    alt: float = Field(DEFAULT_SPRAY_ALT_M, gt=0, le=500)
     angle: Optional[float] = None                # deg CCW from east; None = auto
     # m/s, for the time estimate only. Deliberately NOT a Field(gt/le)
     # constraint: on this FastAPI/starlette stack a pydantic rejection echoes
@@ -65,7 +68,7 @@ class AutoCoverageRequest(BaseModel):
     """Plan request that discovers its own keepouts from OSM zones."""
     polygon: list[LatLon] = Field(..., min_length=3, max_length=500)
     swath: float = Field(20.0, gt=0.5, lt=200)
-    alt: float = Field(100.0, gt=0, le=500)
+    alt: float = Field(DEFAULT_SPRAY_ALT_M, gt=0, le=500)
     angle: Optional[float] = None
     speed: float = 18.0     # checked by _check_speed (see CoverageRequest)
     # Per-kind standoffs (m). Water defaults widest: drift into a pond is the

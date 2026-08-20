@@ -42,6 +42,28 @@ DEFAULT_MAX_BANK_DEG = 25.0
 
 # Full rationale, physics and limits: the turn-geometry section further down.
 
+# Default spray altitude, in metres AGL. Real aerial application flies 10-25 m;
+# this sits mid-band. It replaces a 100 m placeholder that was never a spray
+# altitude -- at 100 m the boom is far too high to put chemical where it is
+# aimed, and drift is the whole problem the swath number exists to control.
+#
+# The units are AGL by ruling, not by accident: see LANES.md seam S3. Mission
+# items ship MAV_FRAME_GLOBAL_RELATIVE_ALT today, which equals AGL only while
+# the ground is level with home; AIR owns moving spray legs to
+# MAV_FRAME_GLOBAL_TERRAIN_ALT. The number is wrong under either reading of the
+# frame, so it does not wait on that work.
+#
+# It also makes seam S2's premise true. That agreement assumes a spray pass sits
+# entirely below guardian's bank_low_alt_m (30 m), where the bank warning
+# tightens to 31.5 deg and the planner's 25 deg ceiling has to fit under it. At
+# the old 100 m default a "spray pass" was nowhere near that band, so the
+# constraint the two lanes agreed on was not the one being flown.
+#
+# The UI carries its own copy of this number (SprayPanel.jsx) because the
+# operator's form is what actually gets sent -- the request default only applies
+# to API clients that omit alt. Change both together.
+DEFAULT_SPRAY_ALT_M = 20.0
+
 
 def plan_coverage(
     polygon: list[dict],
