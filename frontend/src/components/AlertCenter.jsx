@@ -43,6 +43,35 @@ const SPOKEN = {
   keepout: 'Hazard proximity',
 };
 
+// --- The vehicle's own messages --------------------------------------------
+// ArduPilot talks: "PreArm: Radio failsafe on", "Polygon fence breached",
+// "EKF variance", "Throttle failsafe on". Every one of those is the flight
+// controller telling the operator something no GCS-side monitor can know, and
+// until now they were parsed, ring-buffered, logged -- and never displayed.
+// The backend keeps the last five in `telemetry.statustext`.
+//
+// Deliberately NOT spoken and NOT dismissible. These are a feed, not an
+// annunciator: the guardian's warnings above are judged conditions that clear
+// themselves, while this is a transcript. Speaking it would put ArduPilot's
+// routine chatter over the top of the callouts that matter.
+//
+// MAV severities 0-7 are EMERGENCY..DEBUG; 0-3 are real failures, 4 is a
+// warning, the rest are informational.
+const SEV_CLASS = (sev) => (sev <= 3 ? 'red' : sev === 4 ? 'amber' : 'info');
+
+/** Newest first, and never presented as live when the link is down: with no
+ *  telemetry these five are the last thing we heard, not the current state. */
+export function statusFeed(telemetry, connected) {
+  const raw = (telemetry && telemetry.statustext) || [];
+  const items = raw.slice().reverse().map((m, i) => ({
+    key: `${m.t}:${i}`,
+    sev: SEV_CLASS(m.severity),
+    severity_name: m.severity_name,
+    text: m.text,
+  }));
+  return { items, stale: !connected && items.length > 0 };
+}
+
 const speak = (text) => {
   try {
     const u = new SpeechSynthesisUtterance(text);
@@ -153,6 +182,8 @@ function AlertCenter({ telemetry, connected, reconnecting }) {
     });
   }, [telemetry, connected, reconnecting, voiceOn, dismissed]);
 
+  const feed = statusFeed(telemetry, connected);
+
   const toggleVoice = () => {
     setVoiceOn((v) => {
       localStorage.setItem('gcs_voice', v ? 'off' : 'on');
@@ -169,6 +200,21 @@ function AlertCenter({ telemetry, connected, reconnecting }) {
             onClick={() => setDismissed((d) => ({ ...d, [a.id]: true }))}>×</button>
         </div>
       ))}
+      {feed.items.length > 0 && (
+        <div className="statustext-feed">
+          <div className="stf-head">
+            VEHICLE MESSAGES
+            {feed.stale && <span className="stf-stale"> — LAST HEARD, LINK DOWN</span>}
+          </div>
+          {feed.items.map((m) => (
+            <div key={m.key} className={`stf-line ${m.sev}`}>
+              <span className="stf-sev">{m.severity_name}</span>
+              <span className="stf-text">{m.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <button
         className={`voice-toggle ${voiceOn ? 'on' : ''}`}
         onClick={toggleVoice}
