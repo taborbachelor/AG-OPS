@@ -24,10 +24,17 @@
 - Note: Completely separate from Relevyn
 
 > ### ▶ RESUME HERE (start of next session)
-> **🔴 FIRST ACTION: PUSH. 19 commits are LOCAL ONLY** as of 2026-08-20 (`git status -sb` → `ahead 19`).
-> Everything below this line exists only on this machine. The board's COMPLETE column says LOCAL ONLY
-> on almost every task tonight, which is the monitor doing its job: "complete" is a claim about the
-> board, "pushed" is a claim about the world, and they had come apart. Take `git-push` first.
+> **✅ PUSHED AND CLEAN as of 2026-08-20 12:30.** Working tree clean, `main` in sync with
+> `origin/main`, every completed task on the board reads PUSHED, and all agent sessions were
+> retired to OFFLINE for a fresh start. The board is: **TASK-015, 016, 017, 018 OPEN, nothing in
+> progress.** (Historical note, kept because the board column earned it: 23 commits sat LOCAL ONLY
+> overnight before this push.)
+>
+> **The exe now has provenance.** `py tools\exe_status.py` answers "is the binary current, and
+> from what" — it currently reports **STALE by one commit** (`bca1bc6`), which is **TASK-018**.
+> Judged benign: the delta is confined to the SITL fault-injection path, nothing that flies on a
+> real Cube. `dist/` is gitignored, so `backend/BUILD-PROVENANCE.json` is the binary's only record
+> and **`--stamp` must run in the same breath as every pyinstaller**.
 >
 > **🟢 COORDINATION IS `AgOps`. Start at `.agops/RUNBOOK.md`.** Work is DISPATCHED, not taken — Tabor
 > assigns; you do not claim. Board: `py tools\agops.py monitor`, or `tools\monitor.cmd` for a live one.
@@ -89,6 +96,9 @@
 >   the hazard while every check still passed. Writing it is a behavioural decision on a live airframe.
 >
 > #### Tooling added 2026-08-20 (all tested, 107 tests green)
+> - **`py tools\exe_status.py`** — is the packaged binary current, and built from what. `dist/` is
+>   gitignored so `backend/BUILD-PROVENANCE.json` is its only record; **`--stamp` runs in the same
+>   breath as every pyinstaller**, or the artifact goes straight back to unknown.
 > - **`py tools\seam_check.py`** — every route nothing calls, matched on METHOD as well as path
 >   (`--ui` = which routes no operator can reach, `--strict` for CI). **Rule 4b: run it before
 >   completing anything that adds a route.** It found the terrain endpoint orphaned while it was still
@@ -104,15 +114,21 @@
 >   `CLAUDE_CODE_SESSION_ID`, so every `/agops-join` minted a ghost agent. Six appeared in one evening.
 >   **Launch sessions with `claude --session-id <uuid>`** to keep names across restarts.
 >
-> #### Board state at handoff
-> TASK-001…014 COMPLETE except **TASK-011 IN_PROGRESS** (alpha, holds `sitl-5760`, has uncommitted
-> `LANES.md` decisions — do not commit them for it) and **TASK-015 BLOCKED** (M7, plan committed).
-> **OPEN: TASK-016** (M5 mission model/resume) and **TASK-017** (customer-site 3D field preview).
-> Three of the four agent sessions went stale overnight; `py tools\agops.py recover` inspects without
-> destroying anything.
+> #### Board state at handoff — clean slate
+> **TASK-001…014 all COMPLETE and PUSHED. Nothing in progress. No agent is registered live.**
+> Four tasks OPEN and dispatchable:
 >
-> **Recommended next dispatch:** the UI seams (S8 first — it is the one where a failed powerline fence
-> currently reads as success), then M5. Do NOT start M7 outside a worktree.
+> | | | |
+> |---|---|---|
+> | **TASK-015** | M7: split `vehicle_manager.py` | Plan committed at `23184c8`, **zero code moved**. Resume at plan step 1 (dispatch registry), then step 2 (public accessors). **Launch with `claude --worktree m7-split`** — the original blocker was purely that delta could not relaunch itself. AIR no longer has to be idle; isolation replaces that reason. |
+> | **TASK-016** | M5: mission model and resume | Not started |
+> | **TASK-017** | Customer-site 3D field preview | Not started, LOW |
+> | **TASK-018** | Rebuild the exe onto HEAD, re-stamp | `exe_status.py` says STALE by `bca1bc6`. Benign (SITL fault-injection path only) but a bench day deserves a binary built from HEAD |
+>
+> **Recommended next dispatch, in priority order:** the **UI seams** are the highest-value work on
+> the board and are not yet ticketed — **S8 first**, where a failed powerline fence upload currently
+> reads as success and rally points have never been sent at all. Then S9/S10, then M5. TASK-018 is a
+> good warm-up for whoever takes OPS. **Do NOT start M7 outside a worktree.**
 >
 > ---
 >

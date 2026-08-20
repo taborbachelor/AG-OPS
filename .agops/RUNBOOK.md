@@ -226,6 +226,24 @@ the work genuinely produced none. COMPLETE with nothing to point at is a claim
 nobody can check — TASK-005 sat that way for a day and nobody could say whether
 the exe existed.
 
+## Before a bench day
+
+```
+py tools\exe_status.py            is the packaged binary current, and from what
+py tools\exe_status.py --stamp    run this immediately after every pyinstaller
+```
+
+`dist/` is gitignored, so the binary has no commit and no provenance of its own —
+which is why TASK-005 sat COMPLETE for a day with nobody able to say what was in
+it, and why the answer turned out to be bad: that binary predated `6c7a692` and
+shipped powerline exclusion fences that were stored and never enforced. A bench
+day on it would have flown with the operator's keepouts inert.
+
+`backend/BUILD-PROVENANCE.json` is tracked, and the checker compares it against
+git. **Stamping is not optional bookkeeping** — a rebuild without a stamp puts
+the artifact straight back into the unknown state. Only `backend/app` and
+`frontend/src` count as shipped code, so a docs commit never cries stale.
+
 ## Waiting on a lock
 
 ```
