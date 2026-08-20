@@ -1,25 +1,35 @@
-import { useEffect, useRef, useState } from 'react'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
+import { lazy, Suspense, useEffect, useState } from 'react'
 
-// Same imagery as the drawing step so the review map looks familiar.
-const ESRI_WORLD_IMAGERY =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+import PlanMap2D from './PlanMap2D'
+import { planAltitude } from './preview3d'
+
+// Cesium is several megabytes of runtime. Loading it eagerly would tax every
+// visitor to a booking funnel — including the ones who never open the 3D view
+// — so it is fetched on first switch to 3D and never before.
+const FieldPreview3D = lazy(() => import('./FieldPreview3D'))
 
 // Preview assumptions sent to the planner. The spray drone covers ~40 m per
 // pass; ops may still tune swath/altitude before flight, so the copy below
 // is deliberately phrased as an "about" estimate.
-const PREVIEW_SWATH_M = 40
-const PREVIEW_ALT_M = 100
+export const PREVIEW_SWATH_M = 40
 
-const GREEN = '#1a7f37'
-const GREEN_LIGHT = '#4cae4f'
-// Amber path pops against both satellite imagery and the green field fill.
-const PATH_COLOR = '#ffb703'
+// Metres AGL, and it must stay a REAL spray altitude.
+//
+// This was 100 m — a placeholder that survived the TASK-012 sweep because that
+// fix only touched the backend's request models, and the decisions log
+// (2026-08-19, the default-twins rule) recorded this file as the copy the fix
+// missed. It stayed harmless only because Leaflet ignores altitude. The 3D view
+// does not: it draws the path at whatever height this says, so a placeholder
+// here becomes a picture of a drone spraying from 100 m, which is not a thing
+// anyone would buy. Twins of this number: DEFAULT_SPRAY_ALT_M in
+// backend/app/coverage.py (20.0, authoritative) and the `alt` defaults on
+// CoverageRequest / AutoCoverageRequest / MultiRequest, which read from it.
+const PREVIEW_ALT_M = 20
 
 /**
- * Read-only review map: the customer's field plus the serpentine spray path
- * the drone will actually fly, fetched from POST /api/coverage/plan.
+ * Read-only review of what the customer is buying: their field and the
+ * serpentine spray path the drone will actually fly, from POST
+ * /api/coverage/plan, viewable top-down or in 3D.
  *
  * The preview is strictly decorative — any fetch failure collapses to a
  * subtle "unavailable" note and never blocks the checkout flow.
@@ -28,45 +38,14 @@ const PATH_COLOR = '#ffb703'
  *   vertices  [{lat, lon}] closed field boundary (>= 3 points)
  */
 export default function SprayPlanPreview({ vertices }) {
-  const containerRef = useRef(null)
-  const mapRef = useRef(null)
-  const pathLayerRef = useRef(null)
-
   // null = still loading, false = failed, object = {waypoints, stats}
   const [plan, setPlan] = useState(null)
-
-  // Create the map framed on the field; tear it down on unmount. In practice
-  // this runs once — editing the field unmounts the review step, so vertices
-  // are fixed for one map instance's life — but rebuilding on change is the
-  // correct behaviour anyway.
-  useEffect(() => {
-    const map = L.map(containerRef.current, {
-      // Scroll-wheel zoom on a small embedded map mostly hijacks page
-      // scrolling; pinch/double-click zoom still work.
-      scrollWheelZoom: false,
-    })
-    L.tileLayer(ESRI_WORLD_IMAGERY, {
-      maxZoom: 19,
-      attribution:
-        'Imagery &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community',
-    }).addTo(map)
-
-    const latlngs = vertices.map((v) => [v.lat, v.lon])
-    const field = L.polygon(latlngs, {
-      color: GREEN,
-      weight: 3,
-      fillColor: GREEN_LIGHT,
-      fillOpacity: 0.2,
-    }).addTo(map)
-    map.fitBounds(field.getBounds(), { padding: [24, 24] })
-
-    pathLayerRef.current = L.layerGroup().addTo(map)
-    mapRef.current = map
-    return () => map.remove()
-  }, [vertices])
+  const [view, setView] = useState('2d')
 
   // Ask the planner for the real spray path. Cancelled flag guards against
-  // setState after unmount (and StrictMode's dev double-mount).
+  // setState after unmount (and StrictMode's dev double-mount). Fetched HERE
+  // rather than in either map so switching views does not re-request a plan
+  // the customer is already looking at.
   useEffect(() => {
     let cancelled = false
     setPlan(null)
@@ -94,37 +73,47 @@ export default function SprayPlanPreview({ vertices }) {
     }
   }, [vertices])
 
-  // Overlay the returned waypoints as the flight path once they arrive.
-  useEffect(() => {
-    const layer = pathLayerRef.current
-    if (!layer) return
-    layer.clearLayers()
-    if (!plan || !plan.waypoints || plan.waypoints.length < 2) return
-
-    const path = plan.waypoints.map((w) => [w.lat, w.lon])
-    L.polyline(path, { color: PATH_COLOR, weight: 2.5, opacity: 0.95 }).addTo(layer)
-    // Mark where the pattern starts so the polyline reads as a route.
-    L.circleMarker(path[0], {
-      radius: 5,
-      color: '#ffffff',
-      weight: 2,
-      fillColor: PATH_COLOR,
-      fillOpacity: 1,
-    }).addTo(layer)
-  }, [plan])
-
   const stats = plan ? plan.stats : null
   const minutes = stats ? Math.max(1, Math.round(stats.est_time_s / 60)) : 0
+  // Read back from the plan, not from PREVIEW_ALT_M: the caption then states
+  // what the returned waypoints actually say, so if the server ever plans at a
+  // different altitude the customer is told the truth rather than our request.
+  const altM = planAltitude(plan)
 
   return (
     <div className="plan-preview">
-      <div ref={containerRef} className="plan-map" aria-label="Spray path preview map" />
+      <div className="plan-view-toggle" role="radiogroup" aria-label="Preview view">
+        {[['2d', 'Top-down'], ['3d', '3D']].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="radio"
+            aria-checked={view === id}
+            className={`slot-btn${view === id ? ' slot-btn-active' : ''}`}
+            onClick={() => setView(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === '2d' ? (
+        <PlanMap2D vertices={vertices} plan={plan} />
+      ) : (
+        <Suspense
+          fallback={<div className="plan-map plan-map-loading">Loading 3D view…</div>}
+        >
+          <FieldPreview3D vertices={vertices} plan={plan} />
+        </Suspense>
+      )}
+
       {stats ? (
         <p className="plan-note">
           <strong>
             Your drone will fly {stats.n_passes} pass{stats.n_passes === 1 ? '' : 'es'}
           </strong>{' '}
-          — about {minutes} minute{minutes === 1 ? '' : 's'} in the air.
+          — about {minutes} minute{minutes === 1 ? '' : 's'} in the air
+          {altM != null ? `, ${Math.round(altM)} m above your field` : ''}.
         </p>
       ) : plan === false ? (
         <p className="plan-note muted">

@@ -510,6 +510,19 @@ body {
   margin: 4px 0 18px;
 }
 
+/* Top-down / 3D switch. Reuses .slot-btn from the schedule step so the two
+   radiogroups on the booking flow look like the same control. */
+.plan-view-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.plan-view-toggle .slot-btn {
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
 .plan-map {
   width: 100%;
   height: min(44vh, 320px);
@@ -518,6 +531,20 @@ body {
   border: 1px solid var(--line);
   /* Leaflet panes stack above page chrome without this. */
   isolation: isolate;
+  /* Cesium sizes its canvas to this box and paints its own background; without
+     an explicit overflow the widget's credit container escapes the radius. */
+  overflow: hidden;
+}
+
+/* Shown while Cesium's chunk is downloading on first switch to 3D. Same box as
+   the map it replaces, so the card does not jump. */
+.plan-map-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  background: var(--green-50);
 }
 
 .plan-note {
