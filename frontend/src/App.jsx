@@ -30,6 +30,11 @@ import './App.css';
 // reset, which reports armed=false until the next 1Hz HEARTBEAT is parsed.
 const DISARM_CONFIRM_MS = 2000;
 
+// How often to look for a flight controller on USB while disconnected. Each
+// probe is a port enumeration on the backend, so this can be leisurely — it
+// only has to beat the operator walking back from the aircraft.
+const AUTOCONNECT_POLL_MS = 4000;
+
 const DEFAULT_TELEMETRY = {
   connected: false, armed: false, mode: 'UNKNOWN',
   altitude: 0, airspeed: 0, groundspeed: 0, heading: 0,
@@ -116,6 +121,61 @@ function App() {
     const id = setInterval(poll, 3000);
     return () => { alive = false; clearInterval(id); };
   }, []);
+
+  // Auto-connect the Cube by USB VID. The operator should never be asked which
+  // COM port the board landed on — the number moves between boots and the VID
+  // does not. Probing is the connect call itself: with nothing plugged in the
+  // backend answers 404 having only enumerated ports, so this is cheap to
+  // repeat and picks the board up whenever it is plugged in, not just at
+  // startup.
+  //
+  // It stops for two reasons, both deliberate:
+  //   - the operator pressed DISCONNECT (autoConnectOff) — never fight that
+  //   - a board WAS found and the link did not come up (500) — retrying would
+  //     re-dial a silent vehicle every few seconds and bury the event log
+  // Armed is state, not a ref: the connection dialog reports whether
+  // auto-connect is running, and that readout has to be true.
+  const [autoConnectArmed, setAutoConnectArmed] = useState(true);
+  const [autoConnectError, setAutoConnectError] = useState('');
+  const autoConnectBusy = useRef(false);
+
+  useEffect(() => {
+    if (!autoConnectArmed || !backendUp || connected || reconnecting) return;
+    let alive = true;
+    const attempt = async () => {
+      if (!alive || autoConnectBusy.current) return;
+      autoConnectBusy.current = true;
+      try {
+        const r = await fetch(`${API}/connection/autoconnect`, { method: 'POST' });
+        if (!alive) return;
+        if (r.ok) {
+          setConnected(true);
+          setAutoConnectError('');
+        } else if (r.status === 500) {
+          const d = await r.json().catch(() => ({}));
+          setAutoConnectArmed(false);
+          setAutoConnectError(d.detail || 'Auto-connect failed');
+        }
+        // 404 (nothing plugged in) and 409 (a dial already in flight) are both
+        // "try again next tick" — not errors worth showing the operator.
+      } catch {
+        /* backend unreachable — the status poll already reports that */
+      } finally {
+        autoConnectBusy.current = false;
+      }
+    };
+    attempt();
+    const id = setInterval(attempt, AUTOCONNECT_POLL_MS);
+    return () => { alive = false; clearInterval(id); };
+  }, [autoConnectArmed, backendUp, connected, reconnecting]);
+
+  // A deliberate disconnect disarms auto-connect; a deliberate connect (or
+  // Retry) re-arms it and clears a stale failure.
+  const suspendAutoConnect = () => setAutoConnectArmed(false);
+  const resumeAutoConnect = () => {
+    setAutoConnectArmed(true);
+    setAutoConnectError('');
+  };
 
   // Telemetry WebSocket with auto-reconnect.
   useEffect(() => {
@@ -474,6 +534,10 @@ function App() {
         <ConnectionOverlay
           connected={connected}
           setConnected={setConnected}
+          autoConnectArmed={autoConnectArmed}
+          autoConnectError={autoConnectError}
+          onManualConnect={resumeAutoConnect}
+          onManualDisconnect={suspendAutoConnect}
           onClose={() => setShowConnect(false)}
         />
       )}

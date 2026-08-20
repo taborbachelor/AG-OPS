@@ -2,7 +2,13 @@ import React, { useState, useEffect } from 'react';
 
 import { API } from '../api';
 
-function ConnectionOverlay({ connected, setConnected, onClose }) {
+function ConnectionOverlay({
+  connected, setConnected, onClose,
+  autoConnectArmed = true,
+  autoConnectError = '',
+  onManualConnect = () => {},
+  onManualDisconnect = () => {},
+}) {
   const [ports, setPorts] = useState([]);
   const [selectedPort, setSelectedPort] = useState('');
   const [baud, setBaud] = useState(57600);
@@ -14,12 +20,22 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Ports the backend identified as a flight controller by USB vendor id.
+  // App.jsx is already dialling these on its own; here they only need to be
+  // marked, so the operator can see the board was recognised.
+  const boards = ports.filter((p) => p.is_flight_controller);
+
   const fetchPorts = async () => {
     try {
       const res = await fetch(`${API}/connection/ports`);
       const data = await res.json();
       setPorts(data);
-      if (data.length > 0 && !selectedPort) setSelectedPort(data[0].device);
+      if (data.length > 0 && !selectedPort) {
+        // Default to the recognised board, not merely the first COM port.
+        const preferred = data.find((p) => p.is_flight_controller) || data[0];
+        setSelectedPort(preferred.device);
+        if (preferred.suggested_baud) setBaud(preferred.suggested_baud);
+      }
     } catch (e) {
       console.error('Failed to fetch ports:', e);
     }
@@ -37,6 +53,9 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
       });
       // 400 = "already connected" -> the backend is linked, treat as success.
       if (res.ok || res.status === 400) {
+        // Re-arm auto-connect: the operator chose to be linked, so a later
+        // dropout should be picked back up rather than left down.
+        onManualConnect();
         setConnected(true);
         onClose();
       } else {
@@ -70,6 +89,9 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
 
   const handleDisconnect = async () => {
     try {
+      // Tell App.jsx first: auto-connect must be off BEFORE the link drops, or
+      // its next probe re-dials the board the operator just let go of.
+      onManualDisconnect();
       await fetch(`${API}/connection/disconnect`, { method: 'POST' });
       setConnected(false);
     } catch (e) {
@@ -85,11 +107,36 @@ function ConnectionOverlay({ connected, setConnected, onClose }) {
         {!connected && (
           <div className="qc-section">
             <div className="qc-title">QUICK CONNECT</div>
+
+            {/* Auto-connect status. Finding the board is the normal case and
+                needs no button — this only says what is already happening.
+                After a deliberate disconnect the board is still named, but the
+                "connecting" half is dropped: auto-connect is off, and saying
+                otherwise would be a lie the operator acts on. */}
+            {boards.length > 0 && !autoConnectError && (
+              <div className="qc-auto">
+                ⚡ {boards[0].board} found on {boards[0].device}
+                {autoConnectArmed ? ' — connecting automatically' : ''}
+              </div>
+            )}
+            {autoConnectError && (
+              <div className="qc-error">
+                Auto-connect stopped: {autoConnectError}
+                <button className="control-btn" onClick={onManualConnect}
+                  style={{ marginLeft: 8, fontSize: 11, padding: '3px 10px' }}>↻ Retry</button>
+              </div>
+            )}
+
             {ports.map((p) => (
               <button key={p.device} className="qc-btn" disabled={loading}
-                onClick={() => doConnect(p.device, 115200)}>
+                onClick={() => doConnect(p.device, p.suggested_baud || 115200)}>
                 <span>⚡ {p.device} <span style={{ color: 'var(--text-dim)' }}>— {p.description}</span></span>
-                <span className="qc-sub">CUBE USB · 115200</span>
+                {/* Label what this port actually is. Calling an FTDI telemetry
+                    bridge "CUBE USB · 115200" told the operator the wrong baud
+                    for the one link that is easy to get wrong. */}
+                <span className="qc-sub">
+                  {p.board ? `${p.board.toUpperCase()} · USB` : 'SERIAL'} · {p.suggested_baud || 115200}
+                </span>
               </button>
             ))}
             {ports.length === 0 && (
