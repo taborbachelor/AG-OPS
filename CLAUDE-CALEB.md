@@ -24,11 +24,20 @@
 - Note: Completely separate from Relevyn
 
 > ### ▶ RESUME HERE (start of next session)
-> **✅ PUSHED AND CLEAN as of 2026-08-20 12:30.** Working tree clean, `main` in sync with
-> `origin/main`, every completed task on the board reads PUSHED, and all agent sessions were
-> retired to OFFLINE for a fresh start. The board is: **TASK-015, 016, 017, 018 OPEN, nothing in
-> progress.** (Historical note, kept because the board column earned it: 23 commits sat LOCAL ONLY
-> overnight before this push.)
+> **As of 2026-08-20 ~14:30 (afternoon session close).** The UI-seams wave (TASK-019…024, from
+> seam register S7/S8/S9/S10) **shipped and pushed the same day it was ticketed**, run by four
+> workers + the first LEAD session (see below), plus TASK-017 and TASK-018. The board is
+> authoritative — run `py tools\agops.py monitor` first; its new FLAGS strip names anything wrong.
+> **Open right now:** (1) **TASK-015 is COMPLETE but LOCAL ONLY (`998f443`)** — delta's M7
+> prerequisite commits need a push; (2) **TASK-023 (S10b terrain readiness UI) is IN_PROGRESS,
+> held by charlie, whose session closed mid-task** — relaunch resumes it, or `/agops-recover`
+> hands it over; (3) foxtrot (lead) was asked to retro-verify TASK-019…024 per MANAGER.md —
+> confirm that happened; (4) `App.css` may carry an uncommitted worker change — it belongs to
+> TASK-023's work, leave it; (5) the exe is stale again behind the wave (rebuild + `--stamp` when
+> it matters). **Deliberately NOT ticketed, decisions reserved for Tabor:** S10a (opt spray legs
+> into `frame:"terrain"` — gated on the guardian airborne-gating flag, which switches monitors
+> OFF on terrain flights) and S7's real call (does transit get its own altitude). (Historical
+> note, kept because the board column earned it: 23 commits once sat LOCAL ONLY overnight.)
 >
 > **The exe now has provenance.** `py tools\exe_status.py` answers "is the binary current, and
 > from what" — it currently reports **STALE by one commit** (`bca1bc6`), which is **TASK-018**.
