@@ -1,9 +1,27 @@
-# LANES — parallel session coordination
+# LANES — parallel session coordination (SUPERSEDED 2026-08-19)
 
-**Any number of Claude sessions can work this repo at once without overlapping.** That guarantee is
-enforced by a claim registry and a PreToolUse hook, not by everyone remembering to read a file.
+> ## ⛔ Coordination has moved to **AgOps**. Start at `.agops/RUNBOOK.md`.
+>
+> `tools/claim.py`, `.claim/` and the lane/area model described below are no longer wired to
+> anything. `.claude/settings.json` now calls the AgOps hooks, and coordination state lives in
+> `.agops/`. Everything this file did — ownership, the SITL lock, staleness — AgOps does, plus a
+> shared task queue, agent-to-agent messaging, dependencies and a live board.
+>
+> **This file is still worth reading for two things, and they are the two no tool can infer:**
+> the **seam register** and the **append-only decisions log**. Both remain authoritative. The
+> "Field notes for a redesign" section at the bottom is what AgOps was built from.
+>
+> | Old | New |
+> |---|---|
+> | `py tools\claim.py claim --area AIR` | `py tools\agops.py assign TASK-0XX <agent>` |
+> | `py tools\claim.py status -v` | `py tools\agops.py monitor` (or `tools\monitor.cmd` live) |
+> | `py tools\claim.py take --resource sitl-5760` | `py tools\agops.py take sitl-5760` |
+> | editing your block in this file | the board updates itself |
 
-- **Machine truth:** `tools/claim.py` + `.claim/` (gitignored runtime state).
+**Historical, from here down.** Any number of Claude sessions can work this repo at once without
+overlapping; that guarantee used to be enforced by a claim registry and a PreToolUse hook.
+
+- **Machine truth (was):** `tools/claim.py` + `.claim/` (gitignored runtime state).
 - **Human truth:** this file — the seam register and the decisions log, which no tool can infer.
 
 ```

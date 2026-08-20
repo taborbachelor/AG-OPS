@@ -24,10 +24,30 @@
 - Note: Completely separate from Relevyn
 
 > ### ▶ RESUME HERE (start of next session)
-> **🟢 MORE THAN ONE SESSION? READ `LANES.md` FIRST** (three ran concurrently on 2026-08-19) (repo root, git-tracked) — the parallel-work board:
-> lane ownership by file, the SITL port lock, the seam register, and the append-only decisions log.
-> Claim a lane there before touching anything, and read/write it by its ABSOLUTE main-checkout path
-> even from a worktree. It exists so two sessions stop re-learning the `86c6a6e` cross-lane bug.
+> **🟢 COORDINATION IS NOW `AgOps`. Start at `.agops/RUNBOOK.md`** (added 2026-08-19, replacing the
+> claim-registry/LANES model after three sessions ran concurrently that day and exposed its limits).
+> You were registered as a named agent the moment this session started — `py tools\agops.py whoami`.
+> **Work is DISPATCHED, not taken:** Tabor assigns tasks, you do not claim them yourself. The board
+> is `py tools\agops.py monitor`, or `tools\monitor.cmd` for a live one. Rules: `CLAUDE.md`.
+>
+> `LANES.md` is superseded for coordination but **still authoritative for its seam register and
+> decisions log** — the cross-lane agreements (bank limits, altitude semantics, who renders what)
+> live there and nothing replaced them.
+>
+> **What landed 2026-08-19 after the block below was written** (all pushed):
+> - **Planner turn geometry** (`57f1a57`) — the serpentine demanded **73° of bank**, past what the
+>   airframe can fly, which is why SITL measured 50-65°: the autopilot was saturating its roll limit
+>   against an unflyable plan. Passes are now ordered so each reversal has `2·R_min` of room.
+>   Coverage identical, +19-38% path length. `DEFAULT_MAX_BANK_DEG = 25`.
+> - **Headlands** (`29a79ba`) — each pass now covers its own swath-deep band, closing the sawtooth
+>   along traced boundaries. **97.6% → 99.6% coverage, 0.93 → 0.17 acres missed, +3.2% path.**
+>   Explicitly not a perimeter lap: its corners are the unflyable geometry above.
+> - **UI seams S5 + S6** (`065abf6`, `7513191`) — the bank-limit warning and the headland toggle are
+>   rendered; both seams are closed.
+> - **Rally points** (`2a581b3`) — link-loss RTL can divert instead of flying home through a
+>   powerline. `app/onboard_rally.py`.
+> - **AgOpsGCS.exe rebuilt.**
+> - **AgOps coordination layer** (`1793b1c` and after) — see `.agops/`.
 >
 > **Mission context: airframe fully printed, internals imminent. Backend flight-readiness (A1–A5), UI overhaul (B1–B3), a full-backend hardening audit, AND the guardian safety-monitor expansion are ALL SHIPPED and on `main`.** Remaining pre-first-flight work is now hardware-gated only — the last eyeball item was closed by measurement on 2026-08-19; everything else is new feature work off the roadmap below.
 >
