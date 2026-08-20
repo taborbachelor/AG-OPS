@@ -1,7 +1,7 @@
 {
-  "built_from": "552ab8b346b91ba78174e603224f2ba22e342424",
-  "subject": "Completion needs a commit, or a stated reason there is none",
-  "built_at": "2026-08-20T00:05:01-05:00",
-  "size_bytes": 61034402,
-  "note": "Written by tools/exe_status.py --stamp. dist/ is gitignored, so this file is the binary's only provenance. Re-stamp on every rebuild, immediately after pyinstaller. This first stamp was written by hand from TASK-014's recorded build point (552ab8b) rather than from HEAD, because stamping HEAD would have asserted a build that never happened."
+  "built_from": "bf8b917557916b82f965f00c2bef822d759ce447",
+  "subject": "tooling: recycle NATO names at fresh work-session starts",
+  "built_at": "2026-08-20T12:57:26-05:00",
+  "size_bytes": 61036049,
+  "note": "Written by tools/exe_status.py --stamp. dist/ is gitignored, so this file is the binary's only provenance. Re-stamp on every rebuild, immediately after pyinstaller."
 }
