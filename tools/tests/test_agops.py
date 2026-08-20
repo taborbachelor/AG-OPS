@@ -1334,6 +1334,63 @@ class TestMonitorTruth(Base):
         self.assertIn("task 7", out_)
 
 
+class TestReviewFlow(Base):
+    """requires_review: a completion is a CLAIM until someone who is not its
+    author verifies it. Dependents stay blocked behind the verification, and
+    a bounce goes back to the owner as a DISPATCH with the reason."""
+
+    def setUp(self):
+        super().setUp()
+        core.register_agent(session_id="s-a")                   # alpha
+        core.register_agent(session_id="s-lead", role="lead")   # bravo
+        self.t = core.create_task("fence upload path",
+                                  requires_review=True)["task_id"]
+        self.dep = core.create_task("build on the fence",
+                                    depends_on=[self.t])["task_id"]
+        core.claim_task(self.t, "alpha")
+        self.r = core.complete_task(
+            self.t, "alpha", "Implemented and verified with covering tests.",
+            commit_hash="abc1234")
+
+    def test_completion_lands_in_REVIEW_and_dependents_stay_blocked(self):
+        self.assertEqual(self.r["status"], "REVIEW")
+        self.assertEqual(core.get_task(self.t)["status"], "REVIEW")
+        self.assertEqual(core.get_task(self.dep)["status"], "BLOCKED")
+
+    def test_you_cannot_verify_your_own_completion(self):
+        with self.assertRaises(AgopsError):
+            core.review_task(self.t, approve=True, by="alpha")
+
+    def test_approval_completes_and_unblocks(self):
+        r = core.review_task(self.t, approve=True, by="bravo")
+        self.assertTrue(r["verified"])
+        self.assertIn(self.dep, r["unblocked"])
+        self.assertEqual(core.get_task(self.t)["status"], "COMPLETE")
+        self.assertEqual(core.get_task(self.dep)["status"], "AVAILABLE")
+
+    def test_rejection_needs_a_reason_and_redispatches_the_owner(self):
+        with self.assertRaises(AgopsError):
+            core.review_task(self.t, approve=False, by="bravo")
+        r = core.review_task(self.t, approve=False, by="bravo",
+                             reason="the SITL proof is missing")
+        self.assertFalse(r["verified"])
+        self.assertEqual(core.get_task(self.t)["status"], "IN_PROGRESS")
+        self.assertEqual(core.get_task(self.t)["owner"], "alpha")
+        unread = core.inbox("alpha", unread_only=True, mark_read=False)
+        bounce = [m for m in unread if m["msg_type"] == "DISPATCH"]
+        self.assertTrue(bounce)
+        self.assertIn("SITL proof", bounce[0]["content"])
+
+    def test_a_plain_task_still_completes_directly(self):
+        t2 = core.create_task("ordinary work")["task_id"]
+        core.claim_task(t2, "alpha")
+        r = core.complete_task(t2, "alpha",
+                               "Implemented and verified with tests.",
+                               commit_hash="abc1234")
+        self.assertNotIn("status", r)      # straight COMPLETE, no review leg
+        self.assertEqual(core.get_task(t2)["status"], "COMPLETE")
+
+
 class TestLeadAndDispatch(Base):
     """The manager session: a role=lead agent that dispatches and verifies but
     never works, plus the wake mechanics (watch / await-dispatch / standby)

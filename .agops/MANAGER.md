@@ -69,6 +69,31 @@ Procedural triage, not review — rule 3 stays on the workers:
 A completion that fails the check: message the agent with the specific gap and
 do not dispatch its next task until resolved. Twice-failed: escalate.
 
+## Independent verification (`requires_review` tasks)
+
+Tasks created with `--requires-review` land in **REVIEW** instead of COMPLETE
+— the board shows `VERIFY: done by <agent>` — and their dependents stay
+blocked until someone who is NOT the author verifies. That someone is
+normally you:
+
+```
+py tools\agops.py review TASK-0XX --approve
+py tools\agops.py review TASK-0XX --reject --reason "the SITL proof is missing"
+```
+
+Approving runs the completion check above PLUS actually reading the diff for
+the task's "do NOT" lines. A rejection goes back to the owner as a DISPATCH
+carrying your reason, so it wakes them like any assignment. You cannot
+approve a task you completed — and you complete nothing, which is why this
+works. For the heaviest safety changes, dispatch the verification itself to a
+DIFFERENT agent (fresh read of the commit, run the named tests) and approve
+on their report.
+
+**Which tasks get `--requires-review` at creation** (for whoever writes
+tasks): anything touching `guardian.py`, `onboard_fence.py` /
+`onboard_rally.py`, mission upload, `vehicle_manager.py`'s link/failsafe
+paths, or planner geometry that a safety decision depends on.
+
 ## What always escalates to the human
 
 Never decide these; report in one line and keep the rest of the team moving:

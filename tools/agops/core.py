@@ -326,6 +326,12 @@ def connect() -> sqlite3.Connection:
     conn.executescript(DDL)
     conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)",
                  (str(SCHEMA_VERSION),))
+    # In-place column migrations: CREATE IF NOT EXISTS cannot grow an existing
+    # table, and the live board must survive an upgrade without a wipe.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "requires_review" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN requires_review "
+                     "INTEGER DEFAULT 0")
     return conn
 
 
@@ -612,7 +618,7 @@ def _recompute_availability(conn, task_ids=None) -> list:
 
 def create_task(title, description="", priority="MEDIUM", depends_on=None,
                 files=None, area=None, created_by="human", estimate=None,
-                task_id=None, project=None) -> dict:
+                task_id=None, requires_review=False, project=None) -> dict:
     require_project(project)
     if priority not in PRIORITIES:
         raise AgopsError("bad priority %r (use %s)" % (priority, ", ".join(PRIORITIES)))
@@ -626,10 +632,10 @@ def create_task(title, description="", priority="MEDIUM", depends_on=None,
         now = _now()
         conn.execute(
             "INSERT INTO tasks(task_id, project_id, title, description, status, "
-            "priority, area, estimate, created_by, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "priority, area, estimate, created_by, created_at, updated_at, "
+            "requires_review) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, project_id(), title, description, "PENDING", priority, area,
-             estimate, created_by, now, now))
+             estimate, created_by, now, now, 1 if requires_review else 0))
         for d in (depends_on or []):
             conn.execute("INSERT OR IGNORE INTO task_deps(task_id, depends_on) "
                          "VALUES(?,?)", (tid, d))
@@ -1048,11 +1054,17 @@ def complete_task(tid, agent, summary, verification="", commit_hash="",
                 "nobody could tell whether the exe existed or what was in it. If "
                 "this genuinely produced no commit, say why: "
                 "--no-commit-reason \"...\".")
+        # A task created with requires_review lands in REVIEW, not COMPLETE:
+        # its completion is a CLAIM until someone who is not its author has
+        # checked it. Dependents stay blocked (availability needs COMPLETE),
+        # which is the point -- unverified safety work must not unblock the
+        # work built on top of it.
+        final = "REVIEW" if t["requires_review"] else "COMPLETE"
         conn.execute(
-            "UPDATE tasks SET status='COMPLETE', completed_by=?, completion_summary=?, "
+            "UPDATE tasks SET status=?, completed_by=?, completion_summary=?, "
             "verification_status=?, commit_hash=?, completed_at=?, updated_at=?, "
             "needs_recovery=0 WHERE task_id=?",
-            (name, summary,
+            (final, name, summary,
              verification or ("tests passed" if tests_passed else "")
              or ("no commit: " + no_commit_reason.strip()
                  if no_commit_reason.strip() else ""),
@@ -1063,6 +1075,12 @@ def complete_task(tid, agent, summary, verification="", commit_hash="",
             conn.execute("UPDATE agents SET current_task=NULL, status='IDLE', "
                          "note=NULL, last_heartbeat=? WHERE agent_id=?",
                          (_now(), a["agent_id"]))
+        if final == "REVIEW":
+            _event(conn, name, "task.review_requested", tid, summary[:200])
+            return {"ok": True, "task_id": tid, "status": "REVIEW",
+                    "unblocked": [],
+                    "note": "completion recorded, pending independent review "
+                            "-- dependents stay blocked until it is verified"}
         _event(conn, name, "task.complete", tid, summary[:200])
         dependents = [r["task_id"] for r in conn.execute(
             "SELECT task_id FROM task_deps WHERE depends_on=?", (tid,))]
@@ -1071,6 +1089,73 @@ def complete_task(tid, agent, summary, verification="", commit_hash="",
         return {"ok": True, "task_id": tid, "unblocked": unblocked}
     finally:
         conn.close()
+
+
+def review_task(tid, approve, by="human", reason="", project=None) -> dict:
+    """Verify or bounce a completion that sits in REVIEW.
+
+    The reviewer must not be the completer -- a verification step you can pass
+    by agreeing with yourself is not one (rule 3 by another name). Approval
+    flips the task to COMPLETE and unblocks its dependents, which is the only
+    path a requires_review task has to COMPLETE. Rejection needs a stated
+    reason, puts the task back IN_PROGRESS under its owner, and the reason
+    goes to them as a DISPATCH so the bounce wakes their session like any
+    other assignment.
+    """
+    require_project(project)
+    conn = connect()
+    try:
+        t = conn.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+        if t is None:
+            raise AgopsError("no such task %r" % tid)
+        if t["status"] != "REVIEW":
+            raise AgopsError("%s is %s, not REVIEW -- nothing to verify"
+                             % (tid, t["status"]))
+        if t["needs_recovery"]:
+            raise AgopsError("%s is in RECOVERY, not verification -- use "
+                             "/agops-recover" % tid)
+        if by and t["completed_by"] and by == t["completed_by"]:
+            raise AgopsError(
+                "you completed %s -- you cannot verify your own completion. "
+                "The lead or another agent reviews it." % tid)
+        if approve:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE tasks SET status='COMPLETE', updated_at=? "
+                         "WHERE task_id=?", (_now(), tid))
+            _event(conn, by, "task.verified", tid,
+                   "completion by %s verified" % (t["completed_by"] or "?"))
+            dependents = [r["task_id"] for r in conn.execute(
+                "SELECT task_id FROM task_deps WHERE depends_on=?", (tid,))]
+            changed = _recompute_availability(conn, dependents)
+            conn.execute("COMMIT")
+            unblocked = [tid_ for tid_, st in changed if st == "AVAILABLE"]
+            return {"ok": True, "task_id": tid, "verified": True,
+                    "unblocked": unblocked}
+        if not (reason or "").strip():
+            raise AgopsError("rejecting a completion needs a stated reason -- "
+                             "the owner acts on your words, not your doubt")
+        owner = t["owner"] or t["completed_by"]
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE tasks SET status='IN_PROGRESS', owner=?, "
+                     "updated_at=? WHERE task_id=?", (owner, _now(), tid))
+        oa = _resolve_agent(conn, owner) if owner else None
+        if oa:
+            conn.execute("UPDATE agents SET current_task=?, status='WORKING' "
+                         "WHERE agent_id=?", (tid, oa["agent_id"]))
+        _event(conn, by, "task.review_rejected", tid, reason[:200])
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    if owner:
+        try:
+            send_message(by, owner,
+                         "Your completion of %s did not pass review: %s\n"
+                         "It is back IN_PROGRESS under you -- address this and "
+                         "complete it again." % (tid, reason),
+                         "DISPATCH", tid, project=project)
+        except AgopsError:
+            pass
+    return {"ok": True, "task_id": tid, "verified": False, "owner": owner}
 
 
 # --- discovery ---------------------------------------------------------------
@@ -1407,7 +1492,8 @@ def maybe_enter_standby(agent, project=None) -> dict:
             "SELECT kind, ts FROM events WHERE actor=? AND kind<>'agent.standby' "
             "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
         recent = cfg.get("standby_recent_complete_s", 900)
-        if (last_real is None or last_real["kind"] != "task.complete"
+        finished = ("task.complete", "task.review_requested")
+        if (last_real is None or last_real["kind"] not in finished
                 or _now() - last_real["ts"] > recent):
             return {"standby": False, "reason": "not fresh off a completion"}
         waited = _trailing_standby(conn, name)

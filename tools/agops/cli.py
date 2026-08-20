@@ -314,9 +314,16 @@ def render_monitor(st, commit_state=None, color=False) -> str:
                      % (t["task_id"], t["priority"], _wrap(t["title"], 29),
                         _wrap(t["blocked_reason"] or "?", 22)))
         for t in rv:
-            L.append("  %-10s %-8s %-29s RECOVERY (%s)"
-                     % (t["task_id"], t["priority"], _wrap(t["title"], 29),
-                        t["owner"] or "?"))
+            if t["needs_recovery"]:
+                L.append("  %-10s %-8s %-29s RECOVERY (%s)"
+                         % (t["task_id"], t["priority"], _wrap(t["title"], 29),
+                            t["owner"] or "?"))
+            else:
+                L.append("  %-10s %-8s %-29s VERIFY: done by %s (%s) -- "
+                         "review %s"
+                         % (t["task_id"], t["priority"], _wrap(t["title"], 29),
+                            t["completed_by"] or "?",
+                            (t["commit_hash"] or "")[:7], t["task_id"]))
         L.append("")
 
     # --- complete -----------------------------------------------------------
@@ -656,8 +663,25 @@ def cmd_create(a):
                          priority=a.priority.upper(), depends_on=a.depends_on or [],
                          files=a.file or [], area=a.area,
                          created_by=current_agent(a.agent) or "human",
-                         estimate=a.estimate, task_id=a.id, project=a.project)
-    out(a, t, "%s created (%s)" % (t["task_id"], t["status"]))
+                         estimate=a.estimate, task_id=a.id,
+                         requires_review=a.requires_review, project=a.project)
+    out(a, t, "%s created (%s%s)" % (t["task_id"], t["status"],
+                                     ", review required" if a.requires_review
+                                     else ""))
+
+
+def cmd_review(a):
+    who = current_agent(a.agent) or "human"
+    r = core.review_task(a.task_id, approve=a.approve, by=who,
+                         reason=a.reason or "", project=a.project)
+    if r["verified"]:
+        msg = "%s verified COMPLETE" % a.task_id
+        if r["unblocked"]:
+            msg += " -- unblocked: %s" % ", ".join(r["unblocked"])
+        out(a, r, msg)
+    else:
+        out(a, r, "%s bounced back to %s IN_PROGRESS -- they were told why"
+            % (a.task_id, r["owner"] or "?"))
 
 
 def cmd_next(a):
@@ -1085,7 +1109,20 @@ def build_parser():
     s.add_argument("--area"); s.add_argument("--estimate"); s.add_argument("--id")
     s.add_argument("--source", help="where this came from: a doc, a failing "
                                     "test, a TODO, a blocker you hit")
+    s.add_argument("--requires-review", action="store_true",
+                   help="completion lands in REVIEW until someone who is not "
+                        "its author verifies it -- use for safety-critical "
+                        "work (guardian, fences, rally, mission upload)")
     s.set_defaults(fn=cmd_create)
+
+    s = sub.add_parser("review", help="verify or bounce a completion in REVIEW")
+    s.add_argument("task_id")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--approve", action="store_true")
+    g.add_argument("--reject", dest="approve", action="store_false")
+    s.add_argument("--reason", help="required when rejecting -- the owner "
+                                    "acts on your words")
+    s.set_defaults(fn=cmd_review)
 
     s = sub.add_parser("next", help="ranked available work")
     s.add_argument("--limit", type=int, default=5); s.set_defaults(fn=cmd_next)
