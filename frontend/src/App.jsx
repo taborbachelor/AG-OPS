@@ -89,6 +89,15 @@ function App() {
   // Snap-to-field: one map click looks up the mapped parcel boundary under it.
   const [spraySnap, setSpraySnap] = useState(false);
   const [snapStatus, setSnapStatus] = useState('');
+  // Rally points: alternate destinations a link-loss RTL diverts to instead of
+  // flying a straight line home through this job's hazards. Deliberately
+  // OPERATOR-PLACED -- the backend builds the exclusion fence from the rings
+  // automatically, but "somewhere safe to go instead" is a location only a
+  // person who knows the ground can supply (routers/safety.py). They live here
+  // rather than in SprayPanel because the map places them and the panel sends
+  // them, and those are siblings.
+  const [rallyPoints, setRallyPoints] = useState([]);   // [{lat, lon, alt}]
+  const [rallyPlacing, setRallyPlacing] = useState(false);
 
   // Safety state
   const [fence, setFence] = useState({ enable: false, radius: 300, alt_max: 120, action: 1 });
@@ -329,6 +338,16 @@ function App() {
     setSprayPlan(null);
   };
 
+  // Rally mode: the click drops a diversion point, not a boundary vertex, so
+  // it deliberately does NOT invalidate the plan the way addSprayVertex does —
+  // a rally point changes where an RTL goes, never where the aircraft sprays.
+  // 80 m matches the TAKEOFF/RTL altitude SprayPanel already uploads and the
+  // altitude the link-loss SITL scenario flies; the operator can change it per
+  // point in the panel.
+  const addRallyPoint = (latlng) => {
+    setRallyPoints((r) => [...r, { lat: latlng.lat, lon: latlng.lng, alt: 80 }]);
+  };
+
   // Snap mode: the click doesn't add a vertex — it asks the backend for the
   // mapped field boundary containing that point, then commits it straight
   // into the job. found:false is normal in sparsely-mapped areas.
@@ -397,7 +416,8 @@ function App() {
   // Editing must be top-down: planning view and any active drawing mode pin
   // the flat map; everywhere else the 3D toggle decides.
   const drawing2d = (view === 'plan' && tools)
-    || (view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing));
+    || (view === 'spray' && tools
+        && (sprayDrawing || spraySnap || areaDrawing || rallyPlacing));
   const use3d = threeD && !drawing2d;
 
   return (
@@ -429,10 +449,13 @@ function App() {
             sprayField={sprayField}
             sprayFields={sprayFields.map((f) => ({ polygon: f.polygon, holes: f.holes || [] }))}
             sprayArea={sprayArea}
-            sprayDrawing={view === 'spray' && tools && (sprayDrawing || spraySnap || areaDrawing)}
-            onAddSprayVertex={spraySnap ? snapClick : addSprayVertex}
+            sprayDrawing={view === 'spray' && tools
+              && (sprayDrawing || spraySnap || areaDrawing || rallyPlacing)}
+            onAddSprayVertex={rallyPlacing ? addRallyPoint
+              : (spraySnap ? snapClick : addSprayVertex)}
             sprayLegs={view === 'spray' ? sprayLegs : []}
             zones={view === 'spray' ? sprayZones : null}
+            rallyPoints={view === 'spray' ? rallyPoints : []}
           />
         )}
         {!use3d && !drawing2d && (
@@ -504,6 +527,10 @@ function App() {
           zones={sprayZones}
           setZones={setSprayZones}
           homePos={telemetry.home_lat ? { lat: telemetry.home_lat, lon: telemetry.home_lon } : null}
+          rallyPoints={rallyPoints}
+          setRallyPoints={setRallyPoints}
+          rallyPlacing={rallyPlacing}
+          setRallyPlacing={setRallyPlacing}
         />
       )}
       {tools && view === 'safety' && (

@@ -93,6 +93,10 @@ function OnboardProtection({ armed, error }) {
   // the ok === true branch.
   const polygons = fence.polygons;
   const notFenced = fence.not_fenced;
+  // Whether this aircraft counts home as a rally candidate. Read off the FC by
+  // the backend and reported with its own verdict + wording -- per M6 the GCS
+  // renders it, it does not decide it.
+  const inclHome = rally.incl_home;
 
   let fenceCls = 'spray-status err';
   let fenceBody;
@@ -166,6 +170,19 @@ function OnboardProtection({ armed, error }) {
         Link-loss RTL will fly a straight line home.
       </>
     );
+  } else if (inclHome && inclHome.diverts_to_rally !== true) {
+    // Uploaded, but this aircraft may not PREFER them. RALLY_INCL_HOME=1 puts
+    // home back in the running, and an RTL that picks home flies the straight
+    // line the rally point existed to avoid -- while every other check here
+    // still passes. Unknown lands in the same branch on purpose: we cannot say
+    // the diversion works, so we do not.
+    rallyCls = 'spray-note';
+    rallyBody = (
+      <>
+        Rally points: {rally.points} uploaded, but the diversion is not
+        confirmed. {inclHome.warning}
+      </>
+    );
   } else {
     rallyCls = 'spray-status ok';
     rallyBody = (
@@ -204,6 +221,7 @@ function SprayPanel({
   drawing, setDrawing, areaDrawing, setAreaDrawing,
   snapping, setSnapping, snapStatus,
   plan, setPlan, zones, setZones, homePos,
+  rallyPoints = [], setRallyPoints, rallyPlacing, setRallyPlacing,
 }) {
   const [orderId, setOrderId] = useState('');
   const [order, setOrder] = useState(null);
@@ -263,6 +281,35 @@ function SprayPanel({
     setDrawing(mode === 'draw' ? !drawing : false);
     setAreaDrawing(mode === 'area' ? !areaDrawing : false);
     setSnapping(mode === 'snap' ? !snapping : false);
+    // Rally placement is exclusive with the three boundary tools for the same
+    // reason they are exclusive with each other: App.jsx routes ONE map click
+    // handler, so two armed modes would race for the same click.
+    if (setRallyPlacing) setRallyPlacing(mode === 'rally' ? !rallyPlacing : false);
+  };
+
+  // A rally edit does not invalidate the PLAN -- rally points change where an
+  // RTL goes, never where the aircraft sprays -- but it DOES invalidate the
+  // last upload's result blocks, which describe the set we SENT rather than the
+  // set now on screen. Leaving them up would say the aircraft holds points it
+  // has never been given.
+  //
+  // This clears the mission line too, which is a true statement about an upload
+  // that really happened, and that is deliberate: the monitor, the fence and
+  // the rally points are armed by ONE call, so keeping part of its answer while
+  // dropping the rest is how a half-true readout gets built. The operator
+  // re-uploads and gets one coherent answer instead.
+  const staleUploadResult = () => {
+    setUpStatus(null); setKeepoutArmed(null); setKeepoutError(null);
+  };
+
+  const removeRally = (i) => {
+    setRallyPoints(rallyPoints.filter((_, n) => n !== i));
+    staleUploadResult();
+  };
+
+  const setRallyAlt = (i, alt) => {
+    setRallyPoints(rallyPoints.map((r, n) => (n === i ? { ...r, alt } : r)));
+    staleUploadResult();
   };
 
   const commitDraft = () => {
@@ -503,7 +550,24 @@ function SprayPanel({
           const kr = await fetch(`${API}/safety/keepouts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ zones, hazard_buffer_m: bufPowerline }),
+            // rally_points is what makes rally.attempted true. The backend
+            // builds the exclusion fence from the rings on its own, but a
+            // rally point is a LOCATION only the operator can supply
+            // (routers/safety.py), so an empty list here is an honest "none
+            // picked", not a default.
+            //
+            // Only lat/lon/alt are sent. break_alt and land_dir are accepted by
+            // the model but ArduPilot's rally item conversion keeps x/y/z only,
+            // so the FC discards them (LANES.md decisions log, 2026-08-19) --
+            // offering editors for fields the aircraft throws away would be the
+            // same lie this whole seam exists to stop.
+            body: JSON.stringify({
+              zones,
+              hazard_buffer_m: bufPowerline,
+              rally_points: rallyPoints.map((r) => ({
+                lat: r.lat, lon: r.lon, alt: Number(r.alt),
+              })),
+            }),
           });
           const kd = await kr.json();
           if (kr.ok) armed = kd;
@@ -807,6 +871,63 @@ function SprayPanel({
             </div>
           </div>
         )}
+
+        {/* RALLY -- operator-picked diversion points for a link-loss RTL.
+            Placed here rather than in the FIELDS card because a rally point is
+            not a boundary: it changes where the aircraft goes when the link
+            drops, not where it sprays. */}
+        <div className="safety-card">
+          <div className="safety-card-head">
+            <span>RALLY ({rallyPoints.length})</span>
+          </div>
+          <button className={`control-btn ${rallyPlacing ? 'active' : ''}`}
+            onClick={() => setMode('rally')} style={{ width: '100%' }}
+            title="Click the map to place a link-loss diversion point">
+            {rallyPlacing ? 'Click the map…' : 'Place rally point'}
+          </button>
+
+          {rallyPoints.map((r, i) => (
+            <div key={`rally-${i}`} className="spray-rally-row"
+              style={{ display: 'flex', alignItems: 'center', gap: 6,
+                       marginTop: 4, fontSize: 11 }}>
+              <span style={{ color: '#b388ff', fontWeight: 700 }}>R{i + 1}</span>
+              <span style={{ flex: 1, opacity: 0.8 }}>
+                {r.lat.toFixed(5)}, {r.lon.toFixed(5)}
+              </span>
+              <input type="number" value={r.alt} style={{ width: 56 }}
+                aria-label={`Rally ${i + 1} altitude`}
+                onChange={(e) => setRallyAlt(i, Number(e.target.value))} />
+              <span className="safety-unit">m</span>
+              <button className="control-btn" onClick={() => removeRally(i)}
+                aria-label={`Remove rally ${i + 1}`}
+                style={{ padding: '2px 7px' }}>×</button>
+            </div>
+          ))}
+
+          {rallyPoints.length === 0 && (
+            // The state this seam shipped in for six weeks, now said out loud
+            // instead of left blank.
+            <div className="spray-hint" style={{ textAlign: 'left' }}>
+              None placed. A link-loss RTL will fly a straight line home — through
+              this job&rsquo;s powerlines if any lie on that line.
+            </div>
+          )}
+          {rallyPoints.length > 0 && !homePos && (
+            // A fact plus the backend's documented rule, NOT a verdict of our
+            // own: the GCS holds no readiness logic (M6). The refusal, if it
+            // comes, arrives verbatim from the backend on upload.
+            <div className="spray-note">
+              No home position from the aircraft yet. The backend refuses a rally
+              point whose home↔rally leg it cannot check, and will say so on
+              upload.
+            </div>
+          )}
+          <div className="spray-hint" style={{ textAlign: 'left' }}>
+            Sent to the aircraft alongside the keepouts when you upload the
+            mission. Checked against this job&rsquo;s hazard rings by the
+            aircraft-side rules, not here.
+          </div>
+        </div>
 
         {/* MISSION */}
         <div className="safety-card">

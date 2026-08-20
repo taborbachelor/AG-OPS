@@ -51,6 +51,23 @@ const homeIcon = L.divIcon({
   className: '',
 });
 
+// Rally point: an alternate destination for a link-loss RTL. Purple to match
+// the home-leg / RTL colour already used for "the way back" everywhere else in
+// this map, and deliberately NOT the green of home -- the whole point of a
+// rally point is that it is somewhere other than home.
+function rallyIcon(n) {
+  return L.divIcon({
+    html: `<div style="width:22px;height:22px;background:#b388ff;
+      border:2px solid #fff;border-radius:50%;color:#04121f;
+      font:800 10px 'Inter',system-ui,sans-serif;
+      display:flex;align-items:center;justify-content:center;
+      box-shadow:0 0 8px rgba(179,136,255,.7)">R${n}</div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+    className: '',
+  });
+}
+
 const CMD_COLOR = {
   TAKEOFF: '#00e676', WAYPOINT: '#00e5ff', LOITER: '#ff9100', LAND: '#ff1744', RTL: '#b388ff',
 };
@@ -223,7 +240,7 @@ function FitJob({ fields, area, drawing }) {
 function MapView({
   telemetry, planning, waypoints = [], onAddWaypoint, onMoveWaypoint, fence, playbackPath,
   sprayField = [], sprayFields = [], sprayArea = [], sprayDrawing, onAddSprayVertex,
-  sprayLegs = [], zones,
+  sprayLegs = [], zones, rallyPoints = [],
 }) {
   const [layer, setLayer] = useState('sat');
   const [follow, setFollow] = useState(true);
@@ -388,6 +405,22 @@ function MapView({
               fillColor: '#ff9100', fillOpacity: 0.06, dashArray: '4 6' }}
           />
         )}
+
+        {/* Rally points, and the leg an RTL would fly to each. The leg is
+            drawn because it is what the backend actually checks -- a rally
+            point clear of every hazard is still refused if the straight line
+            home<->rally is not, and an operator who cannot see that line
+            cannot see why. */}
+        {rallyPoints.map((r, i) => (
+          <React.Fragment key={`rally-${i}`}>
+            {homePos && (
+              <Polyline positions={[homePos, [r.lat, r.lon]]}
+                pathOptions={{ color: '#b388ff', weight: 1.5, opacity: 0.55,
+                  dashArray: '4 6' }} />
+            )}
+            <Marker position={[r.lat, r.lon]} icon={rallyIcon(i + 1)} />
+          </React.Fragment>
+        ))}
 
         {/* Home / launch point */}
         {homePos && <Marker position={homePos} icon={homeIcon} />}

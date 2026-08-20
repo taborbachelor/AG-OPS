@@ -1,14 +1,4 @@
 /**
- * LOCATION NOTE: this file belongs in `__tests__/`, and sits here only because
- * TASK-019 and TASK-021 were dispatched with the SAME wildcard file entry
- * (`frontend/src/components/__tests__/*`), which makes the AgOps PreToolUse
- * guard refuse a new file in that directory to BOTH owners at once. alpha and
- * bravo agreed the filenames in writing instead; going around the directory is
- * rule 2's "go around it", not a forced write. Move it with `git mv` into
- * `__tests__/` once TASK-021 completes, and change the import back to
- * `../SprayPanel`.
- */
-/**
  * The onboard exclusion fence and rally points must state their OWN outcome.
  *
  * Seam S8. `POST /api/safety/keepouts` has always returned a `fence` block
@@ -34,7 +24,7 @@ import React from 'react';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import { vi } from 'vitest';
 import '@testing-library/jest-dom';
-import SprayPanel from './SprayPanel';
+import SprayPanel from '../SprayPanel';
 
 const ZONES = { water: [], trees: [], buildings: [], powerline: [], holes: [] };
 

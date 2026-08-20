@@ -142,6 +142,23 @@ def _arm_hazards(client, home_lat, home_lon, rally: bool):
         held_rally = client.get("/api/safety/rally").json()
         assert held_rally["points"] == 1, f"FC does not hold a rally point: {held_rally}"
 
+        # Uploading rally points and an RTL actually PREFERRING one are two
+        # different facts, and only the second is what the operator cares
+        # about. RALLY_INCL_HOME decides it, so the upload reports it -- and
+        # this asserts the report is REAL, read off this FC, not a field that
+        # quietly says known:false on every flight. It is also the measurement
+        # behind test_link_loss_rtl_diverts_to_the_rally_point below: that test
+        # only proves diversion because this vehicle answers 0.
+        incl = out["rally"].get("incl_home")
+        assert incl is not None, f"rally upload did not report incl_home: {out['rally']}"
+        assert incl["known"] is True, (
+            f"could not read RALLY_INCL_HOME off the FC: {incl}")
+        assert incl["value"] == 0, (
+            f"SITL default for RALLY_INCL_HOME changed to {incl['value']} -- the "
+            f"diversion assertion below depends on 0")
+        assert incl["diverts_to_rally"] is True, incl
+        assert incl["warning"] is None, incl
+
 
 def _enforce_fence(client):
     """Arm the fence through the PRODUCT'S OWN API, then confirm the flight

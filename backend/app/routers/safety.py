@@ -185,6 +185,55 @@ class RallyCandidate(BaseModel):
     land_dir: float = Field(0.0, ge=0, le=360)
 
 
+# Rally diversion is only real when the flight controller does NOT count home
+# as a rally candidate. RALLY_INCL_HOME=0 makes RTL prefer the nearest uploaded
+# rally point; =1 puts home back in the running, and an RTL that picks home flies
+# the straight line the rally point existed to avoid -- while every check in this
+# file still passes. It is the SITL default (measured 2026-08-19), which is the
+# entire reason onboard_rally.py appears to work.
+#
+# We READ it and report it. We do NOT write it: changing which destination a
+# link-loss RTL picks on a live airframe is a behavioural decision reserved to
+# Tabor (LANES.md decisions log, 2026-08-19). Per M6 the verdict is computed
+# here and rendered verbatim by the UI -- the GCS holds no thresholds of its own.
+RALLY_INCL_HOME = "RALLY_INCL_HOME"
+
+
+def _rally_incl_home() -> dict:
+    """Does this vehicle count home as a rally candidate?
+
+    `known: false` means we could not read the parameter, which the UI must show
+    as unknown and never as "diversion works" -- the same rule the keepout
+    monitor's own status field carries.
+    """
+    if not vehicle_manager.connected:
+        return {"known": False, "value": None, "diverts_to_rally": None,
+                "warning": "not connected -- cannot tell whether this aircraft "
+                           "counts home as a rally candidate."}
+    try:
+        got = vehicle_manager.get_params([RALLY_INCL_HOME])
+    except Exception as exc:                      # a link read, so it can fail
+        return {"known": False, "value": None, "diverts_to_rally": None,
+                "warning": "could not read RALLY_INCL_HOME (%s) -- cannot tell "
+                           "whether a link-loss RTL will prefer the rally point "
+                           "over home." % exc}
+    if RALLY_INCL_HOME not in got:
+        return {"known": False, "value": None, "diverts_to_rally": None,
+                "warning": "the aircraft did not answer for RALLY_INCL_HOME -- "
+                           "cannot tell whether a link-loss RTL will prefer the "
+                           "rally point over home."}
+    value = float(got[RALLY_INCL_HOME])
+    if value == 0:
+        return {"known": True, "value": value, "diverts_to_rally": True,
+                "warning": None}
+    return {"known": True, "value": value, "diverts_to_rally": False,
+            "warning": "RALLY_INCL_HOME=%g on this aircraft, so home counts as "
+                       "a rally candidate and a link-loss RTL may fly straight "
+                       "home THROUGH the hazards these rally points exist to "
+                       "avoid. The product does not change this parameter."
+                       % value}
+
+
 class KeepoutLoad(BaseModel):
     """Rings the current mission was planned against, for the live proximity
     monitor. Accepts the coverage response's `zones` shape directly, so the UI
@@ -259,6 +308,13 @@ def load_keepouts(req: KeepoutLoad):
                     [p.model_dump() for p in req.rally_points],
                     prepared, home=vehicle_manager.home_position())
                 rally.update(vehicle_manager.upload_rally(built["items"]))
+                # Uploading them is only half the answer: whether an RTL will
+                # actually PREFER one over home is a firmware parameter, so
+                # read it and report it alongside. Only on a successful upload
+                # -- after a failure there are no rally points for it to
+                # qualify, and the failure is the thing to read.
+                if rally.get("ok"):
+                    rally["incl_home"] = _rally_incl_home()
             except ValueError as exc:
                 # A candidate too close to a hazard, or a home<->rally leg
                 # that isn't clear. Never upload a rally point the check
