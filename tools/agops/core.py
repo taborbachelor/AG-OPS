@@ -53,9 +53,43 @@ SCHEMA_VERSION = 1
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+
+
+def _main_checkout(repo: str) -> str:
+    """The primary checkout's root, seen from anywhere -- including a linked
+    git worktree, where `.git` is a pointer FILE reading
+    `gitdir: <main>/.git/worktrees/<name>`.
+
+    Coordination state must live in exactly one place. Without this, a session
+    launched in a worktree resolves `<worktree>/.agops`, silently forks the
+    board, and two half-boards each report a healthy team that does not exist.
+    File paths and git commands keep using the LOCAL checkout root (REPO) --
+    a worktree's files are its own; only the shared brain routes here.
+    """
+    gitfile = os.path.join(repo, ".git")
+    if not os.path.isfile(gitfile):
+        return repo                       # normal checkout: .git is a directory
+    try:
+        with open(gitfile, encoding="utf-8") as fh:
+            line = fh.read().strip()
+    except OSError:
+        return repo
+    if not line.startswith("gitdir:"):
+        return repo
+    gitdir = line.split(":", 1)[1].strip()
+    if not os.path.isabs(gitdir):
+        gitdir = os.path.join(repo, gitdir)
+    gitdir = os.path.abspath(gitdir)
+    marker = os.sep + ".git" + os.sep + "worktrees" + os.sep
+    if marker in gitdir + os.sep:
+        return (gitdir + os.sep).split(marker)[0]
+    return repo
+
+
+MAIN_REPO = _main_checkout(REPO)
 # AGOPS_HOME relocates all coordination state. Set by the test suite so tests
 # never touch the live team board, and usable by a human who wants a sandbox.
-AGOPS_DIR = os.environ.get("AGOPS_HOME") or os.path.join(REPO, ".agops")
+AGOPS_DIR = os.environ.get("AGOPS_HOME") or os.path.join(MAIN_REPO, ".agops")
 DB_PATH = os.path.join(AGOPS_DIR, "agops.db")
 CONFIG_PATH = os.path.join(AGOPS_DIR, "project.json")
 

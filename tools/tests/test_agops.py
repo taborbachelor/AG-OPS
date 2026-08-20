@@ -1334,6 +1334,27 @@ class TestMonitorTruth(Base):
         self.assertIn("task 7", out_)
 
 
+class TestWorktreeBrain(unittest.TestCase):
+    """Coordination state must live in exactly ONE place. A session launched
+    in a linked worktree used to resolve <worktree>/.agops and silently fork
+    the board -- two half-boards, each reporting a team that does not exist."""
+
+    def test_a_linked_worktree_resolves_the_main_checkouts_brain(self):
+        base = tempfile.mkdtemp(prefix="agops-wt-")
+        main = os.path.join(base, "main")
+        wt = os.path.join(base, "wt-m7")
+        os.makedirs(os.path.join(main, ".git", "worktrees", "wt-m7"))
+        os.makedirs(wt)
+        with open(os.path.join(wt, ".git"), "w", encoding="utf-8") as fh:
+            fh.write("gitdir: %s\n"
+                     % os.path.join(main, ".git", "worktrees", "wt-m7"))
+        self.assertEqual(os.path.abspath(core._main_checkout(wt)),
+                         os.path.abspath(main))
+
+    def test_a_normal_checkout_is_its_own_brain(self):
+        self.assertEqual(core._main_checkout(REPO), REPO)
+
+
 class TestReviewFlow(Base):
     """requires_review: a completion is a CLAIM until someone who is not its
     author verifies it. Dependents stay blocked behind the verification, and

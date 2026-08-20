@@ -66,6 +66,29 @@ In each session:
 Specialties only affect ranking — they never stop an agent working anywhere. Skip
 this if you already know who you want on what.
 
+## 2b. Worktrees for UI / PLANNER workers (pilot)
+
+Launch those workers with their own tree:
+
+```
+cd C:\Users\jacks\rc-plane-app
+claude --worktree ui-wave
+```
+
+Coordination still works — the tooling resolves the board to the MAIN
+checkout through the worktree's `.git` pointer, so a worktree session joins
+the same team, same tasks, same locks. What changes is everything the shared
+tree made untrustworthy: no shared git index (a bare `git commit` can no
+longer take a teammate's staged work), and a test run finally means *your*
+change — not whatever four sessions happened to have on disk.
+
+The costs, known and accepted: each worktree runs its own `npm install`
+(~9 s), and **never junction `node_modules` or any shared directory into a
+worktree** — deleting the worktree follows the junction and wipes the target
+(it cost us the main checkout's `node_modules` on 2026-08-18). AIR stays in
+the main checkout: SITL binaries and the `sitl-5760` lock live there, and its
+scenarios need them. M5/M7 stay solo either way.
+
 ## 3b. Optional: a lead session, so you don't have to dispatch by hand
 
 Open a fifth terminal from the repo and run `py tools\agops.py register --role
