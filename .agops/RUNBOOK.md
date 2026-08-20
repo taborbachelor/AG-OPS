@@ -38,9 +38,17 @@ repo.
 Open as many as you want. Each gets the next NATO name — alpha, bravo, charlie,
 delta… They appear on the board within a second.
 
-**Optional, worth it for a long session:** `claude --session-id <uuid>` makes an
-agent's identity survive a restart, so closing and reopening that terminal gets
-you the same name back rather than the next one.
+**Use `claude --session-id <uuid>` as your standard launch line, not an
+optional extra.** It makes an agent's identity survive a restart, so reopening
+that terminal gets the same name back rather than the next one — and stranding a
+task under a name nobody is using is the failure it prevents. Keep the four uuids
+somewhere you can paste them.
+
+**Once running, each window tells you who it is.** The status line under the
+prompt shows the agent's name, its current task, any resource locks it holds, and
+unread messages in red — so you no longer scroll to the top to work out which
+terminal is charlie. `OFF-BOARD` there means that session is live but holds no
+task, which is the state rule 1 exists to prevent.
 
 ## 3. Give each agent its specialty (optional, 5 seconds)
 
@@ -176,7 +184,56 @@ built, drawn from `LANES.md` and `CLAUDE-CALEB.md`; each names its source.
 
 ## The one habit that matters
 
-**Stage explicit paths. Never `git add -A`.** Every agent shares one working
-tree, so `-A` sweeps another session's half-finished work into your commit. The
-agents are told this too, but it is worth knowing yourself — it is the single
-hazard the coordination layer cannot catch for you.
+**Put the paths on the commit itself:**
+
+```
+git add <any new files>
+git commit -F msg.txt -- path/one path/two
+git show --stat HEAD          # check before you push
+```
+
+Never `git add -A` — every agent shares one working tree, so `-A` sweeps another
+session's half-finished work into your commit. But staging your own paths is not
+enough either, and this is the part that caught everyone including the person who
+wrote the warning: **one working tree means one git index.** A bare `git commit`
+takes whatever anyone else has staged, under your name and your message, with
+nobody having broken the documented rule. Two agents were staged simultaneously
+the night this was written; only the timing saved them.
+
+`git commit -- <paths>` cannot name a file git has never seen, so new files still
+need `git add <path>` first — adding a specific path is safe, it is the bare
+commit that is not.
+
+The PreToolUse guard now refuses a commit that would include a live agent's owned
+file, so this is no longer purely an honour system. The habit still matters: the
+guard only knows about paths a task actually lists.
+
+## Before anyone says COMPLETE
+
+```
+py tools\seam_check.py          every route nothing calls
+py tools\seam_check.py --ui     the sharper one: what no OPERATOR can reach
+```
+
+This repo has shipped a caller-less backend surface **four times** — the keepout
+monitor running with zero rings, the post-flight scorecard, the turn-geometry
+stats, and then rally points, which went to production dead. Each was complete,
+tested, green and invisible. It is rule 4b for the agents; run it yourself before
+you believe a wave is done.
+
+`complete` also now requires `--commit <sha>`, or `--no-commit-reason "..."` when
+the work genuinely produced none. COMPLETE with nothing to point at is a claim
+nobody can check — TASK-005 sat that way for a day and nobody could say whether
+the exe existed.
+
+## Waiting on a lock
+
+```
+py tools\agops.py take sitl-5760 --queue     get in line
+py tools\agops.py waiting                    who is in line, oldest first
+```
+
+`drop` messages whoever is next automatically, and skips anyone OFFLINE rather
+than handing the lock to a closed terminal. Before this existed, an agent
+finished its code, needed the SITL port, and idled behind a "ping me when you
+drop it" agreement that only worked if the holder remembered.

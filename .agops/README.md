@@ -178,6 +178,16 @@ py tools\agops.py conflicts backend/app/coverage.py frontend/src/App.jsx
 py tools\agops.py owners backend/app/coverage.py
 ```
 
+The guard covers **`git commit`** as well as writes. One working tree means one
+git index, so "stage explicit paths" never protected anyone from a bare commit
+taking whatever else was staged — under their name, their message, and without
+breaking any documented rule. A commit whose paths (or, with no pathspec, whose
+staged set) include a live agent's owned file is refused, with the safe form in
+the message: `git commit -F msg.txt -- path/one path/two`. Conservative wherever
+it is ambiguous — a commit message containing `" -- "` is misread as a pathspec
+and the check skips rather than fires, because a guard that blocks legitimate
+work trains people to route around the mechanism.
+
 | Level | Meaning | Effect |
 |---|---|---|
 | `BLOCKING` | a **live** agent's IN_PROGRESS task lists an overlapping path | claim refused; PreToolUse blocks the write |
@@ -193,6 +203,37 @@ Deliberate limits, so the guard stays credible:
 
 If you and another agent have genuinely agreed to share a file, `claim --force`
 records that decision rather than hiding it.
+
+## 7b. Waiting for a resource
+
+```
+py tools\agops.py take sitl-5760 --queue     get in line
+py tools\agops.py waiting                    the line, oldest first
+```
+
+`drop` messages whoever is next automatically. Nothing can wake a stopped Claude
+Code session, so a handoff that depends on the holder remembering to relay it is
+a handoff that does not happen — an agent once finished its code, needed the SITL
+port, and idled behind exactly that agreement. An OFFLINE waiter is skipped
+rather than handed the lock: giving it to a closed terminal is worse than having
+no queue at all, because the next agent in line believes someone else is using it.
+
+## 7c. Seam checking
+
+```
+py tools\seam_check.py            every route nothing calls
+py tools\seam_check.py --ui       which routes no OPERATOR can reach
+py tools\seam_check.py --strict   exit 1 on any orphan, for CI
+```
+
+The failure this catches has happened four times here: a route built end to end,
+tested, green, and called by nothing — the keepout monitor with zero rings, the
+scorecard, the turn-geometry stats, and rally points, which reached production
+dead. It matches on METHOD as well as path, which is the whole reason it is not a
+grep: when the keepout monitor was broken, GET *was* called and only POST was
+orphaned, so a path-only search reports that route healthy. Per-file base
+constants are resolved too (`web/` declares its own), and call sites that build
+their path at runtime are listed as blind spots rather than counted as coverage.
 
 ## 8. Messaging
 
@@ -219,16 +260,26 @@ Ownership moves with the message. Omitting the problems is worse than no handoff
 
 ## 10. Completion and Git
 
-Git stays the source of truth. Completion requires a real summary and refuses
-outright if you report failing tests.
+Git stays the source of truth. Completion requires a real summary, a commit, and
+refuses outright if you report failing tests.
 
 ```
 py tools\agops.py complete TASK-012 "widened passes; 419 tests green" ^
    --tests-passed --commit 29a79ba
 ```
 
-**Stage explicit paths, never `git add -A`** — the working tree is shared, and
-`-A` commits another agent's half-finished work as if it were yours.
+**A commit is required.** COMPLETE is a claim the next session acts on, and one
+that points at nothing cannot be checked — TASK-005 sat COMPLETE with "no commit
+recorded" for a day while nobody could say whether the exe existed or what was in
+it. Work that genuinely produced none says why: `--no-commit-reason "..."`, and
+the board renders the reason where it used to render the blank. A stated reason
+is a claim someone can disagree with; a gap is not.
+
+**Put the paths on the commit: `git commit -F msg.txt -- path/one path/two`**,
+with `git add` first for files git has never seen. Never `git add -A` — the
+working tree is shared. And never a bare `git commit` — the *index* is shared
+too, so it takes whatever anyone else has staged. Verify with
+`git show --stat HEAD` before pushing.
 
 ## 11. Staleness and recovery
 
@@ -344,9 +395,12 @@ authoritative.
 py tools\tests\test_agops.py
 ```
 
-56 tests: registration, project isolation, task creation, **atomic claiming
+Plus `py tools\tests\test_seam_check.py` — 7 tests for the orphan-route checker.
+
+107 tests: registration, project isolation, task creation, **atomic claiming
 under six real concurrent processes**, duplicate prevention, dependency chains,
 file/area conflict severity, messaging and broadcast scoping, crash recovery
 (including an assertion that recovery does not modify the working tree), agent
 restart identity, ranked discovery, completion gates, resources, human override,
-hook fail-open, and the MCP surface.
+hook fail-open, the MCP surface, the resource waitlist, the completion commit
+requirement, the shared-index commit guard, and the status line.

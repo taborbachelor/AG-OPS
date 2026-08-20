@@ -24,164 +24,110 @@
 - Note: Completely separate from Relevyn
 
 > ### ▶ RESUME HERE (start of next session)
-> **🟢 COORDINATION IS NOW `AgOps`. Start at `.agops/RUNBOOK.md`** (added 2026-08-19, replacing the
-> claim-registry/LANES model after three sessions ran concurrently that day and exposed its limits).
-> You were registered as a named agent the moment this session started — `py tools\agops.py whoami`.
-> **Work is DISPATCHED, not taken:** Tabor assigns tasks, you do not claim them yourself. The board
-> is `py tools\agops.py monitor`, or `tools\monitor.cmd` for a live one. Rules: `CLAUDE.md`.
+> **🔴 FIRST ACTION: PUSH. 19 commits are LOCAL ONLY** as of 2026-08-20 (`git status -sb` → `ahead 19`).
+> Everything below this line exists only on this machine. The board's COMPLETE column says LOCAL ONLY
+> on almost every task tonight, which is the monitor doing its job: "complete" is a claim about the
+> board, "pushed" is a claim about the world, and they had come apart. Take `git-push` first.
 >
-> `LANES.md` is superseded for coordination but **still authoritative for its seam register and
-> decisions log** — the cross-lane agreements (bank limits, altitude semantics, who renders what)
-> live there and nothing replaced them.
+> **🟢 COORDINATION IS `AgOps`. Start at `.agops/RUNBOOK.md`.** Work is DISPATCHED, not taken — Tabor
+> assigns; you do not claim. Board: `py tools\agops.py monitor`, or `tools\monitor.cmd` for a live one.
+> Rules: `CLAUDE.md` (renumbered slightly on 2026-08-20 — see rule **4b**). `LANES.md` is superseded for
+> coordination but **still authoritative for its seam register and decisions log**, and both grew a lot
+> tonight — read the seam register before starting UI work.
 >
-> ### 🔴 SEAM PASS, 2026-08-19 evening (TASK-013, charlie) — READ BEFORE THE NEXT FLIGHT
-> **The one that matters: two safety features that landed today are not reachable, and a third
-> fails silently.** All three verified by hand, not taken from a summary.
+> ---
 >
-> 1. **Rally points are dead in production.** `2a581b3` added them so a link-loss RTL diverts around
->    mapped powerlines instead of flying home through one. **No frontend file ever sends
->    `rally_points`** — 0 hits across `frontend/src` *and* `web/src` — so `rally.attempted` is always
->    false and the feature has never run outside its tests. Seam **S8**.
+> #### What landed 2026-08-19 → 08-20 (the terrain wave)
+> Four agents in parallel, then a fifth session acting as planner. All committed, **none pushed**.
+>
+> - **Terrain following, end to end.** Real ArduPilot `.DAT` tiles bundled (`fd05851`, TASK-008),
+>   `TERRAIN_REQUEST`/`TERRAIN_DATA` served to the FC and altitude given AGL meaning (`48c4cd3`,
+>   TASK-010), proven in SITL with the link cut (TASK-011). Tabor's bundle-not-fetch decision is
+>   implemented **fail-loud**: outside bundled coverage it refuses rather than guessing.
+> - **Enforcement proven, and it found two real bugs** (`6c7a692`, TASK-004). See the decisions log:
+>   an exclusion fence the FC *holds* is not one it *enforces* — `FENCE_ENABLE` was never set and the
+>   only endpoint writing `FENCE_TYPE` hardcoded `3`, so enabling the geofence **cleared the polygon
+>   bit and disarmed the operator's own powerlines in the same call**. Now proven by flying into one.
+> - **SITL port parameterised** (`d7ac378`, TASK-006) — teardown proves the port freed. The
+>   contention that made parallel runs fail a different scenario set each time is fixed.
+> - **Auto-connect by USB VID** (`8195f3a`, TASK-007). Seam S4 stayed NOT TRIGGERED.
+> - **Spray altitude is 20 m AGL** (`0491ffd`), closing PLANNER's half of S3.
+> - **Exe rebuilt on top of the bundled tiles** (`2e93dab`, TASK-014) — and this time the commit is
+>   recorded, which TASK-005 never was.
+> - **M7 planned, not started** (`23184c8`, TASK-015) — plan committed, no code moved. **Run it in a
+>   worktree** (`claude --worktree m7-split`): it is a wide refactor of the most depended-on file in
+>   the backend, and README §14 names this exact case as the worktree exception.
+>
+> #### 🔴 The seam pass found two safety features that DO NOT WORK IN PRODUCTION
+> `68fb38c` (TASK-013), verified by hand, two overstated claims dropped rather than recorded. These are
+> not cleanup items — they are shipped safety features that have never run outside their own tests:
+>
+> 1. **Rally points are dead.** `2a581b3` added them so a link-loss RTL diverts around mapped
+>    powerlines. **No frontend file ever sends `rally_points`** — zero hits across `frontend/src` and
+>    `web/src` — so `rally.attempted` is always false. In production a link-loss RTL still flies
+>    straight home through a mapped line, exactly as before TASK-003. (Seam **S8**.)
 > 2. **A failed onboard fence upload reads as success.** `POST /api/safety/keepouts` returns
->    `fence.ok` / `fence.error` / `fence.not_fenced` (`routers/safety.py:234-248`); the backend
->    refuses bad geometry on purpose and its own comment says never let it "read as a successful
->    fence". **`SprayPanel.jsx` references neither `fence` nor `rally`** — it prints "proximity
->    monitor armed ✓" from the ring counts alone. A surveyed powerline that could not be fenced looks
->    identical to one that was. The soft GCS monitor and the hard onboard fence are different
->    protections and only the fence survives link loss. Seam **S8**.
-> 3. **The whole safety read-back layer has no UI.** `GET /safety/keepouts`, `/exclusions`, `/rally`,
->    `/guardian` — 0 frontend callers each. Same for `guardian.monitors.*` (live metres-to-powerline,
->    RTL energy margin, measured bank — `grep -ro "monitors" frontend/src` returns **0**) and for
->    `statustext`, where ArduPilot's own "PreArm:" / "Polygon fence breached" / "EKF variance"
->    messages land: **0 hits, case-insensitive, whole tree**. Seam **S9**.
+>    `fence.ok` / `fence.error` / `fence.not_fenced`; `SprayPanel.jsx` references neither `fence` nor
+>    `rally` and prints "proximity monitor armed" from ring counts alone. **A surveyed powerline that
+>    could not be fenced looks identical to one that was.** (Seam **S8**.)
+> 3. **The safety read-back layer has no UI.** `GET /safety/{keepouts,exclusions,rally,guardian}`:
+>    zero frontend callers each. (Seam **S9**.)
 >
-> **Paired defaults that have drifted** (the operator-facing copy is the one that flies — now a
-> pinned decision in the LANES log):
-> - `swath`: backend `20` (`routers/coverage_multi.py:21`), UI `useState(40)`
->   (`SprayPanel.jsx:70`). UI wins; an API client and the GCS plan the same field differently.
-> - `alt`: fixed today to 20 m in three backend models + `SprayPanel.jsx`, **but this pass found a
->   fifth copy the fix missed** — `web/src/SprayPlanPreview.jsx:13` `PREVIEW_ALT_M = 100`. The
->   customer site still previews at the placeholder altitude.
-> - battery: pre-flight fails the arm gate at `≤ 30` (`preflight.py:48`) while the advisory warns at
->   `< 25` (`AlertCenter.jsx:30`). Between 25 and 30 the gate refuses with no prior warning.
-> - SITL: `sim.py` derives the port from `SITL_INSTANCE`, `ConnectionOverlay.jsx:87` hardcodes
->   `tcp:127.0.0.1:5760`. Overlaps bravo's in-flight TASK-006 — do not fix from the UI side alone.
+> **The UI lane is where the safety value is now.** Four open seams — **S7, S8, S9, S10** — are all
+> "the backend is right and no operator can see it".
 >
-> **Test-only surfaces (green tests, no production caller):** the entire `bench` router (5 routes),
-> params backup/restore/sync, `/sim/{status,stop,fault}`, `/telemetry/` REST, `/logs/events`, and
-> `/connection/detect` — that last one added by charlie this evening in `8195f3a` and superseded by
-> `/ports` before it ever had a caller. **True orphans (nothing calls them at all):**
-> `/vehicle/modes`, `/coverage/plan_auto`, `/zones/`, `/fields/`, `GET /orders/`, and
-> `POST /orders/{id}/status` — meaning **nothing in the product can advance a customer order past
-> `paid`**.
+> #### 🟡 Two things flagged for Tabor, deliberately not fixed by an agent
+> - **Terrain following switches the guardian's monitors OFF mid-pass.** `guardian.py` gates every
+>   monitor on `alt >= airborne_alt_m` (5.0 m) where `alt` is height above LAUNCH. A terrain-following
+>   flight measured **4.5 m above home while genuinely 26.8 m above ground**, so airspeed/stall and
+>   bank monitors gated themselves off — on exactly the flight profile TASK-010 was built to enable.
+>   Teaching `airborne` to prefer `terrain_current_height` changes when safety monitors are live on a
+>   real airframe and needs a fallback decision for stale/absent terrain. Pinned by
+>   `tests/sitl/test_scenario_terrain.py`.
+> - **Rally diversion depends on `RALLY_INCL_HOME=0`, which the product never writes.** It is the SITL
+>   default and the entire reason `onboard_rally.py` exists. An FC shipping `1` would fly home through
+>   the hazard while every check still passed. Writing it is a behavioural decision on a live airframe.
 >
-> ⚠️ **SCOPE — this pass is NOT complete.** Its own task says to run it *after* the wave lands, and
-> alpha (TASK-004), bravo (TASK-006) and delta (TASK-008) were all still WORKING with uncommitted
-> files in the tree. **Committed work only was audited.** Those three need a second pass.
+> #### Tooling added 2026-08-20 (all tested, 107 tests green)
+> - **`py tools\seam_check.py`** — every route nothing calls, matched on METHOD as well as path
+>   (`--ui` = which routes no operator can reach, `--strict` for CI). **Rule 4b: run it before
+>   completing anything that adds a route.** It found the terrain endpoint orphaned while it was still
+>   being written.
+> - **`take <resource> --queue` + `waiting`** — `drop` now messages whoever is next in line. No more
+>   idling behind a "ping me when you drop it" agreement.
+> - **`complete` requires `--commit <sha>`** or `--no-commit-reason "..."`.
+> - **The PreToolUse guard now checks `git commit`** — one working tree means ONE git index, and
+>   staging only your own paths never protected you from a bare commit taking everyone else's staged
+>   work. Safe form: `git commit -F msg.txt -- path/one path/two` (new files need `git add` first).
+> - **A status line** in every agent's prompt: name, task, locks, unread count.
+> - **Agent identity fix** (`496b0bf`) — the CLI read `CLAUDE_SESSION_ID`; Claude Code sets
+>   `CLAUDE_CODE_SESSION_ID`, so every `/agops-join` minted a ghost agent. Six appeared in one evening.
+>   **Launch sessions with `claude --session-id <uuid>`** to keep names across restarts.
 >
-> **What landed 2026-08-19 after the block below was written** (all pushed):
-> - **Planner turn geometry** (`57f1a57`) — the serpentine demanded **73° of bank**, past what the
->   airframe can fly, which is why SITL measured 50-65°: the autopilot was saturating its roll limit
->   against an unflyable plan. Passes are now ordered so each reversal has `2·R_min` of room.
->   Coverage identical, +19-38% path length. `DEFAULT_MAX_BANK_DEG = 25`.
-> - **Headlands** (`29a79ba`) — each pass now covers its own swath-deep band, closing the sawtooth
->   along traced boundaries. **97.6% → 99.6% coverage, 0.93 → 0.17 acres missed, +3.2% path.**
->   Explicitly not a perimeter lap: its corners are the unflyable geometry above.
-> - **UI seams S5 + S6** (`065abf6`, `7513191`) — the bank-limit warning and the headland toggle are
->   rendered; both seams are closed.
-> - **Rally points** (`2a581b3`) — link-loss RTL can divert instead of flying home through a
->   powerline. `app/onboard_rally.py`.
-> - **AgOpsGCS.exe rebuilt.**
-> - **AgOps coordination layer** (`1793b1c` and after) — see `.agops/`.
+> #### Board state at handoff
+> TASK-001…014 COMPLETE except **TASK-011 IN_PROGRESS** (alpha, holds `sitl-5760`, has uncommitted
+> `LANES.md` decisions — do not commit them for it) and **TASK-015 BLOCKED** (M7, plan committed).
+> **OPEN: TASK-016** (M5 mission model/resume) and **TASK-017** (customer-site 3D field preview).
+> Three of the four agent sessions went stale overnight; `py tools\agops.py recover` inspects without
+> destroying anything.
 >
-> **Mission context: airframe fully printed, internals imminent. Backend flight-readiness (A1–A5), UI overhaul (B1–B3), a full-backend hardening audit, AND the guardian safety-monitor expansion are ALL SHIPPED and on `main`.** Remaining pre-first-flight work is now hardware-gated only — the last eyeball item was closed by measurement on 2026-08-19; everything else is new feature work off the roadmap below.
+> **Recommended next dispatch:** the UI seams (S8 first — it is the one where a failed powerline fence
+> currently reads as success), then M5. Do NOT start M7 outside a worktree.
 >
-> **State as of 2026-08-19 (commit `0a928c7`, everything below pushed). THREE sessions worked this
-> repo concurrently that day — AIR/alpha, PLANNER/bravo, UI/charlie — coordinated by a claim registry
-> and a PreToolUse guard rather than an honour system. AIR and PLANNER were STILL LIVE when this block
-> was written, so treat their detail as true only as of `0a928c7`, and read `LANES.md` for newer:**
-> - **Backend:** M1a/M1b/M2/M3/M4 + guardian + preflight gate (**M6 now COMPLETE**) + bench kit + soak, the 2026-08-15 hardening pass (~35 audit findings), Lane B's powerline keepouts + connector-leg rerouting + coverage analysis, and **Lane A's full spray-flight safety set** (bank angle, wind, live keepout proximity, post-flight scorecard, alert unification). **42 frontend tests green** (verified on `main` 2026-08-19). The backend counts below are **2026-08-18 vintage — 379 unit tests + 14 live SITL scenarios** — and BOTH other lanes added backend tests on 08-19, so re-count on a quiet machine rather than quoting these (`pytest` / `backend\scenarios.ps1 all`, ~5 min; the SITL half needs the `sitl-5760` lock).
-> - ⚠️ **The SITL suite is green ONLY when this machine is quiet — it is not safe to run two sessions against it.** Verified 2026-08-18: **12/12 green in 4:29** (10 existing + 2 new) on an idle machine, matching the documented ~4 min. But three earlier runs that overlapped a second Claude session failed 3, 4 and 5 scenarios with a DIFFERENT set each time and degraded 350s → 490s → 802s. Failures are connection-level (`no heartbeat from vehicle`, WinError 10061/10054) — a scenario connecting to a SITL that hasn't finished dying — never assertion failures. Cause: port 5760 is single-occupancy, `conftest.py` teardown waits on `/api/sim/status` + a flat 1 s without ever proving TCP 5760 is free, and `sim._running()` treats a listening port as "already running". **So: a red scenario during parallel work is far more likely contention than a real regression — re-run it alone before believing it.** The durable fix is Lane D item 3 (parameterize `harness.py`'s hardcoded `tcp:127.0.0.1:5760`) plus a teardown that waits for the port to clear.
-> - ✅ **Lane A MERGED to `main` 2026-08-18** (`b812ff9`, `2e47db8`, `b8f1f6e`, fast-forward): guardian Part 3C scenario proof (EKF-variance + airspeed-stall live, two new sim faults; **vibration proven UNPROVABLE on this SITL** and deliberately given no fault endpoint), the bank-angle monitor, wind telemetry, the live keepout-proximity monitor, the post-flight scorecard, and the alert-threshold unification (last M6 slice). Verified on `main` post-merge. Pushed 2026-08-18; the `lane-a/guardian-proof` branch and the `.claude/worktrees/lane-b` worktree were verified clean + fully merged and **deleted**.
-> - ✅ **Lane B MERGED + PUSHED 2026-08-18** (`e480c35`, `0a69ee6`, `401f9c2`, `86c6a6e`): powerline keepouts (OSM `power=line`/`minor_line` corridors, hazard-rendered), **connector-leg rerouting** around hazards (`app/reroute.py` — convex-hull taut paths, bounded detours, segment ordering that turns ten crossings into one), a **fail-closed 409 on unresolved hazard crossings**, **coverage analysis** (`coverage_pct` / `sprayable_acres` / `uncovered_acres`), and the cross-lane fix below.
-> - 🔴 **THE CROSS-LANE BUG — read this before splitting work by file again.** Lane A's live keepout-proximity monitor was built end to end (`keepout_watch.py`, endpoints, guardian wiring, tests, a SITL scenario) and **nothing ever called `POST /api/safety/keepouts`** — it ran with zero rings and could never warn. The backend half was Lane A's, the UI half (`SprayPanel.jsx`) was Lane B's, and the seam was owned by nobody. Both lanes were individually green and individually "done". Fixed in `86c6a6e`: upload arms the monitor with the plan's zones + the operator's ACTUAL buffer, and says so loudly when arming fails. **Do a deliberate seam pass at the end of every parallel session** — endpoints with no caller, UI reading fields nothing sets, defaults on both sides that must agree.
-> - ~~🔥 **Next highest-value safety item: the aircraft banks 50-65 deg in ordinary loiter/RTL
-> turns.**~~ **CLOSED 2026-08-19 by PLANNER/bravo — and the diagnosis changed.** The planner was
-> demanding **73°** of bank on an adjacent-line serpentine, which the airframe cannot fly, so the
-> measured 50-65° was **the autopilot saturating its roll limit against an unflyable plan, not a tuning
-> problem**. Full detail and the cost in path length are in menu item 3.
-> - **UI:** Vite (1s builds), 3D FLY view default (CesiumJS, key-free, attitude-true aircraft,
-> CHASE/ORBIT/FREE cams; 2D forced for planning/drawing), NavRail progressive disclosure, SprayPanel
-> zone-failure opt-in + overflight warnings, hazard-crossing opt-in, coverage %, and the
-> proximity-monitor arming status. **2026-08-19 (charlie) cleared the entire UI queue and found two
-> real bugs doing it** — see menu items 1 and 7, plus **one-verdict pre-flight**, which collapsed the
-> checklist to one state word, one sentence built from the server's own labels, and per-check detail
-> behind a keyboard-reachable disclosure. That one **removed a live M6 regression**: with no server
-> verdict the panel fell back to two LOCALLY-INVENTED checks (link + GPS) and could display a PASS
-> while the gate was unreachable and would have refused to arm. Absent a verdict it now reads CHECKING
-> and never a pass. **42 frontend tests green** (was 16); every fix mutation-checked.
-> - 💰 **Billing + valuation now live in `VALUATION.md`** (repo root, added 2026-08-19). Cost ledger, labour ledger, three valuation frames with their inputs, the milestones that move the number, and the terms to ask Caleb for. Update it with **`py tools\session_cost.py --new`** at the end of any working session — do not hand-parse transcripts, and do not start a second table anywhere. Current state: token basis **$1,767**, all-in cost (labour included) **≈$8,500**, replacement cost **$180k–340k**, recommended ask **$7,500** + retainer + per-acre royalty. **Nothing has been invoiced since 2026-08-14** — everything from 08-15 onward is unbilled, and no agreement with Caleb exists yet. That conversation is the open item, not the arithmetic.
-> - ✅ **`AgOpsGCS.exe` REBUILT 2026-08-20 00:08 (TASK-014, charlie).** `backend/dist/AgOpsGCS.exe`, 61,034,402 bytes. **`dist/` is gitignored, so the binary has no commit of its own — this note IS the provenance record.** Built from **HEAD `552ab8b`** with a working tree clean of all shipped code (only `VALUATION.md` and `tools/agops/hook_pretooluse.py` were modified, neither of which ships).
-> 
->   **Why it had to be rebuilt — the previous binary was dangerous.** It was built 2026-08-19 23:42, which is BEFORE four commits, and it postdated MAVLink 2 (`0a928c7`, 11:21) only by luck of ordering. Missing: `fd05851` (terrain bundling), `d7ac378` (SITL port), `48c4cd3` (terrain serving), and critically **`6c7a692` — alpha's proof that the exclusion fence was NEVER ENFORCED** (nothing set `FENCE_ENABLE`, and `POST /geofence` hardcoded `FENCE_TYPE=3`, clearing the polygon bit). **A bench day on the old binary would have flown with powerline fences stored but not enforced.** All four are ancestors of `552ab8b`, verified with `git merge-base --is-ancestor`.
-> 
->   **Smoke test, run not assumed:** `/api/health` → `{"status":"ok"}`; `/api/mission/terrain?lat=39.9&lon=-95.8` → all four tiles `N39W096/N39W097/N40W096/N40W097`, `covers_point:true` — **runtime proof the terrain tiles are inside the exe**, which the old binary lacked (`terrain_store` absent from its archive TOC). The frontend served and ran: asset hashes `index-CYKIqPyl.js` / `MapView3D-W8AxsSES.js` match the `npm run build` output from the same session, and the UI reached `POST /api/connection/autoconnect` → 404 (correct: no Cube plugged in), so auto-connect works in the packaged app. Clean startup, no tracebacks. Killed by name afterwards; BOTH pids died (21764 bootloader + 2756 child — that is the documented gotcha) and :8000 was free.
-> 
->   **Note for whoever greps a binary next:** only module names are readable in the PyInstaller TOC. Code string literals live compressed in the PYZ, so `grep FENCE_ENABLE` returning 0 is NOT evidence of absence — use git ancestry or a runtime endpoint instead.
+> ---
 >
-> **Next-work menu:**
-> 1. ~~**3D scene eyeball check (user's eyes required)**~~ **RESOLVED BY MEASUREMENT 2026-08-19
-> (charlie) — it never needed eyes.** Cesium is already a dependency, so the real library was asked
-> where the model's nose ends up, and the answer checked against physics: at heading H the nose must
-> lie on bearing H. **It was wrong in two independent ways.** (a) Heading was **90° off** —
-> `headingPitchRollQuaternion` resolves the body frame against an EAST-north-up frame, so body +X
-> pointed east at heading 0 while the model is built nose-along-+X. Measured: heading 0 gave bearing
-> 90.00, heading 90 gave 180.00. **That was the sideways aircraft**, and the source comment claiming a
-> north-west-up frame was simply wrong about Cesium. (b) **Pitch was inverted** — an unrelated bug
-> nobody had reported: the backend stores MAVLink ATTITUDE pitch unmodified (positive = nose up) and
-> Cesium's positive pitch is nose-up too, but the view negated it, so a climb rendered as a dive. Roll
-> was already correct and is now pinned so the other two fixes cannot quietly break it. The pose maths
-> moved into exported `aircraftHpr` / `aircraftQuaternion` so the tests exercise the real code rather
-> than a copy of it — a test restating the implementation would have passed against both bugs. 12
-> tests, both fixes mutation-checked (forcing the offset back to 0 fails 8 of them; restoring the pitch
-> negation fails exactly 2). **Still worth 30 seconds of eyes** for what no unit test can see: that the
-> model reads as an aircraft (fin up, sane proportions) and that the CHASE camera frames it sensibly —
-> that path uses `HeadingPitchRange`, needs WebGL, and is not covered here.
-> 2. **Real Cube bench day** whenever hardware returns (Caleb's telemetry radio + receiver still pending): follow the `bench` scenario sequence — params backup → surface/servo tests → calibrations → first-flight bundle `POST /api/bench/first-flight-params {cells, apply:true}`. Data-USB → COM (115200); **PROP OFF; flight battery only after.**
-> 3. ~~**Turn-geometry bank constraint in `coverage.py`**~~ **DONE 2026-08-19** (session bravo, PLANNER lane). The planner stopped turning onto the adjacent pass: it flies every Nth line and fills the gaps on later sweeps so each reversal has `2·R_min` of room at the planned speed. **Coverage is bit-identical — only the flight ORDER changes** — and the cost is path length: **73.2° → 25.3° of commanded bank on a 40-acre Sabetha-shaped field, at +38% flight distance** (+19% on 400×200 m). Default ceiling `coverage.DEFAULT_MAX_BANK_DEG = 25.0`; `max_bank=0` on either coverage endpoint restores the old serpentine. **The number that reframes the whole finding: the old adjacent-line plan demanded 73°, which the airframe cannot fly — so the measured 50-65° was the autopilot saturating its roll limit against an unflyable plan, not a tuning problem.** Every plan now reports `stats.turn_bank_deg` / `turn_bank_ok` / `turn_radius_m` / `turn_max_speed_ms`; a field too narrow to meet the limit gets the widest turns available plus `turn_bank_ok: false` and the speed that WOULD meet it. **Open follow-ups:** nothing renders those numbers yet (LANES seam **S5**, UI lane), and the 25° vs guardian's 31.5° low-altitude threshold pairing is **seam S2, proposed by bravo and awaiting AIR**. Full writeup: `SPRAY-FLIGHT-SAFETY.md` closing section. **S3 UPDATE:** the 100 m `CoverageRequest.alt` placeholder is GONE — `coverage.DEFAULT_SPRAY_ALT_M = 20.0` (`0491ffd`), closing S3's PLANNER half; AIR still owns the frame (`MAV_FRAME_GLOBAL_TERRAIN_ALT`). Consequence raised as seam **S7**: transit legs inherit spray altitude, so multi-field jobs now cross at 20 m.
-> 4. ~~**Headlands**~~ **DONE 2026-08-19** (session bravo, PLANNER lane). **The measurement changed the fix, so read this before assuming the old framing.** Mapping where the missed ground actually sits: on a field with a *traced* boundary, 0.93 acres missed — **0.76 along the field edge and only 0.17 around the keepout.** It is a boundary problem first, and the “perimeter passes close the strip alongside a keepout” framing this note used to carry was wrong on both counts. **Mechanism:** a pass sprays a swath-deep BAND but was clipped to where the boundary sits at the line through the band’s middle, so every row in the band where the field reaches further out was missed — a sawtooth along any edge not parallel to the passes. **Fix:** widen each pass to cover its own band; the extremes are exact rather than sampled (between vertices an edge is straight, so the widest crossing is at a band edge or a vertex inside the band). **Result: 97.6% to 99.6% coverage, 0.93 to 0.17 acres missed, +3.2% path length**, and `coverage_pct` is what verifies it, as predicted. **Deliberately NOT a perimeter lap** — a boundary ring’s corners are 90° turns at a point, the same unflyable geometry item 3 just removed; widening adds no passes and no turns. **Cost:** spray reaches up to half a swath past the boundary where an edge slants away (geometrically bounded; measured worst 9.1 m against a 10 m half-swath) — pass `headlands=false` on either coverage endpoint for an organic neighbour, road or waterway. The residual 0.17 acres is the keepout share, left unclosed on purpose: closing it means spraying inside a drift buffer that has tests asserting it.
-> 5. **SITL harness port fix (Lane D item 3)** — `tests/sitl/harness.py` hardcodes `tcp:127.0.0.1:5760`; teardown never proves the port is free. This is why parallel runs fail with a different scenario set each time. 14 scenarios now ride on it.
-> 6. ~~**Rebuild `AgOpsGCS.exe`**~~ **DONE 2026-08-19 (delta)** — see above; it now also carries the bundled SRTM tiles.
-> 7. ~~**Post-flight scorecard UI**~~ **DONE 2026-08-19 (charlie).** A scorecard panel rendered from the
-> playback view, with a badge on the list rows that have a card. It carries the writer's invariants
-> rather than softening them: an extreme that was never measured is `null` and renders as a dash, never
-> 0 — a card reporting "0 m to the nearest powerline" when no rings were ever loaded is exactly the
-> dangerous lie the writer starts every extreme at None to avoid — and a missing card says NOT
-> AVAILABLE, never "clean flight". It holds **no thresholds**: the card carries none and M6 keeps that
-> judgement in the guardian, so the only thing coloured is the guardian's own per-monitor warning
-> counts (episodes, per the writer, not ticks).
-> 8. Still not started: M5 mission model/resume, M7 layer restructure (`vehicle_manager.py` is now 2,057 lines — exclusive-lock job, run it solo), customer-site 3D field preview, Stripe keys (Caleb), pump-sensing answer (Caleb — gates spray verification entirely).
+> **Mission context: airframe fully printed, internals imminent.** Remaining pre-first-flight work is
+> hardware-gated only. Still blocked on Caleb: telemetry radio + receiver, Stripe keys, and the
+> pump-sensing answer (which gates spray verification entirely).
 >
-> 9. **UI — render the planner's turn-geometry numbers (LANES seam S5, opened by bravo 2026-08-19,
-> UNCLAIMED).** Every plan now reports `stats.turn_bank_deg` / `turn_bank_ok` / `turn_radius_m` /
-> `turn_max_speed_ms`, and **nothing renders any of them** — including `turn_bank_ok: false`, the case
-> where a field is too narrow to meet the bank limit and the operator most needs telling. This is the
-> SAME seam class as the two bugs charlie just fixed. **CLOSED 2026-08-19 by `065abf6`** — `SprayPanel.jsx:389` renders the bank-limit warning and `:612-616` the limit and `turn_max_speed_ms`. Seam S5 is done; S6 (headland toggle) likewise, by `7513191`.
+> **💰 Billing/valuation lives in `VALUATION.md`.** Refresh with `py tools\session_cost.py --new` at
+> the end of a working session. **Nothing has been invoiced since 2026-08-14** and no agreement with
+> Caleb exists yet — that conversation is the open item, not the arithmetic.
 >
-> **The 2026-08-19 three-session day, one line each:** **AIR/alpha** — onboard exclusion fences pushed
-> to the flight controller (`45faa48`), then the link moved to **MAVLink 2** with fences proven on the
-> vehicle (`0a928c7`); still live at time of writing. **PLANNER/bravo** — the turn-geometry bank
-> constraint (`57f1a57`) and headlands, written up as menu items 3 and 4 by bravo itself.
-> **UI/charlie** — items 1 and 7 above plus one-verdict pre-flight (`56b78a8`, `548c67a`, `2969bd6`).
-> **The lesson, hit three separate times in one day: a backend surface with no caller is the default
-> failure mode of parallel work.** The scorecard, the keepout proximity monitor before it, and now the
-> turn-geometry stats were each complete, tested, green — and invisible to the operator.
+> **Get running — one command:** `.\start-all.ps1` from `rc-plane-app\`.
 >
-> **Get running — one command:** `.\start-all.ps1` from `rc-plane-app\` (see **Quick start** below). First run needs deps installed once (`pip install -r requirements.txt`, `npm install` ×2) — see the script's header comment or README.md.
->
-> **Flagship demo (30 seconds):** SPRAY → Area → box some farmland near Sabetha → **Detect fields in area** (USDA traces the real fields, crop-labeled) → Generate Spray Plan (whole job: spray + orange transits + purple home legs) → Upload → FLY view → ARM & TAKEOFF.
->
-> **Commit lineage** since the ag-platform baseline `e248499`: `2d2bc84` (M1a+exe+M1b) → `6fcf8d9` (M2) → `256bbed` (M3) → 2026-08-14 series: `8d3d629` (M4 harness) → `543400b` (guardian) → `eef43d8` (preflight gate) → `517d53f` (bench kit) → `bfd4da7` (soak) → `8e9de0c` (B1 Vite) → `9b50002` (B2 3D view) → `ba10eda` (B3 redesign) → `7bb3f60` (backend hardening) → `94c4d76` + `c401628` (guardian EKF/vibration/airspeed monitors, merged from the worktree branch) → `b46350a` (hand-off design docs) → `b0122e6` (track CLAUDE-CALEB.md) → `43440d5` (README exe/Python notes) → 2026-08-18: `b6e7374` (doc reconciliation) → `79d54a4` (powerline keepouts) → `e480c35` (connector-leg rerouting) → `0a69ee6` (fail-closed hazard crossings) → `401f9c2` (coverage analysis) → `b812ff9` + `2e47db8` + `b8f1f6e` (Lane A: scenario proof, spray-flight safety set, keepout proximity) → `66c2c25` (Lane A doc merge) → `86c6a6e` (arm the proximity monitor) → 2026-08-19: `cbc8601` + `3f58157` (claim registry) → `45faa48` (onboard exclusion fences) → `56b78a8` (scorecard UI) → `57f1a57` (turn-geometry bank constraint) → `3c5181f` (LANES shared-tree hazard) → `548c67a` (one-verdict pre-flight) → `2969bd6` (3D orientation: sideways aircraft + inverted pitch) → `0a928c7` (MAVLink 2, fences proven on the vehicle; HEAD at time of writing).
+> **Flagship demo (30 seconds):** SPRAY → Area → box farmland near Sabetha → **Detect fields in area**
+> → Generate Spray Plan → Upload → FLY view → ARM & TAKEOFF.
 >
 > Read **"Dev loop"** + **"Real-hardware bench testing"** below before touching the backend/SITL.
 
