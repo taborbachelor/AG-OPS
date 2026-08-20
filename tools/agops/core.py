@@ -68,7 +68,7 @@ AGENT_STATUSES = ("STARTING", "IDLE", "WORKING", "BLOCKED", "REVIEWING",
 PRIORITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 PRIORITY_RANK = {p: i for i, p in enumerate(PRIORITIES)}
 MESSAGE_TYPES = ("INFO", "QUESTION", "WARNING", "BLOCKER", "HANDOFF",
-                 "REVIEW_REQUEST", "COMPLETION")
+                 "REVIEW_REQUEST", "COMPLETION", "DISPATCH")
 CONFLICT_LEVELS = ("NONE", "WARNING", "BLOCKING")
 
 # NATO order. Deterministic so the Nth agent to ever join gets the Nth name and
@@ -124,6 +124,22 @@ def default_config() -> dict:
         # one morning). Agents that still hold work keep their names -- the
         # same guard `admin clear-agents` has.
         "recycle_names_on_fresh_start": True,
+        # Standby: after COMPLETING a task, an agent whose lead is on duty
+        # waits for its next dispatch (`await-dispatch`) instead of going cold
+        # -- this is what lets a manager session chain agents through a wave
+        # without a human typing "continue" in each terminal. Bounded on
+        # purpose: standby_cycles empty waits (each standby_wait_s long) and
+        # the agent stops for real, telling the lead via agent.standby_expired.
+        # Scoped on purpose: ONLY after a recent completion, so a session
+        # merely chatting with the human is never hijacked into a silent wait.
+        # standby_cycles 0 turns the whole mechanism off.
+        "standby_cycles": 3,
+        "standby_wait_s": 540,
+        "standby_recent_complete_s": 900,
+        # The only repo paths a role=lead session may write. Coordination
+        # state, nothing else: the lead dispatches and verifies, it does not
+        # edit the product. Enforced in the PreToolUse guard.
+        "lead_writable": [".agops/*", ".agops/**"],
         "broadcast_min_interval_s": 300,
         "always_open": ["LANES.md", ".agops/*", ".agops/**", ".claim/*", "*.log"],
         "areas": {},
@@ -801,6 +817,10 @@ def assign_task(tid, agent, by="human", note="", project=None) -> dict:
         if a is None:
             raise AgopsError("no agent named %r -- see: py tools\\agops.py agents"
                              % agent)
+        if (a["role"] or "") == "lead":
+            raise AgopsError(
+                "%s has role 'lead' -- the lead coordinates and verifies, it "
+                "does not take tasks. Dispatch to a worker instead." % a["name"])
         t = conn.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
         if t is None:
             raise AgopsError("no such task %r" % tid)
@@ -833,7 +853,10 @@ def assign_task(tid, agent, by="human", note="", project=None) -> dict:
         body += "\n" + note
     body += ("\nRead it with: py tools\\agops.py task %s" % tid)
     try:
-        send_message(by, a["name"], body, "INFO", tid, files, project=project)
+        # DISPATCH, not INFO: the Stop hook treats an unread DISPATCH as
+        # "do not stop -- proceed with this task", which is how an assignment
+        # reaches a session without a human relaying it.
+        send_message(by, a["name"], body, "DISPATCH", tid, files, project=project)
     except AgopsError:
         pass                    # a message failure must not undo the assignment
     return {"ok": True, "task_id": tid, "owner": a["name"],
@@ -856,6 +879,11 @@ def claim_task(tid, agent, force=False, project=None) -> dict:
         if a is None:
             raise AgopsError("unknown agent %r -- register first" % agent)
         name = a["name"]
+        if (a["role"] or "") == "lead":
+            raise AgopsError(
+                "you are the lead: you coordinate and verify, you do not take "
+                "tasks. Dispatch it to a worker (py tools\\agops.py assign %s "
+                "<agent>) or escalate to the human." % tid)
         t = conn.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
         if t is None:
             raise AgopsError("no such task %r" % tid)
@@ -1305,6 +1333,164 @@ def _git_dirty_report() -> dict:
 
 
 # --- resources ---------------------------------------------------------------
+
+# --- the lead and the dispatch loop ------------------------------------------
+# A "lead" is a coordination-only session: it dispatches, verifies, recovers
+# and escalates, and never takes a task or edits repo code (refused in
+# assign/claim above, blocked in the PreToolUse guard). These three functions
+# are the wake mechanics that make a lead workable at all, because nothing can
+# wake a stopped session: the lead stays alive by blocking in watch_events, and
+# a worker that just completed stays reachable by blocking in await_dispatch.
+
+def _lead_live(conn, cfg) -> bool:
+    """Is an agent with role 'lead' on duty (non-OFFLINE, fresh heartbeat)?"""
+    stale_after = cfg.get("stale_after_s", DEFAULT_STALE_S)
+    return conn.execute(
+        "SELECT 1 FROM agents WHERE role='lead' AND status<>'OFFLINE' "
+        "AND last_heartbeat>=? LIMIT 1",
+        (_now() - stale_after,)).fetchone() is not None
+
+
+def _trailing_standby(conn, name) -> int:
+    """How many consecutive agent.standby events this agent's history ends in.
+
+    Any real activity by the agent (a claim, a completion, a message) inserts
+    an event under its name and resets the run to zero, so the count is
+    naturally "empty waits since I last did anything".
+    """
+    n = 0
+    for r in conn.execute("SELECT kind FROM events WHERE actor=? "
+                          "ORDER BY id DESC LIMIT 50", (name,)):
+        if r["kind"] != "agent.standby":
+            break
+        n += 1
+    return n
+
+
+def maybe_enter_standby(agent, project=None) -> dict:
+    """Should this agent wait for a dispatch instead of going cold?
+
+    Yes only when ALL of these hold, each one a deliberate scope limit:
+      * a lead is on duty -- with nobody dispatching, waiting is pure cost;
+      * there is work that could plausibly arrive (an AVAILABLE task, or a
+        BLOCKED one that a completion elsewhere may free);
+      * the agent's own last real act was COMPLETING a task, recently -- this
+        is the chaining moment. A session that was merely talking to the human
+        must never be hijacked into a silent nine-minute wait;
+      * fewer than standby_cycles empty waits since that completion. At the
+        limit the answer is no, once, with an agent.standby_expired event so
+        the lead learns this worker now needs a human wake. (The expired event
+        itself breaks the recent-completion condition, so it cannot repeat.)
+    """
+    require_project(project)
+    cfg = load_config()
+    cycles = int(cfg.get("standby_cycles", 3))
+    if cycles <= 0:
+        return {"standby": False, "reason": "disabled"}
+    conn = connect()
+    try:
+        a = _resolve_agent(conn, agent)
+        if a is None or (a["role"] or "") == "lead":
+            return {"standby": False, "reason": "not a worker"}
+        name = a["name"]
+        if a["current_task"]:
+            return {"standby": False, "reason": "already holds a task"}
+        if not _lead_live(conn, cfg):
+            return {"standby": False, "reason": "no lead on duty"}
+        if not conn.execute("SELECT 1 FROM tasks WHERE status IN "
+                            "('AVAILABLE','BLOCKED') LIMIT 1").fetchone():
+            return {"standby": False, "reason": "no work that could arrive"}
+        last_real = conn.execute(
+            "SELECT kind, ts FROM events WHERE actor=? AND kind<>'agent.standby' "
+            "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+        recent = cfg.get("standby_recent_complete_s", 900)
+        if (last_real is None or last_real["kind"] != "task.complete"
+                or _now() - last_real["ts"] > recent):
+            return {"standby": False, "reason": "not fresh off a completion"}
+        waited = _trailing_standby(conn, name)
+        if waited >= cycles:
+            _event(conn, name, "agent.standby_expired", name,
+                   "%d empty waits; going cold -- a new dispatch to this agent "
+                   "now needs a human to wake its terminal" % waited)
+            return {"standby": False, "reason": "standby budget spent",
+                    "expired": True}
+        _event(conn, name, "agent.standby", name, "wait %d/%d" % (waited + 1, cycles))
+        return {"standby": True, "cycle": waited + 1, "cycles": cycles,
+                "wait_s": cfg.get("standby_wait_s", 540)}
+    finally:
+        conn.close()
+
+
+def await_dispatch(agent, timeout_s=540, poll_s=2.0, project=None) -> dict:
+    """Block until a task is dispatched to this agent, or the timeout passes.
+
+    The command does the waiting so the model does not have to: an agent in
+    standby runs this and burns nothing while blocked. Returns the dispatched
+    task, or {"dispatched": False} on timeout -- never an error, because "no
+    work came" is a normal outcome. Heartbeats while waiting, so a waiting
+    agent reads WAITING on the board rather than decaying toward stale.
+    """
+    require_project(project)
+    conn = connect()
+    try:
+        a = _resolve_agent(conn, agent)
+        if a is None:
+            raise AgopsError("unknown agent %r -- register first" % agent)
+        name, aid = a["name"], a["agent_id"]
+        conn.execute("UPDATE agents SET status='WAITING', last_heartbeat=? "
+                     "WHERE agent_id=?", (_now(), aid))
+        deadline = _now() + max(1, timeout_s)
+        while _now() < deadline:
+            r = conn.execute("SELECT current_task FROM agents WHERE agent_id=?",
+                             (aid,)).fetchone()
+            if r and r["current_task"]:
+                return {"dispatched": True, "task": get_task(r["current_task"])}
+            conn.execute("UPDATE agents SET last_heartbeat=? WHERE agent_id=?",
+                         (_now(), aid))
+            time.sleep(poll_s)
+        conn.execute("UPDATE agents SET status='IDLE', last_heartbeat=? "
+                     "WHERE agent_id=? AND status='WAITING'", (_now(), aid))
+        return {"dispatched": False}
+    finally:
+        conn.close()
+
+
+def watch_events(since=None, timeout_s=540, poll_s=2.0, agent=None,
+                 project=None) -> dict:
+    """Block until anything new lands in the event log, or the timeout passes.
+
+    The lead's keep-alive: wake, act, watch again. Pass the returned
+    `next_since` into the next call so nothing that happened while you were
+    acting is missed; with no `since` it starts from now. Times out clean
+    (empty events, same cursor) so a quiet board costs one short turn per
+    timeout rather than a stream of polling output.
+    """
+    require_project(project)
+    conn = connect()
+    try:
+        if since is None:
+            r = conn.execute("SELECT COALESCE(MAX(id), 0) m FROM events").fetchone()
+            since = r["m"]
+        aid = None
+        if agent:
+            a = _resolve_agent(conn, agent)
+            aid = a["agent_id"] if a else None
+        deadline = _now() + max(1, timeout_s)
+        while True:
+            rows = [_row(r) for r in conn.execute(
+                "SELECT * FROM events WHERE id>? ORDER BY id", (since,))]
+            if rows:
+                return {"events": rows, "next_since": rows[-1]["id"],
+                        "timed_out": False}
+            if _now() >= deadline:
+                return {"events": [], "next_since": since, "timed_out": True}
+            if aid:
+                conn.execute("UPDATE agents SET last_heartbeat=? WHERE agent_id=?",
+                             (_now(), aid))
+            time.sleep(poll_s)
+    finally:
+        conn.close()
+
 
 def take_resource(name, agent, reason="", queue=False, project=None) -> dict:
     """Take an exclusive resource, or optionally get in line for it.

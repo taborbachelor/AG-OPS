@@ -824,6 +824,36 @@ def cmd_events(a):
                               (r["detail"] or "")[:40]) for r in rows) or "(none)")
 
 
+def cmd_watch(a):
+    """The lead's keep-alive: block until the board changes, then report."""
+    r = core.watch_events(since=a.since, timeout_s=a.timeout,
+                          agent=current_agent(a.agent), project=a.project)
+    if r["timed_out"]:
+        out(a, r, "quiet for %ds -- nothing new. Continue with: "
+                  "py tools\\agops.py watch --since %d" % (a.timeout, r["next_since"]))
+        return
+    lines = ["%-10s %-22s %-12s %s"
+             % (e["actor"] or "-", e["kind"], e["subject"] or "",
+                (e["detail"] or "")[:60]) for e in r["events"]]
+    lines.append("continue with: py tools\\agops.py watch --since %d" % r["next_since"])
+    out(a, r, "\n".join(lines))
+
+
+def cmd_await_dispatch(a):
+    who = current_agent(a.agent)
+    if not who:
+        raise AgopsError("not registered in this session -- await-dispatch is "
+                         "for registered workers")
+    r = core.await_dispatch(who, timeout_s=a.timeout, project=a.project)
+    if r["dispatched"]:
+        t = r["task"]
+        out(a, r, "DISPATCHED %s [%s]: %s\nRead it with: py tools\\agops.py "
+                  "task %s -- then proceed." % (t["task_id"], t["priority"],
+                                                t["title"], t["task_id"]))
+    else:
+        out(a, r, "no dispatch in %ds" % a.timeout)
+
+
 def cmd_doctor(a):
     """Is coordination actually working? Never lie about this."""
     report = {"db": False, "config": False, "writable": False, "project": None,
@@ -989,6 +1019,17 @@ def build_parser():
     s.add_argument("value", nargs="?"); s.add_argument("--task-id")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_admin)
+
+    s = sub.add_parser("watch", help="block until the board changes (lead keep-alive)")
+    s.add_argument("--since", type=int, help="event cursor from the previous watch")
+    s.add_argument("--timeout", type=int, default=540,
+                   help="seconds to wait before returning empty (default 540)")
+    s.set_defaults(fn=cmd_watch)
+
+    s = sub.add_parser("await-dispatch",
+                       help="block until a task is dispatched to me (standby)")
+    s.add_argument("--timeout", type=int, default=540)
+    s.set_defaults(fn=cmd_await_dispatch)
 
     s = sub.add_parser("events"); s.add_argument("--limit", type=int, default=25)
     s.set_defaults(fn=cmd_events)

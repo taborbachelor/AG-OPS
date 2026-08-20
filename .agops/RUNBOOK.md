@@ -66,6 +66,17 @@ In each session:
 Specialties only affect ranking — they never stop an agent working anywhere. Skip
 this if you already know who you want on what.
 
+## 3b. Optional: a lead session, so you don't have to dispatch by hand
+
+Open a fifth terminal from the repo and run `py tools\agops.py register --role
+lead`, then follow **`.agops/MANAGER.md`** — the standing prompt, the watch
+loop, the completion checks, and the brief it dispatches from all live there.
+A lead never takes tasks and cannot edit the product (both enforced). With a
+lead on duty, workers that finish a task wait briefly for their next dispatch
+(`await-dispatch`) instead of going cold, so a whole wave runs without you
+typing "continue" in each terminal. You talk to the lead; the lead talks to
+the workers; everything judgment-shaped still escalates to you.
+
 ## 4. Dispatch the work
 
 **Agents do not take tasks. You give them out.** From any session, or straight

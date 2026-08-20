@@ -1265,5 +1265,154 @@ class TestNameRecycling(Base):
         self.assertEqual(self._register("day2-a"), "bravo")
 
 
+class TestLeadAndDispatch(Base):
+    """The manager session: a role=lead agent that dispatches and verifies but
+    never works, plus the wake mechanics (watch / await-dispatch / standby)
+    that make it workable -- nothing can wake a stopped session, so the lead
+    lives in a blocking watch and freshly-finished workers wait in standby."""
+
+    HOOK_STOP = os.path.join(TOOLS, "agops", "hook_stop.py")
+    HOOK_GUARD = os.path.join(TOOLS, "agops", "hook_pretooluse.py")
+
+    def _hook(self, script, payload):
+        e = dict(os.environ)
+        e["AGOPS_HOME"] = _TMP
+        return subprocess.run([sys.executable, script], input=json.dumps(payload),
+                              capture_output=True, text=True, env=e, timeout=60)
+
+    def _complete(self, tid, agent):
+        core.complete_task(tid, agent,
+                           "Implemented and verified with the covering tests.",
+                           commit_hash="abc1234")
+
+    def test_a_lead_cannot_claim_or_be_assigned(self):
+        core.register_agent(session_id="s-lead", role="lead")   # alpha
+        core.create_task("real work")
+        with self.assertRaises(AgopsError):
+            core.claim_task("TASK-001", "alpha")
+        with self.assertRaises(AgopsError):
+            core.assign_task("TASK-001", "alpha")
+
+    def test_an_assignment_arrives_as_a_DISPATCH_message(self):
+        core.register_agent(session_id="s-a")                   # alpha
+        core.create_task("work")
+        core.assign_task("TASK-001", "alpha")
+        unread = core.inbox("alpha", unread_only=True, mark_read=False)
+        self.assertTrue(any(m["msg_type"] == "DISPATCH" for m in unread))
+
+    def test_await_dispatch_returns_the_assigned_task(self):
+        core.register_agent(session_id="s-a")                   # alpha
+        core.create_task("work")
+
+        def assign_later():
+            time.sleep(0.8)
+            core.assign_task("TASK-001", "alpha")
+        th = threading.Thread(target=assign_later, daemon=True)
+        th.start()
+        r = core.await_dispatch("alpha", timeout_s=10, poll_s=0.1)
+        th.join(timeout=10)      # Windows: its conn must close before teardown
+        self.assertTrue(r["dispatched"])
+        self.assertEqual(r["task"]["task_id"], "TASK-001")
+
+    def test_await_dispatch_times_out_clean(self):
+        core.register_agent(session_id="s-a")
+        r = core.await_dispatch("alpha", timeout_s=1, poll_s=0.1)
+        self.assertEqual(r, {"dispatched": False})
+
+    def test_watch_wakes_on_an_event_and_the_cursor_carries(self):
+        core.register_agent(session_id="s-a")                   # alpha
+        idle = core.watch_events(timeout_s=1, poll_s=0.1)
+        self.assertTrue(idle["timed_out"])
+        cursor = idle["next_since"]
+
+        def act_later():
+            time.sleep(0.5)
+            core.create_task("something happened")
+        th = threading.Thread(target=act_later, daemon=True)
+        th.start()
+        r = core.watch_events(since=cursor, timeout_s=10, poll_s=0.1)
+        th.join(timeout=10)      # Windows: its conn must close before teardown
+        self.assertFalse(r["timed_out"])
+        self.assertIn("task.create", [e["kind"] for e in r["events"]])
+        self.assertGreater(r["next_since"], cursor)
+        # Cursor continuity: nothing new after the cursor we were handed back.
+        again = core.watch_events(since=r["next_since"], timeout_s=1, poll_s=0.1)
+        self.assertTrue(again["timed_out"])
+
+    def _fresh_completion(self):
+        """alpha completes a task while a lead is live and more work waits."""
+        core.register_agent(session_id="s-a")                   # alpha
+        core.register_agent(session_id="s-lead", role="lead")   # bravo, lead
+        t = core.create_task("first")["task_id"]
+        core.create_task("more work waiting")
+        core.claim_task(t, "alpha")
+        self._complete(t, "alpha")
+
+    def test_standby_only_fresh_off_a_completion(self):
+        core.register_agent(session_id="s-a")
+        core.register_agent(session_id="s-lead", role="lead")
+        core.create_task("open work exists")
+        # No completion by alpha -- a session just chatting is never hijacked.
+        self.assertFalse(core.maybe_enter_standby("alpha")["standby"])
+
+    def test_standby_needs_a_live_lead(self):
+        core.register_agent(session_id="s-a")
+        t = core.create_task("first")["task_id"]
+        core.create_task("more work")
+        core.claim_task(t, "alpha")
+        self._complete(t, "alpha")
+        self.assertFalse(core.maybe_enter_standby("alpha")["standby"])
+
+    def test_standby_budget_spends_then_expires_once(self):
+        self._fresh_completion()
+        for cycle in (1, 2, 3):
+            sb = core.maybe_enter_standby("alpha")
+            self.assertTrue(sb["standby"])
+            self.assertEqual(sb["cycle"], cycle)
+        spent = core.maybe_enter_standby("alpha")
+        self.assertFalse(spent["standby"])
+        self.assertTrue(spent.get("expired"))
+        # The expired event itself ends the run: no second expiry, no re-entry.
+        self.assertFalse(core.maybe_enter_standby("alpha").get("expired", False))
+        conn = core.connect()
+        n = conn.execute("SELECT COUNT(*) c FROM events WHERE "
+                         "kind='agent.standby_expired'").fetchone()["c"]
+        conn.close()
+        self.assertEqual(n, 1)
+
+    def test_a_dispatch_blocks_the_stop_exactly_once(self):
+        core.register_agent(session_id="s-a")                   # alpha
+        core.create_task("work")
+        core.assign_task("TASK-001", "alpha")
+        first = self._hook(self.HOOK_STOP, {"session_id": "s-a"})
+        out1 = json.loads(first.stdout)
+        self.assertEqual(out1.get("decision"), "block")
+        self.assertIn("TASK-001", out1.get("reason", ""))
+        # The message is read now; a genuinely stuck agent can still stop.
+        second = self._hook(self.HOOK_STOP, {"session_id": "s-a"})
+        self.assertNotIn('"decision": "block"', second.stdout)
+
+    def test_the_stop_hook_sends_a_finished_worker_into_standby(self):
+        self._fresh_completion()
+        r = self._hook(self.HOOK_STOP, {"session_id": "s-a"})
+        o = json.loads(r.stdout)
+        self.assertEqual(o.get("decision"), "block")
+        self.assertIn("await-dispatch", o.get("reason", ""))
+
+    def test_the_guard_blocks_a_leads_product_edit_but_not_agops(self):
+        core.register_agent(session_id="s-lead", role="lead")
+        denied = self._hook(self.HOOK_GUARD, {
+            "session_id": "s-lead", "tool_name": "Edit",
+            "tool_input": {"file_path": os.path.join(REPO, "backend", "app",
+                                                     "main.py")}})
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("lead", denied.stderr)
+        allowed = self._hook(self.HOOK_GUARD, {
+            "session_id": "s-lead", "tool_name": "Edit",
+            "tool_input": {"file_path": os.path.join(REPO, ".agops",
+                                                     "MANAGER.md")}})
+        self.assertEqual(allowed.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

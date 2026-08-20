@@ -121,14 +121,40 @@ def main():
     # Who is acting, and is anybody else even here?
     conn = core.connect()
     try:
-        r = conn.execute("SELECT name FROM agents WHERE agent_id=? OR session_id=?",
-                         (session, session)).fetchone()
+        r = conn.execute("SELECT name, role FROM agents WHERE agent_id=? "
+                         "OR session_id=?", (session, session)).fetchone()
         me = r["name"] if r else None
+        role = (r["role"] or "worker") if r else "worker"
         if me:
             conn.execute("UPDATE agents SET last_heartbeat=? WHERE name=?",
                          (core._now(), me))
     finally:
         conn.close()
+
+    # The lead coordinates; it does not edit the product. Checked before the
+    # solo shortcut below, because a lead alone on the board is still a lead.
+    # Structured writes only -- shell stays best-effort advisory, per the
+    # field-notes lesson that parsing commands blocks legitimate work.
+    if role == "lead" and tool in ("Edit", "Write", "NotebookEdit", "MultiEdit"):
+        raw = ti.get("file_path") or ti.get("notebook_path") or ""
+        p = raw if os.path.isabs(raw) else os.path.join(cwd, raw)
+        p = os.path.abspath(p)
+        inside = False
+        try:
+            inside = os.path.commonpath([p, REPO]) == REPO
+        except ValueError:
+            pass
+        if inside:
+            rel_p = os.path.relpath(p, REPO).replace("\\", "/")
+            allowed = cfg.get("lead_writable", [".agops/*", ".agops/**"])
+            if not any(core._match(rel_p, pat) for pat in allowed):
+                sys.stderr.write(
+                    "BLOCKED by AgOps: you are the lead -- you coordinate, "
+                    "verify and dispatch; you do not edit the product (%s).\n"
+                    "If a file needs changing, dispatch it or message the "
+                    "owner. Genuine tooling/doc work belongs to a worker "
+                    "session or the human.\n" % rel_p)
+                return 2
 
     live = [a for a in core.list_agents(include_offline=False) if not a["stale"]]
     if len(live) < 2:

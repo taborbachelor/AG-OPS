@@ -43,7 +43,7 @@ def main():
                          (session, session)).fetchone()
         if r is None:
             return 0
-        me, cur_task = r["name"], r["current_task"]
+        me, cur_task, role = r["name"], r["current_task"], (r["role"] or "worker")
         conn.execute("UPDATE agents SET last_heartbeat=? WHERE name=?",
                      (core._now(), me))
     finally:
@@ -57,7 +57,36 @@ def main():
                         (" re %s" % m["related_task"]) if m["related_task"] else "",
                         m["content"]))
 
-    if not cur_task:
+    # A dispatch must REACH a session, not sit in its inbox: an unread DISPATCH
+    # blocks the stop so the agent proceeds with the assigned task now. The
+    # message was just marked read above, so this fires exactly once per
+    # dispatch -- an agent that then genuinely gets stuck can still stop.
+    if any(m["msg_type"] == "DISPATCH" for m in unread):
+        lines.append(
+            "You have been DISPATCHED (see the message above). Do not stop: "
+            "read the task (py tools\\agops.py task <id>) and proceed with it "
+            "now, under the normal rules. If something genuinely prevents "
+            "starting, say what and message the sender.")
+        print(json.dumps({"decision": "block", "reason": "\n".join(lines)}))
+        return 0
+
+    # Fresh off a completion with a lead on duty and work that could arrive:
+    # wait for the next dispatch instead of going cold. Every scope condition
+    # lives in maybe_enter_standby; this hook just relays its verdict.
+    if not cur_task and role != "lead":
+        sb = core.maybe_enter_standby(me)
+        if sb.get("standby"):
+            lines.append(
+                "The lead is on duty and more work may be coming. Do not stop "
+                "yet: run  py tools\\agops.py await-dispatch --timeout %d  "
+                "(standby %d/%d; run it with a tool timeout above %d s). If it "
+                "returns a DISPATCH, proceed with that task. If it returns no "
+                "dispatch, say you are standing down and end your turn."
+                % (sb["wait_s"], sb["cycle"], sb["cycles"], sb["wait_s"]))
+            print(json.dumps({"decision": "block", "reason": "\n".join(lines)}))
+            return 0
+
+    if not cur_task and role != "lead":
         nxt = core.next_tasks(agent=me, limit=3)
         if nxt:
             auto = core.load_config().get("auto_claim", False)

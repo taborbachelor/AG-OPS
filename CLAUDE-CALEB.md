@@ -113,6 +113,16 @@
 > - **Agent identity fix** (`496b0bf`) — the CLI read `CLAUDE_SESSION_ID`; Claude Code sets
 >   `CLAUDE_CODE_SESSION_ID`, so every `/agops-join` minted a ghost agent. Six appeared in one evening.
 >   **Launch sessions with `claude --session-id <uuid>`** to keep names across restarts.
+> - **The LEAD — a manager session (added 2026-08-20 pm, 126 tooling tests green).** One session,
+>   `register --role lead`, coordination only: dispatches from a written brief, verifies completions,
+>   recovers, escalates — **never takes tasks, cannot edit the product** (both enforced). Wake
+>   mechanics: the lead lives in a blocking `py tools\agops.py watch` loop (cursor-carrying, run
+>   with a >540 s tool timeout); an assignment lands as a DISPATCH message whose unread state
+>   blocks the worker's next stop; a worker fresh off a completion stands by in `await-dispatch`
+>   for up to 3×9 min (then goes cold with an `agent.standby_expired` event so the lead knows).
+>   A session merely chatting is never hijacked — standby only triggers fresh off a `task.complete`.
+>   **Protocol + the current wave's brief: `.agops/MANAGER.md`.** Knobs: `standby_*`,
+>   `lead_writable` in project.json.
 > - **Names recycle at fresh starts (added 2026-08-20 pm, 115 tooling tests green)** — the first
 >   session to register while NOBODY is live prunes every agent holding no work, so a new work
 >   session starts at `alpha` again instead of marching down the NATO list (three launch batches
