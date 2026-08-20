@@ -92,6 +92,31 @@ def test_explicit_break_alt_and_land_dir_are_carried_through():
     assert item["land_dir"] == 270.0
 
 
+def test_optional_fields_arriving_as_explicit_none_still_default():
+    """The shape the HTTP layer ACTUALLY sends -- not the one the other tests do.
+
+    Every test above passes plain dicts with the optional keys absent, which
+    `.get(key, default)` handles. `RallyCandidate.model_dump()` never omits a
+    key: an operator who left break_alt blank produces an explicit None, which
+    `.get` returns happily and `float()` then rejects. That made
+    POST /api/safety/keepouts return 500 on its own documented default path --
+    green unit tests, broken endpoint. Build the candidate through the real
+    model so the two shapes can never drift apart again.
+    """
+    from app.routers.safety import RallyCandidate
+
+    candidate = RallyCandidate(lat=FAR_CLEAR_EAST["lat"],
+                               lon=FAR_CLEAR_EAST["lon"], alt=50.0).model_dump()
+    assert candidate["break_alt"] is None, (
+        "this test is only meaningful while the model emits an explicit None")
+
+    out = onboard_rally.build_rally_items([candidate], prepare([POWERLINE]),
+                                          home=HOME)
+    assert out["points"] == 1
+    assert out["items"][0]["break_alt"] == 50.0     # defaulted to alt
+    assert out["items"][0]["land_dir"] == 0.0
+
+
 def test_point_budget_overflow_refuses_rather_than_truncates():
     candidates = [{"lat": 39.9045 + 0.001 * i, "lon": -95.7500, "alt": 50.0}
                  for i in range(3)]

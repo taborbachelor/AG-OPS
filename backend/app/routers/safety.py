@@ -10,8 +10,19 @@ router = APIRouter()
 
 # --- Geofence (ArduPlane FENCE_* params) ---
 # FENCE_TYPE is a bitmask: 1 = max altitude, 2 = circle, 4 = polygon, 8 = min alt.
-# We drive a circle + max-altitude fence (3).
+# We drive a circle + max-altitude fence (3), and the POLYGON bit on top of it.
+#
+# The polygon bit is NOT optional garnish -- it is what makes the exclusion rings
+# uploaded by POST /keepouts actually enforced. Writing a bare 3 here CLEARS it,
+# and this endpoint is the only thing in the product that sets FENCE_TYPE at all.
+# Measured against SITL 2026-08-19: fresh firmware boots FENCE_TYPE=4 (polygon)
+# with FENCE_ENABLE=0, so before this fix "enable the geofence" was the single
+# act that turned polygon enforcement OFF -- the operator switched the fence on
+# and disarmed their powerline rings in the same call. With the bit set and
+# FENCE_ENABLE=1 the flight controller prints "Polygon fence breached" and fires
+# FENCE_ACTION with no GCS attached (tests/sitl/test_scenario_linkless.py).
 FENCE_TYPE_CIRCLE_ALT = 3
+FENCE_TYPE_POLYGON = 4
 
 
 class GeofenceConfig(BaseModel):
@@ -19,6 +30,10 @@ class GeofenceConfig(BaseModel):
     radius: float = Field(300.0, gt=0, le=50000)    # m
     alt_max: float = Field(120.0, gt=0, le=10000)   # m
     action: int = Field(1, ge=0, le=6)              # 0 = report only, 1 = RTL/land
+    # Enforce the uploaded polygon exclusion rings too. Defaults ON: an operator
+    # who surveyed a powerline, pushed it to the aircraft, and then switched the
+    # fence on means for that wire to be avoided. Opt out only for a bench run.
+    polygon: bool = True
 
 
 class FailsafeConfig(BaseModel):
@@ -72,6 +87,10 @@ def get_geofence():
         "alt_max": p.get("FENCE_ALT_MAX", 120.0),
         "action": int(p.get("FENCE_ACTION", 1)),
         "type": int(p.get("FENCE_TYPE", FENCE_TYPE_CIRCLE_ALT)),
+        # Reported separately from `type` so the UI can say whether the surveyed
+        # hazard rings are ENFORCED, not just stored -- a fence the vehicle holds
+        # but does not act on is the failure this whole surface exists to prevent.
+        "polygon": bool(int(p.get("FENCE_TYPE", 0)) & FENCE_TYPE_POLYGON),
         "raw": p,
     }
 
@@ -80,7 +99,8 @@ def get_geofence():
 def set_geofence(cfg: GeofenceConfig):
     _require_connected()
     res = vehicle_manager.set_params_atomic({
-        "FENCE_TYPE": FENCE_TYPE_CIRCLE_ALT,
+        "FENCE_TYPE": FENCE_TYPE_CIRCLE_ALT | (FENCE_TYPE_POLYGON
+                                               if cfg.polygon else 0),
         "FENCE_RADIUS": cfg.radius,
         "FENCE_ALT_MAX": cfg.alt_max,
         "FENCE_ACTION": cfg.action,

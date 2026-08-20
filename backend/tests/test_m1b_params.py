@@ -260,6 +260,41 @@ class EndpointReportingTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertTrue(body["verified"])
 
+    def test_geofence_enable_keeps_polygon_enforcement_on(self):
+        """Enabling the fence must not disarm the operator's exclusion rings.
+
+        FENCE_TYPE is a bitmask (1 alt | 2 circle | 4 polygon). This endpoint is
+        the ONLY thing in the product that writes it, and it used to write a
+        bare 3 -- clearing the polygon bit that fresh firmware boots with. The
+        exclusion rings pushed by POST /keepouts stayed stored and inert, so
+        "turn the geofence on" was the act that turned powerline enforcement
+        off. Proven end to end in tests/sitl/test_scenario_linkless.py.
+        """
+        conn = FakeParamConn({
+            "FENCE_TYPE": (4, INT8), "FENCE_RADIUS": (300.0, REAL32),
+            "FENCE_ALT_MAX": (120.0, REAL32), "FENCE_ACTION": (1, INT8),
+            "FENCE_ENABLE": (0, INT8),
+        })
+        self._install(conn)
+        safety_router.set_geofence(
+            safety_router.GeofenceConfig(enable=True, radius=2500, alt_max=150,
+                                         action=1))
+        self.assertEqual(conn.store["FENCE_TYPE"][0], 7)   # alt | circle | polygon
+        self.assertEqual(safety_router.get_geofence()["polygon"], True)
+
+    def test_geofence_polygon_can_be_opted_out(self):
+        conn = FakeParamConn({
+            "FENCE_TYPE": (4, INT8), "FENCE_RADIUS": (300.0, REAL32),
+            "FENCE_ALT_MAX": (120.0, REAL32), "FENCE_ACTION": (1, INT8),
+            "FENCE_ENABLE": (0, INT8),
+        })
+        self._install(conn)
+        safety_router.set_geofence(
+            safety_router.GeofenceConfig(enable=True, radius=2500, alt_max=150,
+                                         action=1, polygon=False))
+        self.assertEqual(conn.store["FENCE_TYPE"][0], 3)
+        self.assertEqual(safety_router.get_geofence()["polygon"], False)
+
     def test_geofence_unverified_raises_502(self):
         conn = FakeParamConn(
             {"FENCE_TYPE": (0, INT8), "FENCE_RADIUS": (300.0, REAL32),

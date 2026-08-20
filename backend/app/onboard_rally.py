@@ -146,12 +146,20 @@ def build_rally_items(candidates: list[dict], prepared: dict, home: dict | None,
             continue
 
         alt = float(c["alt"])
+        # An omitted optional arrives in TWO shapes and both must mean "default".
+        # Unit callers pass plain dicts with the key absent, which `.get(k, d)`
+        # handles. The HTTP path does not: `RallyCandidate.model_dump()` ALWAYS
+        # emits the key, carrying None when the operator omitted it -- so `.get`
+        # returns that None, float(None) raises, and POST /api/safety/keepouts
+        # 500s on its own documented default. Measured 2026-08-19 against SITL.
+        break_alt = c.get("break_alt")
+        land_dir = c.get("land_dir")
         items.append({
             "command": NAV_RALLY_POINT,
             "lat": pt["lat"], "lon": pt["lon"],
             "alt": alt,
-            "break_alt": float(c.get("break_alt", alt)),
-            "land_dir": float(c.get("land_dir", 0.0)),
+            "break_alt": alt if break_alt is None else float(break_alt),
+            "land_dir": 0.0 if land_dir is None else float(land_dir),
         })
 
     if refused:
