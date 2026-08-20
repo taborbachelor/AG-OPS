@@ -211,3 +211,58 @@ def test_snapshot_reports_coverage_and_counters(service):
     assert snap["grid_spacing_m"] == 100
     assert "N39W096" in snap["tiles"]
     assert snap["requests"] == 1 and snap["grids_sent"] == 3
+
+
+def test_terrain_is_not_served_while_the_gcs_is_off_the_air():
+    """A dead link is dead in BOTH directions.
+
+    The `gcs_link` fault silences our heartbeat so the vehicle declares a GCS
+    failsafe. If TERRAIN_DATA kept flowing over that same radio it would model a
+    link that cannot exist -- and, worse, let a scenario claim the aircraft flew
+    a terrain-following leg on its own cached tiles while the GCS was quietly
+    feeding it. Measured live 2026-08-20: 280 grids were served AFTER the link
+    was 'cut' before this was fixed.
+
+    Asserted at the vehicle_manager seam rather than in TerrainService, because
+    the service is deliberately unaware of the link -- the suppression belongs
+    where the sending happens.
+    """
+    from app.vehicle_manager import VehicleManager
+
+    sent = []
+
+    class FakeMav:
+        def terrain_data_send(self, *a, **k):
+            sent.append(a)
+
+    class FakeConn:
+        target_system = 1
+        target_component = 1
+        mav = FakeMav()
+
+    class FakeMsg:
+        lat, lon, grid_spacing, mask = 399000000, -958000000, 100, 0b1
+
+    vm = VehicleManager()
+    vm.connection = FakeConn()
+
+    served_calls = []
+    vm._terrain.serve = lambda *a, **k: (served_calls.append(a) or [
+        {"lat": a[0], "lon": a[1], "grid_spacing": 100, "gridbit": 0,
+         "data": [0] * 16}])
+
+    vm._serve_terrain_request(FakeMsg())
+    assert len(sent) == 1, "terrain should be served on a healthy link"
+
+    vm.set_gcs_heartbeat_suppressed(True)
+    vm._serve_terrain_request(FakeMsg())
+    assert len(sent) == 1, (
+        "TERRAIN_DATA was transmitted while the GCS was off the air -- the "
+        "aircraft is being fed over a link the test believes is dead")
+    assert len(served_calls) == 1, (
+        "the service was still consulted while suppressed; counters would move "
+        "and a scenario could not tell served-nothing from served-something")
+
+    vm.set_gcs_heartbeat_suppressed(False)
+    vm._serve_terrain_request(FakeMsg())
+    assert len(sent) == 2, "terrain must resume when the link comes back"

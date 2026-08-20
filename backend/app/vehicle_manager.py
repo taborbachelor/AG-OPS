@@ -878,11 +878,19 @@ class VehicleManager:
             return dict(self._guardian)
 
     def set_gcs_heartbeat_suppressed(self, suppressed: bool):
-        """M4 fault injection: silence/restore our 1Hz GCS heartbeat. With
-        FS_GCS_ENABL set on the vehicle, suppression reproduces a ground-station
-        loss exactly (FS_SHORT/FS_LONG escalate to RTL) while our receive path
-        stays up so the harness can watch the vehicle react. Never persists
-        across connections — connect() clears it."""
+        """M4 fault injection: take our GCS off the air, and put it back.
+
+        Silences everything the VEHICLE depends on us transmitting — the 1 Hz
+        heartbeat and the TERRAIN_DATA we serve (see _serve_terrain_request).
+        Both, because a radio that has stopped carrying one has stopped
+        carrying the other; suppressing only the heartbeat models a half-dead
+        link that cannot happen and lets a scenario credit the aircraft with
+        flying on cached terrain we were in fact still feeding it.
+
+        With FS_GCS_ENABL set on the vehicle this reproduces a ground-station
+        loss exactly (FS_SHORT/FS_LONG escalate to RTL) while our RECEIVE path
+        stays up, so the harness can still watch the vehicle react. Never
+        persists across connections — connect() clears it."""
         if self._suppress_gcs_hb == bool(suppressed):
             return
         self._suppress_gcs_hb = bool(suppressed)
@@ -1182,6 +1190,16 @@ class VehicleManager:
         """
         conn = self.connection
         if conn is None:
+            return
+        if self._suppress_gcs_hb:
+            # A ground station that is off the air does not answer terrain
+            # requests either. Without this, the `gcs_link` fault models a link
+            # that cannot exist: heartbeat gone (so the vehicle declares GCS
+            # failsafe) while our TERRAIN_DATA keeps flowing over that same dead
+            # radio. Measured 2026-08-20 — a terrain scenario that cut the link
+            # was still served 280 grids mid-leg, so "it flew on its own cached
+            # terrain" would have been an unearned claim. Deliberately silent
+            # and counter-free: the aircraft must see exactly nothing.
             return
         try:
             payloads = self._terrain.serve(

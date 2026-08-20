@@ -11,6 +11,7 @@
 #   .\scenarios.ps1 bank-angle      # guardian bank-angle monitor, live
 #   .\scenarios.ps1 keepout-prox    # live keepout/hazard proximity
 #   .\scenarios.ps1 linkless        # fence + rally enforced with the link cut
+#   .\scenarios.ps1 terrain         # terrain following at spray alt, link cut
 #   .\scenarios.ps1 all             # full scenario suite (~10-20 min)
 # Each scenario spawns the bundled SITL itself — close any hand-started SITL first.
 #
@@ -23,7 +24,7 @@ param(
     [ValidateSet("field-test", "link-loss", "gps-failure", "battery-fault",
                  "rtl-recovery", "link-watchdog", "guardian", "preflight",
                  "ekf-variance", "airspeed-stall", "bank-angle",
-                 "keepout-prox", "linkless",
+                 "keepout-prox", "linkless", "terrain",
                  "bench", "soak", "all")]
     [string]$Scenario,
 
@@ -53,6 +54,7 @@ $map = @{
     "bank-angle"     = "tests\sitl\test_scenario_bank_angle.py"
     "keepout-prox"   = "tests\sitl\test_scenario_keepout_proximity.py"
     "linkless"       = "tests\sitl\test_scenario_linkless.py"
+    "terrain"        = "tests\sitl\test_scenario_terrain.py"
     "preflight"     = "tests\sitl\test_scenario_preflight.py"
     "bench"         = "tests\sitl\test_scenario_bench.py"
     "soak"          = "tests\sitl\test_scenario_soak.py"

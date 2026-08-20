@@ -13,7 +13,9 @@ M4 additions for the scenario harness:
   - POST /fault injects/clears faults on the running vehicle:
       gps       -> SIM_GPS1_ENABLE=0 (4.5+ name) or SIM_GPS_DISABLE=1 (legacy)
       battery   -> SIM_BATT_VOLTAGE sagged to `value` (restored on clear)
-      gcs_link  -> suppress our own 1Hz GCS heartbeat (vehicle sees GCS loss)
+      gcs_link  -> take our GCS off the air: the 1Hz heartbeat AND the
+                   TERRAIN_DATA we serve (vehicle sees GCS loss). Our RECEIVE
+                   path stays up so a scenario can still watch it react.
       gps_noise -> SIM_GPS1_HNSE raised: the position solution degrades while
                    the EKF flags stay HEALTHY, which is the only way to drive
                    the guardian's EKF *variance* monitor (the plain `gps`
@@ -33,6 +35,7 @@ Ports: SITL_INSTANCE (app.config) selects which instance this process owns;
 SITL_PORT is derived from it and reported by /status, so nothing else has to
 hardcode 5760. Default 0 is exactly the historical behaviour.
 """
+import shutil
 import subprocess
 import sys
 import time
@@ -156,24 +159,39 @@ def _build_args(speedup: float) -> list[str]:
             "-I", str(SITL_INSTANCE)]
 
 
-def _resolve_cwd(exe: Path, fresh_eeprom: bool) -> Path:
+def _resolve_cwd(exe: Path, fresh_eeprom: bool,
+                 fresh_terrain: bool = False) -> Path:
     """Working dir for the SITL process (it reads/writes eeprom.bin in cwd).
 
     Normal runs use the binary's own dir (persistent demo eeprom + terrain).
     fresh_eeprom runs use an isolated scratch subdir with any previous
     eeprom.bin deleted, so the vehicle boots with pure firmware defaults and
     scenario runs are deterministic — and the demo eeprom is never touched.
+
+    `fresh_terrain` additionally deletes ArduPilot's OWN terrain cache. It is
+    separate from fresh_eeprom, and off by default, for two reasons that pull
+    opposite ways. It has to exist at all because ArduPilot persists terrain to
+    `cwd/terrain/` and reloads it on the next boot: a terrain scenario that does
+    not clear it is measuring a cache some EARLIER run filled, and would pass
+    with our TERRAIN_DATA service completely broken (a real 2.9 MB N39W096.DAT
+    was sitting there when this was written). It must not be automatic, because
+    re-fetching costs real wall time — ArduPilot self-limits to one block per
+    2 s per link — and only a scenario actually testing terrain should pay it.
     """
-    if not fresh_eeprom:
-        return exe.parent
-    scratch = exe.parent / SCENARIO_DIR_NAME
-    scratch.mkdir(exist_ok=True)
-    for leftover in ("eeprom.bin",):
-        try:
-            (scratch / leftover).unlink(missing_ok=True)
-        except OSError:
-            pass
-    return scratch
+    cwd = exe.parent
+    if fresh_eeprom:
+        cwd = exe.parent / SCENARIO_DIR_NAME
+        cwd.mkdir(exist_ok=True)
+        for leftover in ("eeprom.bin",):
+            try:
+                (cwd / leftover).unlink(missing_ok=True)
+            except OSError:
+                pass
+    if fresh_terrain:
+        # ignore_errors: a cache that was never created, or one Windows still
+        # holds a handle on, must not take the whole sim start down with it.
+        shutil.rmtree(cwd / "terrain", ignore_errors=True)
+    return cwd
 
 
 def _port_listening(port: int | None = None) -> bool:
@@ -266,6 +284,10 @@ class SimStartRequest(BaseModel):
     # a typo can't outrun the physics loop.
     speedup: float = Field(1.0, ge=0.5, le=20)
     fresh_eeprom: bool = False
+    # Delete ArduPilot's own on-disk terrain cache before boot, forcing it to
+    # re-request every block from us. Only a scenario proving the TERRAIN_DATA
+    # service needs this; see _resolve_cwd for why it is not automatic.
+    fresh_terrain: bool = False
 
 
 def _start_blocking(req: SimStartRequest) -> dict:
@@ -278,7 +300,7 @@ def _start_blocking(req: SimStartRequest) -> dict:
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     _proc = subprocess.Popen(
         [str(exe), *_build_args(req.speedup)],
-        cwd=_resolve_cwd(exe, req.fresh_eeprom),
+        cwd=_resolve_cwd(exe, req.fresh_eeprom, req.fresh_terrain),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=flags,

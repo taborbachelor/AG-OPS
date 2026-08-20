@@ -88,6 +88,44 @@ class TestSimSpawnConfig(unittest.TestCase):
             self.assertEqual(demo_eeprom.read_bytes(), b"demo state",
                              "demo eeprom next to the binary must never be touched")
 
+    def test_fresh_eeprom_alone_leaves_the_terrain_cache_alone(self):
+        """The trap this pair exists for: ArduPilot persists terrain to
+        cwd/terrain/ and reloads it next boot, so a terrain scenario that only
+        asks for fresh_eeprom measures whatever an EARLIER run cached and passes
+        with the TERRAIN_DATA service completely broken. A real 2.9 MB
+        N39W096.DAT was sitting in sitl/_scenario/terrain/ when this was
+        written. Clearing it is opt-in because re-fetching is rate-limited by
+        ArduPilot to one block per 2 s, and only a terrain test should pay it."""
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            exe = pathlib.Path(td) / "ArduPlane.exe"
+            exe.write_bytes(b"")
+            scratch = exe.parent / sim.SCENARIO_DIR_NAME
+            (scratch / "terrain").mkdir(parents=True)
+            cached = scratch / "terrain" / "N39W096.DAT"
+            cached.write_bytes(b"stale tiles")
+
+            sim._resolve_cwd(exe, fresh_eeprom=True)
+            self.assertTrue(cached.exists(),
+                            "fresh_eeprom must not silently pay the terrain "
+                            "re-fetch cost for every scenario")
+
+            sim._resolve_cwd(exe, fresh_eeprom=True, fresh_terrain=True)
+            self.assertFalse(cached.exists(),
+                             "fresh_terrain must delete ArduPilot's own cache, "
+                             "or the terrain scenario proves nothing")
+
+    def test_fresh_terrain_defaults_off_and_survives_a_missing_cache(self):
+        import pathlib
+        import tempfile
+        self.assertFalse(sim.SimStartRequest().fresh_terrain)
+        with tempfile.TemporaryDirectory() as td:
+            exe = pathlib.Path(td) / "ArduPlane.exe"
+            exe.write_bytes(b"")
+            # No terrain dir at all: must not take sim start down with it.
+            sim._resolve_cwd(exe, fresh_eeprom=True, fresh_terrain=True)
+
 
 class TestSitlInstanceConfig(unittest.TestCase):
     """SITL_INSTANCE is what lets two sessions run the scenario suite at once.

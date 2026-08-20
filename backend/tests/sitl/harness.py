@@ -64,9 +64,16 @@ def wait_for(client, pred, timeout: float, what: str, interval: float = 0.5) -> 
         f"last telemetry: {_trim(last) if last else None}")
 
 
-def start_sim(client, speedup: float = 1.0, fresh_eeprom: bool = True) -> dict:
+def start_sim(client, speedup: float = 1.0, fresh_eeprom: bool = True,
+              fresh_terrain: bool = False) -> dict:
+    """`fresh_terrain` also deletes ArduPilot's own on-disk terrain cache, which
+    fresh_eeprom does NOT — it persists in cwd/terrain/ and is reloaded on the
+    next boot. A terrain scenario that skips this measures whatever an earlier
+    run left there and passes with the TERRAIN_DATA service broken. Off by
+    default because re-fetching is rate-limited to one block per 2 s."""
     r = client.post("/api/sim/start",
-                    json={"speedup": speedup, "fresh_eeprom": fresh_eeprom})
+                    json={"speedup": speedup, "fresh_eeprom": fresh_eeprom,
+                          "fresh_terrain": fresh_terrain})
     assert r.status_code == 200, f"sim start failed: {r.status_code} {r.text}"
     return r.json()
 
@@ -126,11 +133,12 @@ def disconnect(client):
 
 
 def launch(client, speedup: float = 1.0, fresh_eeprom: bool = True,
-           ready_timeout: float = 120.0) -> dict:
+           ready_timeout: float = 120.0, fresh_terrain: bool = False) -> dict:
     """Spawn SITL, connect the GCS link, and wait until the vehicle is actually
     flight-ready (3D fix + healthy EKF + home known). Returns the ready
     snapshot. This is the standard scenario preamble."""
-    start_sim(client, speedup=speedup, fresh_eeprom=fresh_eeprom)
+    start_sim(client, speedup=speedup, fresh_eeprom=fresh_eeprom,
+              fresh_terrain=fresh_terrain)
     connect(client)
     return wait_flight_ready(client, timeout=ready_timeout)
 
