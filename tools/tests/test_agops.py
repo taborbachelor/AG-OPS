@@ -1009,6 +1009,73 @@ class TestGracefulDegradation(Base):
                           "%s did not fail open (rc=%d)" % (hook, p.returncode))
 
 
+class TestStatusLine(Base):
+    """The prompt line each agent sees. Its whole value is the unread badge.
+
+    First version counted messages.read_at, which nothing sets -- read state is
+    per RECIPIENT in message_reads, so a broadcast one agent reads stays unread
+    for the others. The badge could only ever grow, and a permanently alarming
+    red number is one people stop seeing.
+    """
+
+    SCRIPT = os.path.join(TOOLS, "agops", "statusline.py")
+
+    def _line(self, session):
+        p = subprocess.run([sys.executable, self.SCRIPT],
+                           input=json.dumps({"session_id": session}),
+                           capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, AGOPS_HOME=_TMP, NO_COLOR="1"))
+        return p.stdout
+
+    def test_the_unread_badge_clears_when_the_agent_reads(self):
+        core.register_agent(session_id="s-a", name="alpha")
+        core.register_agent(session_id="s-b", name="bravo")
+        core.send_message("bravo", "alpha", "the harness signature changed")
+        self.assertIn("1 unread", self._line("s-a"))
+        core.inbox("alpha")
+        self.assertNotIn("unread", self._line("s-a"))
+
+    def test_one_agent_reading_a_broadcast_does_not_clear_it_for_another(self):
+        core.register_agent(session_id="s-a", name="alpha")
+        core.register_agent(session_id="s-b", name="bravo")
+        core.register_agent(session_id="s-c", name="charlie")
+        core.send_message("alpha", "ALL", "mission schema v2 lands today")
+        core.inbox("bravo")
+        self.assertNotIn("unread", self._line("s-b"))
+        self.assertIn("1 unread", self._line("s-c"))
+
+    def test_it_names_the_agent_and_its_task(self):
+        core.register_agent(session_id="s-a", name="alpha")
+        core.create_task("Bundle SRTM terrain tiles")
+        core.claim_task("TASK-001", "alpha")
+        line = self._line("s-a")
+        self.assertIn("alpha", line)
+        self.assertIn("TASK-001", line)
+
+    def test_an_agent_holding_no_task_is_told_so(self):
+        """Editing with no task held is the state rule 1 exists to prevent, and
+        nothing else surfaces it in the agent's own window."""
+        core.register_agent(session_id="s-a", name="alpha")
+        core.heartbeat("alpha", status="WORKING")
+        self.assertIn("OFF-BOARD", self._line("s-a"))
+
+    def test_it_prints_nothing_rather_than_breaking_the_prompt(self):
+        for payload in ("", "not json", "{}", '{"session_id":"nobody"}'):
+            p = subprocess.run([sys.executable, self.SCRIPT], input=payload,
+                               capture_output=True, text=True, timeout=60,
+                               env=dict(os.environ, AGOPS_HOME=_TMP))
+            self.assertEqual(p.returncode, 0, payload)
+
+    def test_it_never_writes_to_the_board(self):
+        """A prompt render is not evidence of liveness. Heartbeating from here
+        would make an abandoned terminal look busy until the offline timeout."""
+        core.register_agent(session_id="s-a", name="alpha")
+        before = [a["last_heartbeat"] for a in core.list_agents()]
+        time.sleep(0.05)
+        self._line("s-a")
+        self.assertEqual([a["last_heartbeat"] for a in core.list_agents()], before)
+
+
 class TestSharedIndexGuard(Base):
     """One working tree means one git index.
 

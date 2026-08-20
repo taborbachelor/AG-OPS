@@ -37,8 +37,12 @@ def paint(s, *names):
 
 
 def build(payload):
-    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    db = os.path.join(here, ".agops", "agops.db")
+    # Same resolution as core.AGOPS_DIR. Reading the repo path unconditionally
+    # would make a sandboxed session render the live team's board -- and made
+    # this file untestable, since the suite relocates state with AGOPS_HOME.
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    home = os.environ.get("AGOPS_HOME") or os.path.join(repo, ".agops")
+    db = os.path.join(home, "agops.db")
     if not os.path.exists(db):
         return ""
 
@@ -57,10 +61,17 @@ def build(payload):
         name, status, task = me["name"], me["status"], me["current_task"]
         bits = [paint(name, "bold", "cyn")]
 
+        # Read state is per RECIPIENT, in message_reads -- a broadcast one agent
+        # reads stays unread for everyone else. messages.read_at is not what
+        # tracks it, and counting that instead produced a number that could only
+        # ever grow: a permanently alarming red badge is one you stop seeing,
+        # which defeats the only thing this line is really for.
         unread = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE read_at IS NULL "
-            "AND (recipient=? OR recipient='ALL') AND sender<>?",
-            (name, name)).fetchone()[0]
+            "SELECT COUNT(*) FROM messages "
+            "WHERE (recipient=? OR (recipient='ALL' AND sender<>?)) "
+            "AND NOT EXISTS (SELECT 1 FROM message_reads r "
+            "                WHERE r.message_id = messages.id AND r.agent = ?)",
+            (name, name, name)).fetchone()[0]
         if unread:
             bits.append(paint("%d unread" % unread, "bold", "red"))
 
